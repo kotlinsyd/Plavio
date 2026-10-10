@@ -16,8 +16,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -27,10 +25,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -67,13 +65,6 @@ class HomeCatalogsViewModel(private val repo: StreamRepository) : ViewModel() {
         }
     }
 
-    fun toggleStar(addon: InstalledAddon) {
-        viewModelScope.launch {
-            repo.setAddonStarred(addon.id, !addon.starred)
-            refresh()
-        }
-    }
-
     fun moveUp(addon: InstalledAddon) {
         val list = addons
         val idx = list.indexOfFirst { it.id == addon.id }
@@ -95,7 +86,7 @@ class HomeCatalogsViewModel(private val repo: StreamRepository) : ViewModel() {
 
 /**
  * Dedicated screen for everything about Home catalogs: which addon
- * catalogs appear on Home, their order, and stream priority (star).
+ * catalogs appear on Home, their order, and metadata source priority.
  * Opened from Settings via the single "Home catalogs" row.
  */
 @Composable
@@ -131,8 +122,8 @@ fun HomeCatalogsScreen(
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Choose which addons show their catalogs on the Home screen, " +
-                            "arrange their order, and star addons for stream priority.",
+                        "Choose which addons show their catalogs on the Home screen " +
+                            "and arrange their order.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
                         modifier = Modifier.padding(start = 56.dp, end = 8.dp)
@@ -153,13 +144,24 @@ fun HomeCatalogsScreen(
                     HomeCatalogRow(
                         addon = addon,
                         onToggle = { vm.setShowOnHome(addon, it) },
-                        onStar = { vm.toggleStar(addon) },
                         onUp = { vm.moveUp(addon) },
                         onDown = { vm.moveDown(addon) },
                         canUp = idx > 0,
                         canDown = idx < addons.size - 1
                     )
                 }
+            }
+
+            item(key = "default_note") {
+                Text(
+                    "PlavioMeta is the default catalog for Home. " +
+                        "To disable it, simply toggle it off.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 12.dp)
+                )
             }
         }
     }
@@ -169,7 +171,6 @@ fun HomeCatalogsScreen(
 private fun HomeCatalogRow(
     addon: InstalledAddon,
     onToggle: (Boolean) -> Unit,
-    onStar: () -> Unit,
     onUp: () -> Unit,
     onDown: () -> Unit,
     canUp: Boolean,
@@ -197,14 +198,6 @@ private fun HomeCatalogRow(
                     if (addon.showOnHome) "Showing on Home" else "Hidden from Home",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
-                )
-            }
-            IconButton(onClick = onStar, modifier = Modifier.size(40.dp)) {
-                Icon(
-                    if (addon.starred) Icons.Filled.Star else Icons.Outlined.Star,
-                    contentDescription = if (addon.starred) "Remove priority" else "Star for priority",
-                    tint = if (addon.starred) Color(0xFFFBBF24) else TextSecondary,
-                    modifier = Modifier.size(22.dp)
                 )
             }
             IconButton(onClick = onUp, enabled = canUp, modifier = Modifier.size(40.dp)) {

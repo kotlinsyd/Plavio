@@ -63,7 +63,6 @@ import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.LoadingState
 import com.pulsestream.app.ui.components.PosterCard
 import com.pulsestream.app.ui.components.DotsLoader
-import com.pulsestream.app.ui.components.NetworkDot
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.ui.components.SectionTitle
 import com.pulsestream.app.ui.theme.LocalPalette
@@ -86,17 +85,22 @@ class HomeViewModel(private val repo: StreamRepository) : ViewModel() {
 
     /**
      * Cache-first loading: show cached catalogs instantly, then quietly
-     * refresh in the background. [forceRefresh] skips the cache.
+     * refresh in the background — but only when the cache is stale (the
+     * splash warm-up may have just refreshed it). [forceRefresh] skips
+     * the cache entirely.
      */
     fun load(forceRefresh: Boolean = false) {
         viewModelScope.launch {
             if (!forceRefresh) {
                 val cached = repo.loadCatalogRowsCached()
                 if (cached.isNotEmpty()) {
-                    uiState = HomeUiState.Content(cached, refreshing = true)
-                    runCatching { repo.refreshCatalogRows() }
-                        .onSuccess { uiState = HomeUiState.Content(it) }
-                        .onFailure { uiState = HomeUiState.Content(cached) }
+                    val stale = !repo.isCatalogCacheFresh()
+                    uiState = HomeUiState.Content(cached, refreshing = stale)
+                    if (stale) {
+                        runCatching { repo.refreshCatalogRows() }
+                            .onSuccess { uiState = HomeUiState.Content(it) }
+                            .onFailure { uiState = HomeUiState.Content(cached) }
+                    }
                     return@launch
                 }
             }
@@ -158,17 +162,13 @@ fun HomeScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "Plavio",
-                            style = MaterialTheme.typography.headlineLarge.copy(
-                                fontWeight = FontWeight.Black,
-                                brush = LocalPalette.current.gradient
-                            )
+                    Text(
+                        text = "Plavio",
+                        style = MaterialTheme.typography.headlineLarge.copy(
+                            fontWeight = FontWeight.Black,
+                            brush = LocalPalette.current.gradient
                         )
-                        Spacer(Modifier.width(10.dp))
-                        NetworkDot()
-                    }
+                    )
                     Text(
                         text = "Your streaming universe",
                         style = MaterialTheme.typography.bodySmall,
@@ -297,7 +297,12 @@ fun HomeScreen(
                             item(key = "${row.addonId}|${row.type}|${row.catalogId}") {
                                 SectionTitle(
                                     row.catalogName,
-                                    row.addonName,
+                                    // Don't repeat the addon name when the catalog name
+                                    // already starts with it ("PlavioMeta: Trending
+                                    // Movies" + "PlavioMeta" looks broken).
+                                    row.addonName.takeIf {
+                                        !row.catalogName.startsWith(it, ignoreCase = true)
+                                    },
                                     onMoreClick = { onOpenCatalog(row) }
                                 )
                                 LazyRow(
