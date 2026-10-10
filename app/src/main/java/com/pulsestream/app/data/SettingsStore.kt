@@ -56,6 +56,35 @@ class SettingsStore(context: Context) {
             else prefs.edit().putString(KEY_SIMKL_USERNAME, value).apply()
         }
 
+    /** Trakt access token (null = not linked). */
+    var traktAccessToken: String?
+        get() = prefs.getString(KEY_TRAKT_TOKEN, null)
+        set(value) {
+            if (value == null) prefs.edit().remove(KEY_TRAKT_TOKEN).apply()
+            else prefs.edit().putString(KEY_TRAKT_TOKEN, value).apply()
+        }
+
+    /** Trakt refresh token. */
+    var traktRefreshToken: String?
+        get() = prefs.getString(KEY_TRAKT_REFRESH, null)
+        set(value) {
+            if (value == null) prefs.edit().remove(KEY_TRAKT_REFRESH).apply()
+            else prefs.edit().putString(KEY_TRAKT_REFRESH, value).apply()
+        }
+
+    /** Epoch millis when the Trakt access token should be refreshed. */
+    var traktTokenExpiry: Long
+        get() = prefs.getLong(KEY_TRAKT_EXPIRY, 0L)
+        set(value) = prefs.edit().putLong(KEY_TRAKT_EXPIRY, value).apply()
+
+    /** Trakt display name for the linked account. */
+    var traktUsername: String?
+        get() = prefs.getString(KEY_TRAKT_USERNAME, null)
+        set(value) {
+            if (value == null) prefs.edit().remove(KEY_TRAKT_USERNAME).apply()
+            else prefs.edit().putString(KEY_TRAKT_USERNAME, value).apply()
+        }
+
     /** Accent color theme name (see AccentTheme). */
     var accentName: String
         get() = prefs.getString(KEY_ACCENT, AccentTheme.PULSE.name) ?: AccentTheme.PULSE.name
@@ -75,5 +104,9 @@ class SettingsStore(context: Context) {
         private const val KEY_PREINSTALL_PREFIX = "preinstall_done_"
         private const val KEY_SIMKL_TOKEN = "simkl_token"
         private const val KEY_SIMKL_USERNAME = "simkl_username"
+        private const val KEY_TRAKT_TOKEN = "trakt_access_token"
+        private const val KEY_TRAKT_REFRESH = "trakt_refresh_token"
+        private const val KEY_TRAKT_EXPIRY = "trakt_token_expiry"
+        private const val KEY_TRAKT_USERNAME = "trakt_username"
     }
 }
