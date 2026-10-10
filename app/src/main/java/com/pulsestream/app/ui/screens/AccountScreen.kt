@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -21,8 +22,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -40,6 +43,8 @@ import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.simkl.SimklApi
 import com.pulsestream.app.data.simkl.SimklManager
+import com.pulsestream.app.data.trakt.TraktApi
+import com.pulsestream.app.data.trakt.TraktManager
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.TextPrimary
@@ -64,6 +69,51 @@ fun AccountScreen(
     var deviceData by remember { mutableStateOf<SimklApi.DeviceData?>(null) }
     var pinError by remember { mutableStateOf<String?>(null) }
     var showLogoutDialog by remember { mutableStateOf(false) }
+
+    // ---- Trakt ----
+    val trakt = remember { TraktManager(settings) }
+    var traktTick by remember { mutableIntStateOf(0) }
+    var showTraktDialog by remember { mutableStateOf(false) }
+    var traktPkce by remember { mutableStateOf<TraktApi.Pkce?>(null) }
+    var traktCode by remember { mutableStateOf("") }
+    var traktError by remember { mutableStateOf<String?>(null) }
+    var traktBusy by remember { mutableStateOf(false) }
+    var showTraktLogoutDialog by remember { mutableStateOf(false) }
+
+    fun startTraktLogin() {
+        traktError = null
+        traktCode = ""
+        traktBusy = false
+        val pkce = trakt.newPkce()
+        traktPkce = pkce
+        showTraktDialog = true
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(trakt.authorizeUrl(pkce)))
+        )
+    }
+
+    fun submitTraktCode() {
+        val pkce = traktPkce ?: return
+        val code = traktCode.trim()
+        if (code.isEmpty()) {
+            traktError = "Paste the code shown on the Trakt page."
+            return
+        }
+        traktBusy = true
+        traktError = null
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) { trakt.loginWithCode(code, pkce.verifier) }
+            traktBusy = false
+            if (ok) {
+                traktTick++
+                showTraktDialog = false
+                traktPkce = null
+                traktCode = ""
+            } else {
+                traktError = "That code didn't work. Try linking again."
+            }
+        }
+    }
 
     fun startPinLogin() {
         pinError = null
@@ -143,12 +193,30 @@ fun AccountScreen(
                 }
             }
             item(key = "trakt") {
+                val linked = remember(traktTick) { trakt.isLoggedIn }
+                val linkedName = remember(traktTick) { trakt.username }
                 SettingsStaticRow(
                     icon = Icons.Filled.Sync,
                     title = "Trakt",
-                    subtitle = "Sync watched history and progress",
-                    trailing = { ComingSoonChip() },
-                    dimmed = true
+                    subtitle = if (linked) "Linked as ${linkedName ?: "Trakt user"}"
+                               else "Sync watched history and progress",
+                    trailing = {
+                        if (linked) {
+                            Text(
+                                "Linked",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = LocalPalette.current.accent
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.ChevronRight,
+                                contentDescription = "Link Trakt",
+                                tint = TextSecondary
+                            )
+                        }
+                    },
+                    onClick = { if (linked) showTraktLogoutDialog = true else startTraktLogin() }
                 )
             }
             item(key = "simkl") {
@@ -226,4 +294,117 @@ fun AccountScreen(
             containerColor = Color(0xFF14141F)
         )
     }
+
+    if (showTraktDialog) {
+        TraktCodeDialog(
+            code = traktCode,
+            onCodeChange = { traktCode = it },
+            error = traktError,
+            busy = traktBusy,
+            onReopen = { traktPkce?.let { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(trakt.authorizeUrl(it)))) } },
+            onSubmit = { submitTraktCode() },
+            onDismiss = {
+                showTraktDialog = false
+                traktPkce = null
+                traktCode = ""
+                traktError = null
+            }
+        )
+    }
+
+    if (showTraktLogoutDialog) {
+        AlertDialog(
+            onDismissRequest = { showTraktLogoutDialog = false },
+            title = { Text("Unlink Trakt?", color = TextPrimary) },
+            text = {
+                Text(
+                    "Plavio will stop syncing your watched history to Trakt.",
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    trakt.logout()
+                    traktTick++
+                    showTraktLogoutDialog = false
+                }) { Text("Unlink", color = LocalPalette.current.accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTraktLogoutDialog = false }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = Color(0xFF14141F)
+        )
+    }
+}
+
+/** Dialog for pasting the Trakt authorization code shown on the callback page. */
+@Composable
+fun TraktCodeDialog(
+    code: String,
+    onCodeChange: (String) -> Unit,
+    error: String?,
+    busy: Boolean,
+    onReopen: () -> Unit,
+    onSubmit: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Link Trakt", color = TextPrimary) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "Approve Plavio in the browser, then paste the code shown on the page below.",
+                    color = TextSecondary,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = onCodeChange,
+                    label = { Text("Trakt code") },
+                    singleLine = true,
+                    enabled = !busy,
+                    colors = TextFieldDefaults.colors(
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        focusedLabelColor = LocalPalette.current.accent,
+                        unfocusedLabelColor = TextSecondary,
+                        focusedIndicatorColor = LocalPalette.current.accent,
+                        unfocusedIndicatorColor = TextSecondary
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (error != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(error, color = Color(0xFFF87171), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                }
+                if (busy) {
+                    Spacer(Modifier.height(12.dp))
+                    Text("Linking…", color = TextSecondary)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onSubmit, enabled = !busy) {
+                Text("Link", color = LocalPalette.current.accent)
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onReopen) {
+                    Text("Reopen page", color = TextSecondary)
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            }
+        },
+        containerColor = Color(0xFF14141F)
+    )
 }
