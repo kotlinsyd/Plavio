@@ -12,6 +12,84 @@ val ASPECT_MODES: List<Pair<Int, String>> = listOf(
     AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "Zoom"
 )
 
+/**
+ * Curated subtitle language options offered in the picker
+ * (ISO 639-1 code to display name), sorted alphabetically.
+ */
+val SUBTITLE_LANGUAGE_OPTIONS: List<Pair<String, String>> = listOf(
+    "en" to "English",
+    "ar" to "Arabic",
+    "bn" to "Bengali",
+    "bs" to "Bosnian",
+    "bg" to "Bulgarian",
+    "zh" to "Chinese",
+    "hr" to "Croatian",
+    "cs" to "Czech",
+    "da" to "Danish",
+    "nl" to "Dutch",
+    "fi" to "Finnish",
+    "fr" to "French",
+    "de" to "German",
+    "el" to "Greek",
+    "gu" to "Gujarati",
+    "he" to "Hebrew",
+    "hi" to "Hindi",
+    "hu" to "Hungarian",
+    "id" to "Indonesian",
+    "it" to "Italian",
+    "ja" to "Japanese",
+    "ko" to "Korean",
+    "ms" to "Malay",
+    "mr" to "Marathi",
+    "no" to "Norwegian",
+    "fa" to "Persian",
+    "pl" to "Polish",
+    "pt" to "Portuguese",
+    "pa" to "Punjabi",
+    "ro" to "Romanian",
+    "ru" to "Russian",
+    "sr" to "Serbian",
+    "sk" to "Slovak",
+    "sl" to "Slovenian",
+    "es" to "Spanish",
+    "sv" to "Swedish",
+    "ta" to "Tamil",
+    "te" to "Telugu",
+    "th" to "Thai",
+    "tr" to "Turkish",
+    "uk" to "Ukrainian",
+    "ur" to "Urdu",
+    "vi" to "Vietnamese"
+).sortedBy { it.second }
+
+/** Display name for a preferred-language code, or the code itself. */
+fun subtitleLanguageName(code: String): String =
+    SUBTITLE_LANGUAGE_OPTIONS.find { it.first == code }?.second ?: code.uppercase()
+
+/**
+ * True if a subtitle/track language tag matches a preferred language code.
+ * Lenient: handles ISO 639-1 vs 639-2/B differences ("en" vs "eng",
+ * "bs" vs "bos") and OpenSubtitles quirks ("pob" = Brazilian Portuguese)
+ * via prefix/alias matching.
+ */
+fun subtitleLangMatches(tag: String?, preferredCode: String): Boolean {
+    val t = tag?.lowercase()?.trim().orEmpty()
+    if (t.isEmpty()) return false
+    val p = preferredCode.lowercase().trim()
+    if (t == p) return true
+    // Alias normalization.
+    fun norm(code: String): String = when (code) {
+        "bos" -> "bs"
+        "pob" -> "pt"
+        "scc" -> "sr"
+        else -> code
+    }
+    val normT = norm(t)
+    val normP = norm(p)
+    if (normT == normP) return true
+    return normT.startsWith(normP) || normP.startsWith(normT)
+}
+
 /** Tiny SharedPreferences-backed store for user settings (no extra dependency). */
 class SettingsStore(context: Context) {
 
@@ -95,10 +173,26 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_AMOLED, false)
         set(value) = prefs.edit().putBoolean(KEY_AMOLED, value).apply()
 
+    /**
+     * Preferred subtitle languages (ISO 639-1 codes, up to 2).
+     * Empty = no preference (first available subtitle is used).
+     */
+    var subtitleLanguages: List<String>
+        get() = prefs.getString(KEY_SUBTITLE_LANGS, "")
+            ?.split(",")
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.take(2)
+            ?: emptyList()
+        set(value) = prefs.edit()
+            .putString(KEY_SUBTITLE_LANGS, value.take(2).joinToString(","))
+            .apply()
+
     companion object {
         private const val KEY_AUTOPLAY = "autoplay"
         private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
         private const val KEY_SHOW_SKIP = "show_skip_button"
+        private const val KEY_SUBTITLE_LANGS = "subtitle_languages"
         private const val KEY_ACCENT = "accent_theme"
         private const val KEY_AMOLED = "amoled_black"
         private const val KEY_PREINSTALL_PREFIX = "preinstall_done_"

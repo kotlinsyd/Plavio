@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.Button
@@ -53,8 +52,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.pulsestream.app.data.MetaPreview
-import com.pulsestream.app.data.SpeedLevel
-import com.pulsestream.app.data.observeSpeedLevel
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
@@ -356,27 +353,6 @@ fun SafePosterImage(
     }
 }
 
-/**
- * Network-speed dot: red = bad/offline, yellow = normal, green = fast enough
- * for 1080p+. Based on the connection's reported link speed (uses no data).
- */
-@Composable
-fun NetworkDot(modifier: Modifier = Modifier) {
-    val context = LocalContext.current.applicationContext
-    val level by remember(context) { observeSpeedLevel(context) }
-        .collectAsState(initial = SpeedLevel.OK)
-    val color = when (level) {
-        SpeedLevel.OFFLINE, SpeedLevel.SLOW -> Color(0xFFEF4444)
-        SpeedLevel.OK -> Color(0xFFFBBF24)
-        SpeedLevel.FAST -> Color(0xFF34D399)
-    }
-    Box(
-        modifier
-            .size(11.dp)
-            .clip(CircleShape)
-            .background(color)
-    )
-}
 
 /**
  * Connecting-dots loading animation in the app's accent gradient: a wave of

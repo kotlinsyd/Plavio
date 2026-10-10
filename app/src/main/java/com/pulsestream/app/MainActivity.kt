@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -59,6 +60,7 @@ import com.pulsestream.app.ui.components.CrashReportDialog
 import com.pulsestream.app.ui.components.UpdatePrompt
 import com.pulsestream.app.ui.nav.Routes
 import com.pulsestream.app.ui.screens.LiveScreen
+import com.pulsestream.app.ui.screens.SplashScreen
 import com.pulsestream.app.ui.screens.SettingsScreen
 import com.pulsestream.app.ui.screens.AccountScreen
 import com.pulsestream.app.ui.screens.AddonsScreen
@@ -68,6 +70,7 @@ import com.pulsestream.app.ui.screens.HomeCatalogsScreen
 import com.pulsestream.app.ui.screens.PlaybackSettingsScreen
 import com.pulsestream.app.ui.screens.AppearanceSettingsScreen
 import com.pulsestream.app.ui.screens.AboutScreen
+import com.pulsestream.app.ui.screens.LicensesScreen
 import com.pulsestream.app.ui.screens.HomeScreen
 import com.pulsestream.app.ui.screens.PlayerScreen
 import com.pulsestream.app.ui.screens.SearchScreen
@@ -223,7 +226,23 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         }
     ) { padding ->
         Box(Modifier.padding(padding)) {
-            NavHost(navController = navController, startDestination = Routes.HOME) {
+            NavHost(navController = navController, startDestination = Routes.SPLASH) {
+                composable(Routes.SPLASH) {
+                    // Warm the home catalog cache while the splash animation
+                    // plays — by the time Home appears, content is ready.
+                    // Fire-and-forget: never blocks or extends the animation.
+                    LaunchedEffect(Unit) {
+                        launch { runCatching { repository.refreshCatalogRows() } }
+                        launch { runCatching { repository.pruneOversizedCache() } }
+                    }
+                    SplashScreen(
+                        onDone = {
+                            navController.navigate(Routes.HOME) {
+                                popUpTo(Routes.SPLASH) { inclusive = true }
+                            }
+                        }
+                    )
+                }
                 composable(Routes.HOME) {
                     HomeScreen(
                         repository = repository,
@@ -311,6 +330,12 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                 }
                 composable(Routes.ABOUT) {
                     AboutScreen(
+                        onBack = { navController.popBackStack() },
+                        onGoToLicenses = { navController.navigate(Routes.LICENSES) }
+                    )
+                }
+                composable(Routes.LICENSES) {
+                    LicensesScreen(
                         onBack = { navController.popBackStack() }
                     )
                 }

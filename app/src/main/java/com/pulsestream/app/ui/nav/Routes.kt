@@ -5,6 +5,7 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 
 object Routes {
+    const val SPLASH = "splash"
     const val HOME = "home"
     const val LIVE = "live"
     const val SEARCH = "search"
@@ -15,6 +16,7 @@ object Routes {
     const val PLAYBACK_SETTINGS = "playback_settings"
     const val APPEARANCE_SETTINGS = "appearance_settings"
     const val ABOUT = "about"
+    const val LICENSES = "licenses"
     const val SETTINGS = "settings"
     const val PLAYER = "player"
     const val DETAIL = "detail/{addonId}/{type}/{metaId}"

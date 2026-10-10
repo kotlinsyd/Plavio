@@ -3,6 +3,8 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.google.services)
+    alias(libs.plugins.firebase.crashlytics)
 }
 
 android {
@@ -14,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.8.9"
+        versionCode = 48
+        versionName = "0.8.18"
     }
 
     buildTypes {
@@ -62,6 +64,10 @@ dependencies {
     implementation(libs.media3.exoplayer.dash)
     implementation(libs.okhttp)
     implementation(libs.coil.compose)
-
+    // Crash reporting (Firebase Crashlytics) — automatic, no extra permissions.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.crashlytics)
+    // Usage stats (Firebase Analytics) — active/total users dashboard, automatic.
+    implementation("com.google.firebase:firebase-analytics")
     ksp(libs.room.compiler)
 }

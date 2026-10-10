@@ -6,7 +6,10 @@ import com.pulsestream.app.data.db.InstalledAddon
 import com.pulsestream.app.data.db.PlaybackState
 import com.pulsestream.app.data.db.SubtitleCache
 import com.pulsestream.app.data.db.WatchlistItem
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -50,7 +53,7 @@ class StreamRepository(
 
     suspend fun addAddonFromUrl(input: String): Result<InstalledAddon> = withContext(Dispatchers.IO) {
         runCatching {
-            val baseUrl = api.normalizeBaseUrl(input)
+            val baseUrl = StremioApi.normalizeBaseUrl(input)
             val manifest = api.fetchManifest(baseUrl)
             // Real Stremio behavior: an addon is useful if it provides ANY of
             // catalog / meta / stream / subtitles — they no longer have to come bundled together.
@@ -149,7 +152,42 @@ class StreamRepository(
      * cleanly and capability changes are picked up; failures are skipped.
      * Fresh results are written to the catalog cache (Room).
      */
-    suspend fun refreshCatalogRows(): List<CatalogRow> = withContext(Dispatchers.IO) {
+    // In-flight catalog refresh sharing: concurrent callers (splash warm-up,
+    // Home load, pull-to-refresh) join the same network job instead of
+    // stacking duplicate requests.
+    private val catalogRefreshLock = Any()
+    private var catalogRefreshJob: Deferred<List<CatalogRow>>? = null
+    private val catalogRefreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Refreshes catalog rows from the network. If a refresh is already in
+     * flight, joins it instead of starting duplicate work.
+     */
+    suspend fun refreshCatalogRows(): List<CatalogRow> {
+        val job = synchronized(catalogRefreshLock) {
+            val active = catalogRefreshJob?.takeIf { it.isActive }
+            active ?: catalogRefreshScope.async { doRefreshCatalogRows() }
+                .also { catalogRefreshJob = it }
+        }
+        return job.await()
+    }
+
+    /**
+     * True when the catalog cache holds rows fetched within [maxAgeMs].
+     * Used to skip the background refresh when the splash just warmed it.
+     */
+    suspend fun isCatalogCacheFresh(maxAgeMs: Long = 15 * 60 * 1000): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                val rows = db.catalogCacheDao().getAll()
+                if (rows.isEmpty()) return@withContext false
+                System.currentTimeMillis() - rows.maxOf { it.fetchedAt } < maxAgeMs
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+    private suspend fun doRefreshCatalogRows(): List<CatalogRow> = withContext(Dispatchers.IO) {
         val installed = enabledAddons()
         // Only addons the user wants on Home contribute catalog rows.
         val rows = installed.filter { it.showOnHome }.map { addon ->
@@ -214,7 +252,8 @@ class StreamRepository(
         else db.catalogCacheDao().pruneExcept(installedIds)
 
         updateSearchCache(rows)
-        rows
+        // Preferred metadata source's catalogs first (PlavioMeta by default).
+        return@withContext sortRowsByPreference(rows, installed.associateBy { it.id })
     }
 
     /**
@@ -236,7 +275,8 @@ class StreamRepository(
      */
     suspend fun loadCatalogRowsCached(): List<CatalogRow> = withContext(Dispatchers.IO) {
         try {
-            val visibleIds = enabledAddons().filter { it.showOnHome }.map { it.id }.toSet()
+            val visible = enabledAddons().filter { it.showOnHome }
+            val visibleIds = visible.map { it.id }.toSet()
             val rows = db.catalogCacheDao().getAll()
                 .filter { it.addonId in visibleIds }
                 .map { cached ->
@@ -252,7 +292,7 @@ class StreamRepository(
                 }.filter { it.items.isNotEmpty() }
                 .distinctBy { "${it.addonId}|${it.type}|${it.catalogId}" }
             updateSearchCache(rows)
-            rows
+            sortRowsByPreference(rows, visible.associateBy { it.id })
         } catch (_: Exception) {
             // Oversized/corrupt row slipped through — drop it and carry on.
             pruneOversizedCache()
@@ -451,8 +491,44 @@ class StreamRepository(
                         types.isEmpty() || type in types
                     }
                 }
-                .sortedByDescending { it.baseUrl == hintBaseUrl }
+                .sortedWith(
+                    compareByDescending<InstalledAddon> { it.baseUrl == hintBaseUrl }
+                        .thenBy { metaRank(it) }
+                )
         }
+
+    private fun isPlavioMeta(addon: InstalledAddon): Boolean =
+        addon.id.contains("plaviometa", ignoreCase = true) ||
+                addon.baseUrl.contains("plaviometa", ignoreCase = true)
+
+    private fun isCinemeta(addon: InstalledAddon): Boolean =
+        addon.id.contains("cinemeta", ignoreCase = true) ||
+                addon.baseUrl.contains("cinemeta", ignoreCase = true)
+
+    /**
+     * Rank for metadata/catalog priority. PlavioMeta is always the default
+     * source: its posters/details come first, Cinemeta is the fallback,
+     * everything else keeps its relative order after.
+     */
+    private fun metaRank(addon: InstalledAddon): Int {
+        val plavio = isPlavioMeta(addon)
+        val cine = isCinemeta(addon)
+        return when {
+            plavio -> 0
+            cine -> 1
+            else -> 2
+        }
+    }
+
+    /** Sorts catalog rows so the preferred metadata source's rows come first. */
+    private fun sortRowsByPreference(
+        rows: List<CatalogRow>,
+        byAddonId: Map<String, InstalledAddon>
+    ): List<CatalogRow> =
+        rows.sortedWith(
+            compareBy<CatalogRow> { byAddonId[it.addonId]?.let(::metaRank) ?: 2 }
+                .thenBy { byAddonId[it.addonId]?.sortOrder ?: Int.MAX_VALUE }
+        )
 
     /** Addons that can serve streams. */
     suspend fun streamAddons(): List<InstalledAddon> = withContext(Dispatchers.IO) {
@@ -669,8 +745,11 @@ class StreamRepository(
         }
     }
     /**
-     * Auto-installs the bundled addons (PlavioMeta + Cinemeta + OpenSubtitles v3) once.
+     * Auto-installs the bundled addons (PlavioMeta + Cinemeta + OpenSubtitles v3
+     * + SubSense) once.
      * PlavioMeta is our first-party TMDB metadata addon; Cinemeta stays as fallback.
+     * SubSense aggregates subtitles from OpenSubtitles, SubDL, SubSource,
+     * Podnapisi and more for wider subtitle coverage.
      * Each addon is attempted at most once (tracked per manifest id), so a
      * user who removes one is never force-fed it again; a failed attempt
      * (e.g. offline first launch) is retried on the next launch.
@@ -679,11 +758,12 @@ class StreamRepository(
         val targets = listOf(
             "https://plaviometa.vercel.app/manifest.json",
             "https://v3-cinemeta.strem.io/manifest.json",
-            "https://opensubtitles-v3.strem.io/manifest.json"
+            "https://opensubtitles-v3.strem.io/manifest.json",
+            "https://subsense.nepiraw.com/manifest.json"
         )
         for (url in targets) {
             try {
-                val baseUrl = api.normalizeBaseUrl(url)
+                val baseUrl = StremioApi.normalizeBaseUrl(url)
                 val manifest = api.fetchManifest(baseUrl)
                 if (settings.isPreinstallDone(manifest.id)) continue
                 val alreadyThere = db.addonDao().getAll().any { it.id == manifest.id }
