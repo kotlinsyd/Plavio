@@ -1,0 +1,5 @@
+{
+  "_how_to": "ADD YOUR OWN ADDONS HERE. Copy one block below, paste it after the last one (add a comma between blocks), and change name, desc and url. Save — the site rebuilds itself from GitLab, and the section reappears automatically.",
+
+  "addons": []
+}
