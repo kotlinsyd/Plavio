@@ -21,7 +21,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
@@ -50,10 +49,9 @@ private fun phase(t: Float, startMs: Int, durMs: Int): Float =
 fun SplashScreen(onDone: () -> Unit) {
     var started by remember { mutableStateOf(false) }
     val palette = LocalPalette.current
-    // Same accent gradient the dots loader uses, swept across the wordmark.
-    val nameBrush = remember(palette.accent, palette.accent2) {
-        Brush.horizontalGradient(listOf(palette.accent, palette.accent2))
-    }
+    // Exact same brush as the home screen "Plavio" wordmark — one definition,
+    // so the branding always matches no matter the accent theme.
+    val nameBrush = palette.gradient
     val t by animateFloatAsState(
         targetValue = if (started) 1f else 0f,
         animationSpec = tween(durationMillis = SPLASH_TOTAL_MS, easing = LinearEasing),
