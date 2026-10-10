@@ -121,6 +121,8 @@ import com.pulsestream.app.data.Subtitle
 import com.pulsestream.app.data.Video
 import com.pulsestream.app.data.simkl.SimklManager
 import com.pulsestream.app.data.simkl.SimklScrobbler
+import com.pulsestream.app.data.trakt.TraktManager
+import com.pulsestream.app.data.trakt.TraktScrobbler
 import com.pulsestream.app.data.buttonLabel
 import com.pulsestream.app.data.streamQualityLabel
 import com.pulsestream.app.ui.components.AddonTabs
@@ -312,6 +314,9 @@ fun PlayerScreen(
     // Simkl sync: scrobbles playback progress when the account is linked.
     val simkl = remember { SimklManager(settings) }
     val simklScrobbler = remember { SimklScrobbler(simkl, ioScope) }
+    // Trakt sync: same, when the Trakt account is linked.
+    val trakt = remember { TraktManager(settings) }
+    val traktScrobbler = remember { TraktScrobbler(trakt, ioScope) }
 
     var showControls by remember { mutableStateOf(true) }
     var controlsTick by remember { mutableIntStateOf(0) }
@@ -778,6 +783,13 @@ fun PlayerScreen(
                 isPlaying,
                 player.playbackState == Player.STATE_ENDED
             )
+            traktScrobbler.tick(
+                currentRequest,
+                positionMs,
+                durationMs,
+                isPlaying,
+                player.playbackState == Player.STATE_ENDED
+            )
             delay(500)
         }
     }
@@ -856,6 +868,7 @@ fun PlayerScreen(
         onDispose {
             savePosition()
             simklScrobbler.shutdown()
+            traktScrobbler.shutdown()
             latestPlayer.value.release()
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             controller?.show(WindowInsetsCompat.Type.systemBars())
