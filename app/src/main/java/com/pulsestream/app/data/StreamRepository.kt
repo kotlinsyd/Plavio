@@ -1,0 +1,726 @@
+package com.pulsestream.app.data
+
+import com.pulsestream.app.data.db.AppDatabase
+import com.pulsestream.app.data.db.CatalogCache
+import com.pulsestream.app.data.db.InstalledAddon
+import com.pulsestream.app.data.db.PlaybackState
+import com.pulsestream.app.data.db.SubtitleCache
+import com.pulsestream.app.data.db.WatchlistItem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * Single source of truth: Room for persistence, StremioApi for network,
+ * in-memory caches for catalogs (search) and the pending playback request (navigation).
+ */
+class StreamRepository(
+    private val db: AppDatabase,
+    val api: StremioApi,
+    val settings: SettingsStore
+) {
+    val addons: Flow<List<InstalledAddon>> = db.addonDao().observeAll()
+    val continueWatching: Flow<List<PlaybackState>> = db.playbackDao().observeRecent()
+    val watchlist: Flow<List<WatchlistItem>> = db.watchlistDao().observeAll()
+
+    /** In-memory cache of every catalog item loaded on Home — used for search. */
+    @Volatile
+    var catalogCache: List<CachedMeta> = emptyList()
+        private set
+
+    /** In-memory handoff for the player screen (avoids stuffing long URLs into nav args). */
+    @Volatile
+    var pendingPlayback: PlaybackRequest? = null
+
+    /** In-memory handoff for the catalog "view all" screen. */
+    @Volatile
+    var pendingCatalog: CatalogRow? = null
+
+    suspend fun addAddonFromUrl(input: String): Result<InstalledAddon> = withContext(Dispatchers.IO) {
+        runCatching {
+            val baseUrl = api.normalizeBaseUrl(input)
+            val manifest = api.fetchManifest(baseUrl)
+            // Real Stremio behavior: an addon is useful if it provides ANY of
+            // catalog / meta / stream / subtitles — they no longer have to come bundled together.
+            val hasAny = manifest.hasCatalog || manifest.hasMeta || manifest.hasStream || manifest.hasSubtitles
+            if (!hasAny) {
+                throw IllegalStateException(
+                    "This addon doesn't provide catalogs, metadata, streams, or subtitles — " +
+                        "there's nothing Pulse can use."
+                )
+            }
+            val dao = db.addonDao()
+            val sortOrder = (dao.getAll().maxOfOrNull { it.sortOrder } ?: -1) + 1
+            val addon = InstalledAddon(
+                id = manifest.id,
+                name = manifest.name,
+                version = manifest.version,
+                description = manifest.description,
+                baseUrl = baseUrl,
+                types = manifest.types.joinToString(","),
+                resources = manifest.resources.joinToString(","),
+                configurable = manifest.configurable,
+                logoUrl = manifest.logo ?: "",
+                sortOrder = sortOrder,
+                addedAt = System.currentTimeMillis()
+            )
+            dao.upsert(addon)
+            addon
+        }
+    }
+
+    suspend fun removeAddon(id: String) = withContext(Dispatchers.IO) {
+        db.addonDao().deleteById(id)
+    }
+
+    /** User on/off switch for an addon. Disabled addons are excluded everywhere. */
+    suspend fun setAddonEnabled(id: String, enabled: Boolean) = withContext(Dispatchers.IO) {
+        db.addonDao().getAll().firstOrNull { it.id == id }?.let { addon ->
+            db.addonDao().upsert(addon.copy(enabled = enabled))
+        }
+    }
+
+    /** Star an addon: its catalogs, streams and subtitles get priority. */
+    suspend fun setAddonStarred(id: String, starred: Boolean) = withContext(Dispatchers.IO) {
+        db.addonDao().getAll().firstOrNull { it.id == id }?.let { addon ->
+            db.addonDao().upsert(addon.copy(starred = starred))
+        }
+    }
+
+    /** Swap the manual order positions of two addons (rearrange up/down). */
+    suspend fun swapAddonOrder(id1: String, id2: String) = withContext(Dispatchers.IO) {
+        val dao = db.addonDao()
+        val all = dao.getAll()
+        val a = all.firstOrNull { it.id == id1 }
+        val b = all.firstOrNull { it.id == id2 }
+        if (a != null && b != null) {
+            dao.upsert(a.copy(sortOrder = b.sortOrder))
+            dao.upsert(b.copy(sortOrder = a.sortOrder))
+        }
+    }
+
+    /**
+     * One-time normalization: addons installed before manual ordering
+     * existed all share sortOrder 0, which makes swaps no-ops. Assign
+     * distinct sequential values preserving the current relative order.
+     * Later runs are no-ops.
+     */
+    suspend fun normalizeAddonSortOrder() = withContext(Dispatchers.IO) {
+        val dao = db.addonDao()
+        dao.getAll().forEachIndexed { idx, addon ->
+            if (addon.sortOrder != idx) dao.upsert(addon.copy(sortOrder = idx))
+        }
+    }
+
+    /** Addons the user left switched on. */
+    private suspend fun enabledAddons(): List<InstalledAddon> =
+        db.addonDao().getAll().filter { it.enabled }
+
+    /** Enabled addons that provide catalogs — the Home Catalogs settings list. */
+    suspend fun catalogAddons(): List<InstalledAddon> = withContext(Dispatchers.IO) {
+        enabledAddons().filter { it.hasCatalog }
+    }
+
+    /** Whether an addon's catalogs appear on the Home screen. */
+    suspend fun setAddonShowOnHome(id: String, show: Boolean) = withContext(Dispatchers.IO) {
+        db.addonDao().setShowOnHome(id, show)
+        _catalogVisibility.value += 1
+    }
+
+    /** Bumped whenever Home catalog visibility changes — Home reloads on it. */
+    private val _catalogVisibility = MutableStateFlow(0)
+    val catalogVisibility: StateFlow<Int> = _catalogVisibility.asStateFlow()
+
+    /**
+     * Loads catalogs from every installed addon that declares the catalog
+     * resource. Manifests are re-fetched so renamed/dead addons refresh
+     * cleanly and capability changes are picked up; failures are skipped.
+     * Fresh results are written to the catalog cache (Room).
+     */
+    suspend fun refreshCatalogRows(): List<CatalogRow> = withContext(Dispatchers.IO) {
+        val installed = enabledAddons()
+        // Only addons the user wants on Home contribute catalog rows.
+        val rows = installed.filter { it.showOnHome }.map { addon ->
+            async {
+                val manifest = cachedManifest(addon.baseUrl)
+                if (manifest != null) {
+                    db.addonDao().upsert(
+                        addon.copy(
+                            resources = manifest.resources.joinToString(","),
+                            types = manifest.types.joinToString(","),
+                            configurable = manifest.configurable
+                        )
+                    )
+                }
+                val resources = manifest?.resources?.toSet() ?: addon.resourceSet
+                if ("catalog" !in resources) return@async emptyList<CatalogRow>()
+                val catalogs = manifest?.catalogs ?: emptyList()
+                val addonRows = coroutineScope {
+                    catalogs.map { catalog ->
+                        async {
+                            val items = runCatching {
+                                api.fetchCatalog(addon.baseUrl, catalog.type, catalog.id)
+                            }.getOrDefault(emptyList())
+                            CatalogRow(
+                                addonId = addon.id,
+                                addonName = addon.name,
+                                baseUrl = addon.baseUrl,
+                                catalogName = catalog.name,
+                                type = catalog.type,
+                                catalogId = catalog.id,
+                                items = items
+                            )
+                        }
+                    }.awaitAll().filter { it.items.isNotEmpty() }
+                }
+                addonRows
+            }
+        }.awaitAll().flatten()
+            // Defensive: two catalogs sharing (addon, type, id) would produce
+            // duplicate LazyColumn keys and crash the list — keep the first.
+            .distinctBy { "${it.addonId}|${it.type}|${it.catalogId}" }
+
+        // Persist to the cache and drop rows for addons that are gone.
+        val now = System.currentTimeMillis()
+        db.catalogCacheDao().upsertAll(
+            rows.map { row ->
+                CatalogCache(
+                    key = "${row.addonId}|${row.type}|${row.catalogId}",
+                    addonId = row.addonId,
+                    addonName = row.addonName,
+                    baseUrl = row.baseUrl,
+                    type = row.type,
+                    catalogId = row.catalogId,
+                    catalogName = row.catalogName,
+                    itemsJson = cappedItemsJson(row.items),
+                    fetchedAt = now
+                )
+            }
+        )
+        val installedIds = installed.map { it.id }
+        if (installedIds.isEmpty()) db.catalogCacheDao().clearAll()
+        else db.catalogCacheDao().pruneExcept(installedIds)
+
+        updateSearchCache(rows)
+        rows
+    }
+
+    /**
+     * Removes catalog rows too big for SQLite's CursorWindow. Call at
+     * startup: heals installs poisoned by an oversized row without
+     * wiping watchlist/addons/settings.
+     */
+    suspend fun pruneOversizedCache() = withContext(Dispatchers.IO) {
+        try {
+            db.catalogCacheDao().pruneOversized(MAX_CACHED_ROW_BYTES)
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Reads the last cached catalog rows from Room. Returns instantly —
+     * Home shows these immediately while [refreshCatalogRows] runs quietly
+     * in the background. Never throws: a poisoned cache must not crash Home.
+     */
+    suspend fun loadCatalogRowsCached(): List<CatalogRow> = withContext(Dispatchers.IO) {
+        try {
+            val visibleIds = enabledAddons().filter { it.showOnHome }.map { it.id }.toSet()
+            val rows = db.catalogCacheDao().getAll()
+                .filter { it.addonId in visibleIds }
+                .map { cached ->
+                    CatalogRow(
+                        addonId = cached.addonId,
+                        addonName = cached.addonName,
+                        baseUrl = cached.baseUrl,
+                        catalogName = cached.catalogName,
+                        type = cached.type,
+                        catalogId = cached.catalogId,
+                        items = CatalogCodec.decodeMetas(cached.itemsJson)
+                    )
+                }.filter { it.items.isNotEmpty() }
+                .distinctBy { "${it.addonId}|${it.type}|${it.catalogId}" }
+            updateSearchCache(rows)
+            rows
+        } catch (_: Exception) {
+            // Oversized/corrupt row slipped through — drop it and carry on.
+            pruneOversizedCache()
+            emptyList()
+        }
+    }
+
+    /**
+     * Live TV rows for the Live tab: catalogs of type "tv" from enabled
+     * addons. Always fetched fresh (live listings change); never cached.
+     */
+    suspend fun loadTvRows(): List<CatalogRow> = withContext(Dispatchers.IO) {
+        val installed = enabledAddons().filter { it.hasCatalog }
+        val rows = coroutineScope {
+            installed.map { addon ->
+                async {
+                    val manifest = cachedManifest(addon.baseUrl)
+                    val tvCatalogs = (manifest?.catalogs ?: emptyList()).filter { it.type == "tv" }
+                    tvCatalogs.map { catalog ->
+                        async {
+                            val items = runCatching {
+                                api.fetchCatalog(addon.baseUrl, catalog.type, catalog.id)
+                            }.getOrDefault(emptyList())
+                            CatalogRow(
+                                addonId = addon.id,
+                                addonName = addon.name,
+                                baseUrl = addon.baseUrl,
+                                catalogName = catalog.name,
+                                type = catalog.type,
+                                catalogId = catalog.id,
+                                items = items
+                            )
+                        }
+                    }.awaitAll().filter { it.items.isNotEmpty() }
+                }
+            }.awaitAll().flatten()
+                .distinctBy { "${it.addonId}|${it.type}|${it.catalogId}" }
+        }
+        // Persist so the next visit is instant (see loadTvRowsCached).
+        if (rows.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            runCatching {
+                db.catalogCacheDao().upsertAll(
+                    rows.map { row ->
+                        CatalogCache(
+                            key = "${row.addonId}|${row.type}|${row.catalogId}",
+                            addonId = row.addonId,
+                            addonName = row.addonName,
+                            baseUrl = row.baseUrl,
+                            type = row.type,
+                            catalogId = row.catalogId,
+                            catalogName = row.catalogName,
+                            itemsJson = cappedItemsJson(row.items),
+                            fetchedAt = now
+                        )
+                    }
+                )
+            }
+        }
+        rows
+    }
+
+    /**
+     * Cached TV rows for the Live tab — returns instantly so the tab never
+     * stares at a spinner on repeat visits. Refreshed by [loadTvRows].
+     */
+    suspend fun loadTvRowsCached(): List<CatalogRow> = withContext(Dispatchers.IO) {
+        try {
+            val visibleIds = enabledAddons().map { it.id }.toSet()
+            db.catalogCacheDao().getAll()
+                .filter { it.addonId in visibleIds && it.type == "tv" }
+                .map { cached ->
+                    CatalogRow(
+                        addonId = cached.addonId,
+                        addonName = cached.addonName,
+                        baseUrl = cached.baseUrl,
+                        catalogName = cached.catalogName,
+                        type = cached.type,
+                        catalogId = cached.catalogId,
+                        items = CatalogCodec.decodeMetas(cached.itemsJson)
+                    )
+                }.filter { it.items.isNotEmpty() }
+                .distinctBy { "${it.addonId}|${it.type}|${it.catalogId}" }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun updateSearchCache(rows: List<CatalogRow>) {
+        catalogCache = rows.flatMap { row ->
+            row.items.map { meta ->
+                CachedMeta(
+                    addonId = row.addonId,
+                    addonName = row.addonName,
+                    baseUrl = row.baseUrl,
+                    meta = meta
+                )
+            }
+        }
+    }
+
+    /** [type] filters by content type ("movie", "series", "tv"); null searches everything. */
+    fun search(query: String, type: String? = null): List<CachedMeta> {
+        val q = query.trim().lowercase()
+        if (q.length < 2) return emptyList()
+        return catalogCache
+            .filter { (type == null || it.meta.type == type) && it.meta.name.lowercase().contains(q) }
+            .distinctBy { it.meta.id + it.addonId }
+            .take(100)
+    }
+
+    /**
+     * Live search against installed addons (the catalog `search=` extra).
+     * This is what finds titles that were never browsed into the local cache.
+     */
+    suspend fun searchRemote(query: String, type: String? = null): List<CachedMeta> =
+        withContext(Dispatchers.IO) {
+            val q = query.trim()
+            if (q.length < 2) return@withContext emptyList()
+            val types = if (type != null) listOf(type) else listOf("movie", "series")
+            // Query every addon concurrently — sequential requests were the
+            // main reason search felt slow on mobile networks.
+            val out = linkedMapOf<String, CachedMeta>()
+            coroutineScope {
+                enabledAddons()
+                    .filter { it.hasCatalog }
+                    .map { addon ->
+                        async {
+                            val manifest = cachedManifest(addon.baseUrl)
+                                ?: return@async emptyList<CachedMeta>()
+                            val found = mutableListOf<CachedMeta>()
+                            for (t in types) {
+                                val catalog = manifest.catalogs.firstOrNull { it.type == t }
+                                    ?: continue
+                                val metas =
+                                    runCatching { api.searchCatalog(addon.baseUrl, t, catalog.id, q) }
+                                        .getOrNull() ?: continue
+                                metas.forEach { m ->
+                                    found.add(
+                                        CachedMeta(
+                                            addon.id,
+                                            addon.name,
+                                            addon.baseUrl,
+                                            m.copy(type = t)
+                                        )
+                                    )
+                                }
+                            }
+                            found
+                        }
+                    }
+                    .awaitAll()
+                    .flatten()
+                    .forEach { cm -> out.putIfAbsent(cm.addonId + cm.meta.id, cm) }
+            }
+            out.values.toList()
+        }
+
+    /**
+     * Combined search: instant local-cache matches first, then live addon
+     * results for everything the cache doesn't have.
+     */
+    suspend fun searchAll(query: String, type: String? = null): List<CachedMeta> =
+        withContext(Dispatchers.IO) {
+            val local = search(query, type)
+            val seen = local.map { it.addonId + it.meta.id }.toMutableSet()
+            local + searchRemote(query, type).filter { seen.add(it.addonId + it.meta.id) }
+        }
+
+    /** In-memory manifest cache so Home/Live/search don't refetch manifests per load. */
+    private val manifestCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, AddonManifest>>()
+
+    private suspend fun cachedManifest(baseUrl: String): AddonManifest? {
+        val now = System.currentTimeMillis()
+        manifestCache[baseUrl]?.let { (ts, manifest) ->
+            if (now - ts < MANIFEST_TTL_MS) return manifest
+        }
+        val manifest = runCatching { api.fetchManifest(baseUrl) }.getOrNull() ?: return null
+        manifestCache[baseUrl] = now to manifest
+        return manifest
+    }
+
+    suspend fun getMeta(baseUrl: String, type: String, id: String): MetaDetail? =
+        withContext(Dispatchers.IO) { api.fetchMeta(baseUrl, type, id) }
+
+    private fun addonTypes(addon: InstalledAddon): Set<String> =
+        addon.types.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+
+    /** Addons that can serve metadata for [type] (hint addon's base URL first). */
+    suspend fun metaAddonsFor(type: String, hintBaseUrl: String? = null): List<InstalledAddon> =
+        withContext(Dispatchers.IO) {
+            enabledAddons()
+                .filter { addon ->
+                    addon.hasMeta && run {
+                        val types = addonTypes(addon)
+                        types.isEmpty() || type in types
+                    }
+                }
+                .sortedByDescending { it.baseUrl == hintBaseUrl }
+        }
+
+    /** Addons that can serve streams. */
+    suspend fun streamAddons(): List<InstalledAddon> = withContext(Dispatchers.IO) {
+        enabledAddons().filter { it.hasStream }
+    }
+
+    /**
+     * Real Stremio behavior: metadata may live in a different addon than the
+     * catalog the title was found in. Try every meta-capable addon in turn
+     * until one returns details.
+     */
+    suspend fun getMetaFromAny(hintBaseUrl: String?, type: String, id: String): MetaDetail? =
+        withContext(Dispatchers.IO) {
+            for (addon in metaAddonsFor(type, hintBaseUrl)) {
+                val meta = runCatching { api.fetchMeta(addon.baseUrl, type, id) }.getOrNull()
+                if (meta != null) return@withContext meta
+            }
+            null
+        }
+
+    /**
+     * Streams may live in different addons than catalogs/metadata.
+     * Queries every stream-capable addon concurrently and emits the merged
+     * list PROGRESSIVELY — each emission holds everything found so far,
+     * de-duplicated by URL and tagged with its source addon name — so the UI
+     * can show (and autoplay) the first sources without waiting for the
+     * slowest addon. Each addon fails fast after [STREAM_FETCH_TIMEOUT_MS].
+     * The final emission is the complete merged result.
+     */
+    fun streamResultsFlow(type: String, videoId: String): Flow<StreamResult> = channelFlow {
+        val addons = streamAddons()
+        if (addons.isEmpty()) {
+            send(StreamResult(emptyList(), emptyList()))
+            return@channelFlow
+        }
+        // Starred addons go first — in every emission, so their streams show
+        // and autoplay before anyone else's.
+        val starredIds = addons.filter { it.starred }.map { it.id }.toSet()
+        fun prioritize(streams: List<StreamItem>): List<StreamItem> =
+            streams.sortedWith(
+                compareByDescending<StreamItem> { it.sourceId in starredIds }
+                    .thenBy { it.sourceId }
+            )
+        val mutex = Mutex()
+        val seenStreams = LinkedHashSet<String>()
+        val seenSubs = LinkedHashSet<String>()
+        val accStreams = mutableListOf<StreamItem>()
+        val accSubs = mutableListOf<Subtitle>()
+        coroutineScope {
+            addons.forEach { addon ->
+                launch {
+                    val res = withTimeoutOrNull(STREAM_FETCH_TIMEOUT_MS) {
+                        runCatching { api.fetchStreams(addon.baseUrl, type, videoId) }.getOrNull()
+                    } ?: return@launch
+                    var changed = false
+                    mutex.withLock {
+                        res.streams.forEach { s ->
+                            if (seenStreams.add(s.url)) {
+                                accStreams.add(s.copy(sourceName = addon.name, sourceId = addon.id))
+                                changed = true
+                            }
+                        }
+                        res.subtitles.forEach { s ->
+                            if (seenSubs.add(s.url)) {
+                                accSubs.add(s)
+                                changed = true
+                            }
+                        }
+                    }
+                    if (changed) {
+                        mutex.withLock { send(StreamResult(prioritize(accStreams.toList()), accSubs.toList())) }
+                    }
+                }
+            }
+        }
+        mutex.withLock { send(StreamResult(prioritize(accStreams.toList()), accSubs.toList())) }
+    }.flowOn(Dispatchers.IO)
+
+    suspend fun getStreams(baseUrl: String, type: String, videoId: String): StreamResult =
+        withContext(Dispatchers.IO) { api.fetchStreams(baseUrl, type, videoId) }
+
+    suspend fun getAddonBaseUrl(addonId: String): String? = withContext(Dispatchers.IO) {
+        catalogCache.firstOrNull { it.addonId == addonId }?.baseUrl
+            ?: db.addonDao().getAll().firstOrNull { it.id == addonId }?.baseUrl
+    }
+
+    suspend fun getSavedPosition(key: String): Long =
+        withContext(Dispatchers.IO) { db.playbackDao().getByKey(key)?.positionMs ?: 0L }
+
+    suspend fun deleteSavedPosition(key: String) =
+        withContext(Dispatchers.IO) { db.playbackDao().deleteByKey(key) }
+
+    suspend fun savePlayback(
+        title: String,
+        poster: String?,
+        videoId: String,
+        streamUrl: String,
+        positionMs: Long,
+        durationMs: Long,
+        imdbId: String? = null,
+        season: Int = 0,
+        episode: Int = 0
+    ) = withContext(Dispatchers.IO) {
+        // Don't clutter Continue Watching with barely-started items, and drop
+        // entries the user effectively finished (less than 30s left).
+        if (durationMs > 0 && durationMs - positionMs < 30_000) {
+            db.playbackDao().deleteByKey(streamUrl)
+            return@withContext
+        }
+        if (positionMs < 10_000) return@withContext
+        db.playbackDao().upsert(
+            PlaybackState(
+                key = streamUrl,
+                title = title,
+                poster = poster,
+                videoId = videoId,
+                streamUrl = streamUrl,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                imdbId = imdbId,
+                season = season,
+                episode = episode,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+    }
+
+    // ---- Watchlist ----
+
+    fun observeWatchlistItem(key: String): Flow<WatchlistItem?> =
+        db.watchlistDao().observeByKey(key)
+
+    suspend fun toggleWatchlist(
+        addonId: String,
+        type: String,
+        metaId: String,
+        name: String,
+        poster: String?
+    ) = withContext(Dispatchers.IO) {
+        val key = "$addonId|$type|$metaId"
+        if (db.watchlistDao().getByKey(key) != null) {
+            db.watchlistDao().deleteByKey(key)
+        } else {
+            db.watchlistDao().upsert(
+                WatchlistItem(
+                    key = key,
+                    addonId = addonId,
+                    type = type,
+                    metaId = metaId,
+                    name = name,
+                    poster = poster,
+                    addedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    // ---- Subtitle search (feature 9) ----
+
+    /**
+     * Queries every installed subtitle-capable addon via the Stremio addon
+     * protocol ({base}/subtitles/{type}/{imdbId}.json), merged and
+     * de-duplicated. Results are cached briefly (6h) in Room.
+     */
+    suspend fun searchSubtitles(type: String, imdbId: String): List<Subtitle> =
+        withContext(Dispatchers.IO) {
+            val key = "$type|$imdbId"
+            val now = System.currentTimeMillis()
+            val cached = db.subtitleCacheDao().getByKey(key)
+            if (cached != null && now - cached.fetchedAt < SUBTITLE_CACHE_TTL_MS) {
+                return@withContext CatalogCodec.decodeSubtitles(cached.itemsJson)
+            }
+            val addons = enabledAddons().filter { addon ->
+                addon.hasSubtitles && run {
+                    val types = addonTypes(addon)
+                    types.isEmpty() || type in types
+                }
+            }
+            val results = coroutineScope {
+                addons.map { addon ->
+                    async {
+                        withTimeoutOrNull(STREAM_FETCH_TIMEOUT_MS) {
+                            runCatching { api.fetchSubtitles(addon.baseUrl, type, imdbId) }
+                                .getOrDefault(emptyList())
+                        } ?: emptyList()
+                    }
+                }.awaitAll().flatten()
+            }.distinctBy { it.url }
+            if (results.isNotEmpty()) {
+                db.subtitleCacheDao().upsert(
+                    SubtitleCache(key, CatalogCodec.encodeSubtitles(results), now)
+                )
+            }
+            results
+        }
+
+    // ---- Pre-installed addons (feature 4) ----
+
+    /**
+     * Fills in missing addon logos from their manifests (one quiet pass per
+     * launch for addons installed before logos were stored).
+     */
+    suspend fun backfillAddonLogos() = withContext(Dispatchers.IO) {
+        val dao = db.addonDao()
+        for (addon in dao.getAll()) {
+            if (addon.logoUrl.isNotBlank()) continue
+            try {
+                val logo = api.fetchManifest(addon.baseUrl).logo?.takeIf { it.isNotBlank() }
+                    ?: continue
+                dao.upsert(addon.copy(logoUrl = logo))
+            } catch (_: Exception) {
+                // Offline or dead URL — try again next launch.
+            }
+        }
+    }
+    /**
+     * Auto-installs the bundled addons (PlavioMeta + Cinemeta + OpenSubtitles v3) once.
+     * PlavioMeta is our first-party TMDB metadata addon; Cinemeta stays as fallback.
+     * Each addon is attempted at most once (tracked per manifest id), so a
+     * user who removes one is never force-fed it again; a failed attempt
+     * (e.g. offline first launch) is retried on the next launch.
+     */
+    suspend fun ensurePreinstalledAddons() = withContext(Dispatchers.IO) {
+        val targets = listOf(
+            "https://plaviometa.vercel.app/manifest.json",
+            "https://v3-cinemeta.strem.io/manifest.json",
+            "https://opensubtitles-v3.strem.io/manifest.json"
+        )
+        for (url in targets) {
+            try {
+                val baseUrl = api.normalizeBaseUrl(url)
+                val manifest = api.fetchManifest(baseUrl)
+                if (settings.isPreinstallDone(manifest.id)) continue
+                val alreadyThere = db.addonDao().getAll().any { it.id == manifest.id }
+                addAddonFromUrl(url).onSuccess { addon ->
+                    if (!alreadyThere) db.addonDao().upsert(addon.copy(preinstalled = true))
+                    settings.setPreinstallDone(manifest.id)
+                }
+            } catch (_: Exception) {
+                // Offline or dead URL — try again next launch.
+            }
+        }
+    }
+
+    companion object {
+        private const val SUBTITLE_CACHE_TTL_MS = 6L * 3600L * 1000L
+        /** Fail-fast budget per addon when resolving streams/subtitles. */
+        private const val STREAM_FETCH_TIMEOUT_MS = 20000L
+        /**
+         * Max bytes per cached catalog row — well under SQLite's ~2MB
+         * CursorWindow limit, so a row can never poison reads again.
+         */
+        private const val MAX_CACHED_ROW_BYTES = 900_000
+        /** Manifests rarely change — skip the round-trip for a day. */
+        private const val MANIFEST_TTL_MS = 24L * 3600L * 1000L
+    }
+
+    /**
+     * Encodes catalog items for the cache, shrinking the list until the
+     * JSON fits safely under the CursorWindow limit.
+     */
+    private fun cappedItemsJson(items: List<MetaPreview>): String {
+        var take = items.size
+        var json = CatalogCodec.encodeMetas(items)
+        while (json.length > MAX_CACHED_ROW_BYTES && take > 20) {
+            take /= 2
+            json = CatalogCodec.encodeMetas(items.take(take))
+        }
+        return json
+    }
+}
