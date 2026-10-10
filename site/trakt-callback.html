@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plavio — Trakt connected</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #0a0a12; color: #f2f2f7;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 20px; padding: 36px 32px; max-width: 440px; width: 100%;
+    text-align: center;
+  }
+  h1 { font-size: 22px; margin-bottom: 8px; }
+  p { color: #9a9ab0; font-size: 14px; margin-bottom: 20px; line-height: 1.5; }
+  .code {
+    font-family: ui-monospace, monospace; font-size: 20px; letter-spacing: 2px;
+    background: #14141f; border: 1px dashed rgba(34,197,94,0.5); color: #22c55e;
+    border-radius: 12px; padding: 16px 12px; margin-bottom: 20px;
+    word-break: break-all; user-select: all;
+  }
+  button {
+    background: #22c55e; color: #0a0a12; border: none; border-radius: 12px;
+    padding: 14px 28px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%;
+  }
+  button:active { transform: scale(0.98); }
+  .err { color: #f87171; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="title">Connecting Trakt…</h1>
+  <p id="desc">Finishing up — your code will appear below.</p>
+  <div class="code" id="code" style="display:none"></div>
+  <button id="copy" style="display:none">Copy code</button>
+</div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const code = q.get("code");
+  const err = q.get("error");
+  const title = document.getElementById("title");
+  const desc = document.getElementById("desc");
+  const codeEl = document.getElementById("code");
+  const copyBtn = document.getElementById("copy");
+  if (code) {
+    title.textContent = "Trakt connected ✓";
+    desc.textContent = "Copy this code and paste it into the Plavio app to finish linking Trakt.";
+    codeEl.textContent = code;
+    codeEl.style.display = "block";
+    copyBtn.style.display = "block";
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(code).then(() => {
+        copyBtn.textContent = "Copied!";
+        setTimeout(() => copyBtn.textContent = "Copy code", 1500);
+      });
+    };
+  } else {
+    title.textContent = "Something went wrong";
+    title.classList.add("err");
+    desc.textContent = err
+      ? "Trakt returned an error: " + err + ". Please try linking again from the Plavio app."
+      : "No authorization code was received. Please try linking again from the Plavio app.";
+  }
+</script>
+</body>
+</html>
