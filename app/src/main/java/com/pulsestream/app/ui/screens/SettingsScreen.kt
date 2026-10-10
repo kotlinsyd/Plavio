@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Person
@@ -41,6 +42,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -218,6 +220,8 @@ fun SettingsScreen(
                             )
                         }
                     }
+                    Spacer(Modifier.height(12.dp))
+                    SocialIconRow()
                 }
             }
         }
@@ -681,4 +685,47 @@ fun AppUpdaterCard() {
         info = updateInfo,
         onDismiss = { updateInfo = null }
     )
+}
+
+/**
+ * Icon-only social/community links, placed directly below the App Installs
+ * counter. Icons only, no text labels (content descriptions for a11y).
+ */
+@Composable
+private fun SocialIconRow() {
+    val context = LocalContext.current
+    val palette = LocalPalette.current
+    val links = listOf(
+        Triple(R.drawable.ic_discord, "Discord", "https://discord.gg/pbNwJKU3p"),
+        Triple(R.drawable.ic_github, "GitHub", "https://github.com/kotlinsyd/Plavio"),
+        Triple(R.drawable.ic_gitlab, "GitLab", "https://gitlab.com/KotlinJS5/plavio"),
+        Triple(R.drawable.ic_reddit, "Reddit", "https://www.reddit.com/r/Plavio/"),
+    )
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        links.forEach { (iconRes, label, url) ->
+            IconButton(
+                onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                        )
+                    }
+                },
+                modifier = Modifier.size(48.dp)
+            ) {
+                Icon(
+                    painter = painterResource(iconRes),
+                    contentDescription = label,
+                    tint = palette.accent,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+    }
 }

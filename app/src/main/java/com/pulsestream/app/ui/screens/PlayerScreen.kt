@@ -104,21 +104,27 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.pulsestream.app.data.ASPECT_MODES
 import com.pulsestream.app.data.IntroDbApi
 import com.pulsestream.app.data.PlaybackRequest
+import com.pulsestream.app.data.ResolvedSubtitle
 import com.pulsestream.app.data.SkipSegment
 import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.Subtitle
+import com.pulsestream.app.data.resolveSubtitleFiles
 import com.pulsestream.app.data.Video
+import com.pulsestream.app.data.subtitleLangMatches
 import com.pulsestream.app.data.simkl.SimklManager
 import com.pulsestream.app.data.simkl.SimklScrobbler
 import com.pulsestream.app.data.trakt.TraktManager
@@ -212,6 +218,7 @@ private val LANG_NAMES = mapOf(
     "hun" to "Hungarian", "hu" to "Hungarian",
     "srp" to "Serbian", "sr" to "Serbian",
     "hrv" to "Croatian", "hr" to "Croatian",
+    "bos" to "Bosnian", "ba" to "Bosnian",
     "slv" to "Slovenian", "sl" to "Slovenian",
     "bul" to "Bulgarian", "bg" to "Bulgarian",
     "cat" to "Catalan", "ca" to "Catalan"
@@ -220,20 +227,6 @@ private val LANG_NAMES = mapOf(
 private fun displayLanguage(code: String?): String? {
     if (code.isNullOrBlank() || code == "und") return null
     return LANG_NAMES[code.lowercase()] ?: code.uppercase()
-}
-
-private fun subtitleConfig(sub: Subtitle, isDefault: Boolean): MediaItem.SubtitleConfiguration? {
-    val mime = when {
-        sub.url.endsWith(".vtt", ignoreCase = true) -> MimeTypes.TEXT_VTT
-        sub.url.endsWith(".srt", ignoreCase = true) -> MimeTypes.APPLICATION_SUBRIP
-        else -> null
-    } ?: return null
-    val builder = MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
-        .setMimeType(mime)
-        .setLanguage(sub.lang)
-        .setId(sub.url)
-    if (isDefault) builder.setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-    return builder.build()
 }
 
 private data class TrackOption(
@@ -291,22 +284,50 @@ fun PlayerScreen(
     val maxVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }
     val ioScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
 
-    fun buildExo(req: PlaybackRequest, extraSubs: List<Subtitle>): ExoPlayer {
-        val configs = (req.subtitles + extraSubs).mapIndexedNotNull { index, sub ->
-            subtitleConfig(sub, isDefault = index == 0)
+    /**
+     * Builds the player for a request. Side-loaded subtitles are NOT attached
+     * here — they are resolved (downloaded + format-sniffed) in the background
+     * and attached via [attachResolvedSubtitles], because their URLs rarely
+     * carry a usable file extension.
+     */
+    fun buildExo(req: PlaybackRequest): ExoPlayer {
+        val prefs = settings.subtitleLanguages
+        // Debrid/proxied addons can require extra headers on the stream URL
+        // (parsed from behaviorHints.proxyHeaders.request) — send them here.
+        val dataSourceFactory = DefaultHttpDataSource.Factory().apply {
+            if (req.headers.isNotEmpty()) setDefaultRequestProperties(req.headers)
         }
-        return ExoPlayer.Builder(context).build().apply {
-            setMediaItem(
-                MediaItem.Builder()
-                    .setUri(req.streamUrl)
-                    .setSubtitleConfigurations(configs)
-                    .build()
+        return ExoPlayer.Builder(context)
+            .setRenderersFactory(
+                DefaultRenderersFactory(context).setExtensionRendererMode(
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            // Belt and suspenders: also tell the track selector the preferred
+            // subtitle languages, so his languages win even if the default
+            // flag is ever ignored.
+            .setTrackSelector(
+                DefaultTrackSelector(context).apply {
+                    if (prefs.isNotEmpty()) {
+                        setParameters(
+                            buildUponParameters()
+                                .setPreferredTextLanguages(*prefs.toTypedArray())
+                        )
+                    }
+                }
             )
-        }
+            .build()
+            .apply {
+                setMediaItem(
+                    MediaItem.Builder()
+                        .setUri(req.streamUrl)
+                        .build()
+                )
+            }
     }
 
+
     var currentRequest by remember { mutableStateOf(initialRequest) }
-    var player by remember { mutableStateOf(buildExo(initialRequest, emptyList())) }
+    var player by remember { mutableStateOf(buildExo(initialRequest)) }
     val latestPlayer = rememberUpdatedState(player)
     val latestRequest = rememberUpdatedState(currentRequest)
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
@@ -340,7 +361,48 @@ fun PlayerScreen(
 
     // Track switching
     var tracksOpen by remember { mutableStateOf(false) }
+    var tracksMode by remember { mutableStateOf("subs") } // "subs" or "audio"
     var trackTick by remember { mutableIntStateOf(0) }
+
+    /**
+     * Attaches resolved (downloaded + format-sniffed) subtitles to the current
+     * player, preserving position. Auto-picks the default: the explicitly
+     * requested URL first, else the first track matching the preferred
+     * languages, else the first subtitle (or none when a preference is set
+     * but nothing matches).
+     */
+    fun attachResolvedSubtitles(resolved: List<ResolvedSubtitle>, defaultUrl: String? = null) {
+        if (resolved.isEmpty()) return
+        val pos = player.currentPosition
+        val wasPlaying = player.isPlaying
+        val prefs = settings.subtitleLanguages
+        val defaultIndex = when {
+            defaultUrl != null ->
+                resolved.indexOfFirst { it.sub.url == defaultUrl }.takeIf { it >= 0 } ?: -1
+            prefs.isEmpty() -> 0
+            else -> resolved.indexOfFirst { r ->
+                prefs.any { pref -> subtitleLangMatches(r.sub.lang, pref) }
+            }
+        }
+        val configs = resolved.mapIndexed { index, r ->
+            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(r.file))
+                .setMimeType(r.mimeType)
+                .setLanguage(r.sub.lang)
+                .setId(r.sub.url)
+                .apply { if (index == defaultIndex) setSelectionFlags(C.SELECTION_FLAG_DEFAULT) }
+                .build()
+        }
+        player.setMediaItem(
+            MediaItem.Builder()
+                .setUri(currentRequest.streamUrl)
+                .setSubtitleConfigurations(configs)
+                .build(),
+            pos
+        )
+        player.prepare()
+        player.playWhenReady = wasPlaying
+        trackTick++
+    }
 
     // Sources + episodes sheets
     var sourcesOpen by remember { mutableStateOf(false) }
@@ -373,6 +435,19 @@ fun PlayerScreen(
 
     val audioOpts = remember(trackTick, player) { trackOptions(player, C.TRACK_TYPE_AUDIO) }
     val textOpts = remember(trackTick, player) { trackOptions(player, C.TRACK_TYPE_TEXT) }
+    // When preferred subtitle languages are set, the Subs picker only offers
+    // tracks in those languages (plus Off and Search). Preferences are read
+    // fresh every time the dialog opens. Falls back to all tracks if none
+    // match, so the menu is never empty.
+    val subOpts = remember(trackTick, player, tracksOpen) {
+        val prefs = settings.subtitleLanguages
+        if (prefs.isEmpty()) textOpts
+        else textOpts.filter { opt ->
+            prefs.any { pref ->
+                subtitleLangMatches(opt.group.getFormat(opt.trackIndex).language, pref)
+            }
+        }.ifEmpty { textOpts }
+    }
     val subtitlesOff = remember(trackTick, player) { !hasSelectedTrack(player, C.TRACK_TYPE_TEXT) }
 
     fun pokeIndicator(i: PlayerIndicator) {
@@ -472,28 +547,35 @@ fun PlayerScreen(
         }
     }
 
+    var pendingDefaultSubUrl by remember { mutableStateOf<String?>(null) }
+    // True when side-loaded subtitles existed but none could be downloaded.
+    var subLoadError by remember { mutableStateOf(false) }
+
     fun addExternalSubtitle(sub: Subtitle) {
-        val pos = player.currentPosition
-        val wasPlaying = player.isPlaying
-        val all = currentRequest.subtitles + addedSubs + sub
-        val configs = all.mapIndexedNotNull { index, s ->
-            subtitleConfig(s, isDefault = index == all.lastIndex)
-        }
-        player.setMediaItem(
-            MediaItem.Builder()
-                .setUri(currentRequest.streamUrl)
-                .setSubtitleConfigurations(configs)
-                .build(),
-            pos
-        )
-        player.prepare()
-        player.playWhenReady = wasPlaying
         addedSubs = addedSubs + sub
         subSearchOpen = false
-        trackTick++
+        // The resolver effect below picks this up, downloads it and makes it
+        // the active subtitle.
+        pendingDefaultSubUrl = sub.url
         pokeIndicator(
             PlayerIndicator.Message("Subtitles: ${displayLanguage(sub.lang) ?: sub.lang.uppercase()}")
         )
+    }
+
+    // URL of a just-added subtitle that should become active once resolved.
+
+    // Resolve side-loaded subtitles in the background once per request (or
+    // when the user adds one via search): download, sniff the real format,
+    // then attach. Files are cached so this is instant on repeat visits.
+    LaunchedEffect(currentRequest, addedSubs) {
+        val all = currentRequest.subtitles + addedSubs
+        subLoadError = false
+        if (all.isEmpty()) return@LaunchedEffect
+        val resolved = resolveSubtitleFiles(all, context.cacheDir)
+        subLoadError = resolved.isEmpty()
+        val wantDefault = pendingDefaultSubUrl
+        pendingDefaultSubUrl = null
+        attachResolvedSubtitles(resolved, wantDefault)
     }
 
     /** Rebuilds the ExoPlayer around a new stream, preserving position. */
@@ -525,7 +607,7 @@ fun PlayerScreen(
                 currentRequest = newReq
                 repository.pendingPlayback = newReq
                 resumeOfferMs = null
-                val fresh = buildExo(newReq, addedSubs)
+                val fresh = buildExo(newReq)
                 // Detach the surface from the old player before releasing it.
                 playerView?.player = null
                 player = fresh
@@ -548,6 +630,7 @@ fun PlayerScreen(
         replaceStream(
             currentRequest.copy(
                 streamUrl = stream.url,
+                headers = stream.headers,
                 streamLabel = streamQualityLabel(stream),
                 sourceName = stream.sourceName
             ),
@@ -593,6 +676,7 @@ fun PlayerScreen(
                     replaceStream(
                         currentRequest.copy(
                             streamUrl = stream.url,
+                            headers = stream.headers,
                             title = "$showName S${video.season}E${video.episode}",
                             poster = video.thumbnail ?: currentRequest.poster,
                             videoId = video.id,
@@ -1185,12 +1269,12 @@ fun PlayerScreen(
                                 PillBarButton(
                                     icon = Icons.Filled.ClosedCaption,
                                     label = "Subs",
-                                    onClick = { trackTick++; tracksOpen = true }
+                                    onClick = { trackTick++; tracksMode = "subs"; tracksOpen = true }
                                 )
                                 PillBarButton(
                                     icon = Icons.Filled.Audiotrack,
                                     label = "Audio",
-                                    onClick = { trackTick++; tracksOpen = true }
+                                    onClick = { trackTick++; tracksMode = "audio"; tracksOpen = true }
                                 )
                                 PillBarButton(
                                     icon = Icons.Filled.CloudDownload,
@@ -1257,64 +1341,63 @@ fun PlayerScreen(
             )
         }
 
-        // Audio & subtitle track switching.
+        // Track switching: Subs button opens subtitles only, Audio button opens audio only.
         if (tracksOpen) {
+            val isAudio = tracksMode == "audio"
             AlertDialog(
                 onDismissRequest = { tracksOpen = false },
                 containerColor = Color(0xFF14141F),
                 title = {
                     Text(
-                        "Audio & subtitles",
+                        if (isAudio) "Audio" else "Subtitles",
                         color = TextPrimary,
                         fontWeight = FontWeight.Bold
                     )
                 },
                 text = {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
-                        Text(
-                            "Audio",
-                            color = LocalPalette.current.accent,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        TrackRow(
-                            label = "Auto",
-                            selected = audioOpts.none { it.selected },
-                            onClick = { applyAudioSelection(null) }
-                        )
-                        audioOpts.forEach { opt ->
+                        if (isAudio) {
                             TrackRow(
-                                label = opt.label,
-                                selected = opt.selected,
-                                onClick = { applyAudioSelection(opt) }
+                                label = "Auto",
+                                selected = audioOpts.none { it.selected },
+                                onClick = { applyAudioSelection(null) }
                             )
-                        }
-                        Spacer(Modifier.size(8.dp))
-                        Text(
-                            "Subtitles",
-                            color = LocalPalette.current.accent,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        TrackRow(
-                            label = "Off",
-                            selected = subtitlesOff,
-                            onClick = { applySubtitleSelection(null) }
-                        )
-                        textOpts.forEach { opt ->
+                            audioOpts.forEach { opt ->
+                                TrackRow(
+                                    label = opt.label,
+                                    selected = opt.selected,
+                                    onClick = { applyAudioSelection(opt) }
+                                )
+                            }
+                        } else {
                             TrackRow(
-                                label = opt.label,
-                                selected = opt.selected,
-                                onClick = { applySubtitleSelection(opt) }
+                                label = "Off",
+                                selected = subtitlesOff,
+                                onClick = { applySubtitleSelection(null) }
                             )
-                        }
-                        Spacer(Modifier.size(8.dp))
-                        TextButton(onClick = { openSubtitleSearch() }) {
-                            Text(
-                                "Search subtitles online",
-                                color = LocalPalette.current.accent,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                            subOpts.forEach { opt ->
+                                TrackRow(
+                                    label = opt.label,
+                                    selected = opt.selected,
+                                    onClick = { applySubtitleSelection(opt) }
+                                )
+                            }
+                            if (subLoadError && subOpts.isEmpty()) {
+                                Text(
+                                    "Couldn't load subtitles — check your connection and try again.",
+                                    color = Color(0xFFEF4444),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+                            }
+                            Spacer(Modifier.size(8.dp))
+                            TextButton(onClick = { openSubtitleSearch() }) {
+                                Text(
+                                    "Search subtitles online",
+                                    color = LocalPalette.current.accent,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
                 },
