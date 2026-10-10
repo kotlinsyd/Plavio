@@ -21,7 +21,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -49,9 +52,12 @@ private fun phase(t: Float, startMs: Int, durMs: Int): Float =
 fun SplashScreen(onDone: () -> Unit) {
     var started by remember { mutableStateOf(false) }
     val palette = LocalPalette.current
-    // Exact same brush as the home screen "Plavio" wordmark — one definition,
-    // so the branding always matches no matter the accent theme.
-    val nameBrush = palette.gradient
+    // The home screen paints its "Plavio" gradient across the whole word.
+    // The staggered letters here are separate text blocks, so each letter's
+    // brush is shifted by its measured offset — the gradient spans the full
+    // wordmark exactly like home, instead of restarting on every letter.
+    // Same accent colors as LocalPalette.gradient; animation untouched.
+    var wordWidthPx by remember { mutableStateOf(0f) }
     val t by animateFloatAsState(
         targetValue = if (started) 1f else 0f,
         animationSpec = tween(durationMillis = SPLASH_TOTAL_MS, easing = LinearEasing),
@@ -70,19 +76,40 @@ fun SplashScreen(onDone: () -> Unit) {
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(horizontalArrangement = Arrangement.Center) {
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier.onGloballyPositioned {
+                    wordWidthPx = it.size.width.toFloat()
+                }
+            ) {
                 "Plavio".forEachIndexed { i, ch ->
                     val lt = phase(t, LETTERS_START_MS + i * LETTER_STAGGER_MS, LETTER_MS)
+                    var letterLeftPx by remember { mutableStateOf<Float?>(null) }
+                    val letterBrush = remember(palette, wordWidthPx, letterLeftPx) {
+                        val left = letterLeftPx
+                        if (wordWidthPx > 0f && left != null) {
+                            Brush.horizontalGradient(
+                                listOf(palette.accent, palette.accent2),
+                                startX = -left,
+                                endX = wordWidthPx - left
+                            )
+                        } else {
+                            palette.gradient
+                        }
+                    }
                     Text(
                         text = ch.toString(),
                         style = TextStyle(
-                            brush = nameBrush,
+                            brush = letterBrush,
                             fontSize = 38.sp,
                             fontWeight = FontWeight.Bold
                         ),
                         modifier = Modifier
                             .alpha(lt)
                             .graphicsLayer { translationY = (1f - lt) * 26f }
+                            .onGloballyPositioned {
+                                letterLeftPx = it.positionInParent().x
+                            }
                     )
                 }
             }
