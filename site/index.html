@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plavio — Your streaming universe</title>
+<meta name="description" content="Plavio is a free, open-source Android streaming app. Download the APK and start watching.">
+<link rel="icon" type="image/png" href="img/logo-small.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="hero">
+  <img class="logo" src="img/logo.png" alt="Plavio logo" width="512" height="512">
+  <h1>Plavio</h1>
+  <p class="tagline">Your streaming universe.</p>
+  <p class="sub">Free &amp; open-source Android app — your addons, your streams, your player.</p>
+  <div class="dl-row">
+    <a id="dlGitlab" class="dl-btn" href="https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/0.8.5/Plavio-v0.8.5.apk">
+      <span class="dl-icon">⬇</span>
+      <span class="dl-text">Download APK</span>
+      <span id="dlVerLab" class="dl-ver">v0.8.5</span>
+    </a>
+    <a id="dlGithub" class="dl-btn dl-gh" href="https://github.com/KotlinJS5/PulseStream/releases/latest">
+      <span class="dl-icon">⬇</span>
+      <span class="dl-text">Download from GitHub</span>
+      <span id="dlVerHub" class="dl-ver">v0.8.5</span>
+    </a>
+  </div>
+  <p class="dl-note">Free forever · No ads · ~15&nbsp;MB · Android 8.0+</p>
+</header>
+
+<div class="tv-banner">📺 <strong>Plavio for Android TV</strong> is in the works — coming soon.</div>
+
+<section class="shots">
+  <h2>Take a look</h2>
+  <div class="shot-row">
+    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-home.png" alt="Home screen" loading="lazy">
+    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-live.png" alt="Live TV" loading="lazy">
+    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-search.png" alt="Search" loading="lazy">
+    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-addons.png" alt="Addons" loading="lazy">
+    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-settings.png" alt="Settings" loading="lazy">
+  </div>
+</section>
+
+<section class="features">
+  <h2>Why Plavio</h2>
+  <div class="feat-grid">
+    <div class="feat"><h3>🎬 Your addons</h3><p>Install any Stremio-protocol addon via its manifest URL. Star favorites, reorder freely.</p></div>
+    <div class="feat"><h3>▶️ Built-in player</h3><p>Gesture controls, subtitles, audio tracks, resume playback, skip intro.</p></div>
+    <div class="feat"><h3>📺 Live TV</h3><p>A dedicated tab for your live streams.</p></div>
+    <div class="feat"><h3>🔄 In-app updates</h3><p>The app tells you when a new version is out and updates itself.</p></div>
+    <div class="feat"><h3>🌙 Made for the dark</h3><p>A glass-glow dark interface designed for movie nights.</p></div>
+    <div class="feat"><h3>🔓 Open source</h3><p>The code is public. No trackers, no ads, no nonsense.</p></div>
+  </div>
+</section>
+
+<section class="install">
+  <h2>How to install</h2>
+  <ol>
+    <li><strong>Tap one of the Download buttons</strong> above — the file saves to your phone.</li>
+    <li><strong>Open the downloaded file</strong> from your notifications or Downloads.</li>
+    <li><strong>Allow unknown sources</strong> when Android asks — the APK comes straight from the developer's official release page, so it's safe to install.</li>
+    <li><strong>Tap Install</strong>, then open Plavio and enjoy.</li>
+  </ol>
+  <p class="note">Updating later is easy: the app notifies you and installs the update itself.</p>
+</section>
+
+<section class="addons">
+  <h2>Recommended addons</h2>
+  <p class="sec-sub">Copy a link, then in Plavio go to <strong>Addons → +</strong> and paste it. That's it.</p>
+  <div id="addonList" class="addon-list"></div>
+</section>
+
+<section class="links">
+  <h2>Follow the project</h2>
+  <div class="link-row">
+    <a class="pill" href="https://github.com/KotlinJS5/PulseStream" target="_blank" rel="noopener">GitHub</a>
+    <a class="pill" href="https://gitlab.com/KotlinJS5/plavio" target="_blank" rel="noopener">GitLab</a>
+    <span class="pill soon" title="Coming soon">Reddit · soon</span>
+    <a class="pill" href="https://discord.gg/pbNwJKU3p" target="_blank" rel="noopener">Discord</a>
+  </div>
+</section>
+
+<footer>
+  <p>Built with ❤️ by <strong>Najam</strong></p>
+  <p class="fine">Plavio is a generic streaming client. Addons are provided by third parties.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
