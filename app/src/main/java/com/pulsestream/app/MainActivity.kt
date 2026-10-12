@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -77,13 +78,16 @@ import com.pulsestream.app.ui.screens.DetailScreen
 import com.pulsestream.app.ui.screens.HomeCatalogsScreen
 import com.pulsestream.app.ui.screens.PlaybackSettingsScreen
 import com.pulsestream.app.ui.screens.SubtitleSettingsScreen
-import com.pulsestream.app.ui.screens.AudioSettingsScreen
 import com.pulsestream.app.ui.screens.AppearanceSettingsScreen
 import com.pulsestream.app.ui.screens.AboutScreen
 import com.pulsestream.app.ui.screens.LicensesScreen
 import com.pulsestream.app.ui.screens.HomeScreen
 import com.pulsestream.app.ui.screens.PlayerScreen
 import com.pulsestream.app.ui.screens.SearchScreen
+import com.pulsestream.app.ui.screens.TrailersScreen
+import com.pulsestream.app.ui.components.MiniTrailerOverlay
+import com.pulsestream.app.ui.components.TrailerMiniController
+import com.pulsestream.app.ui.screens.TrailerPlayerScreen
 import com.pulsestream.app.ui.screens.WatchlistScreen
 import com.pulsestream.app.ui.theme.AccentTheme
 import com.pulsestream.app.ui.theme.GlassBorder
@@ -200,6 +204,7 @@ private fun DockItem(
 private val tabs = listOf(
     Tab(Routes.HOME, "Home", Icons.Filled.Home),
     Tab(Routes.LIVE, "Live", Icons.Filled.LiveTv),
+    Tab(Routes.TRAILERS, "Trailers", Icons.Filled.Movie),
     Tab(Routes.SEARCH, "Search", Icons.Filled.Search),
     Tab(Routes.SETTINGS, "Settings", Icons.Filled.Settings)
 )
@@ -220,6 +225,10 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
     val isTv = rememberIsTv()
+
+    // Mini floating trailer player (YouTube-style): one trailer at a time,
+    // floats above all tabs. Mobile only — TV keeps the full player.
+    val trailerMini = remember { TrailerMiniController() }
 
     // Deep link: a plavio-addons:// link opened the app (cold start or while
     // running — MainActivity stashed it via handleAddonDeepLink). Jump to the
@@ -313,9 +322,10 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         }
     } else {
         val showBottomBar = tabs.any { it.route == currentDestination?.route }
-        Scaffold(
-            containerColor = LocalPalette.current.background,
-            bottomBar = {
+        Box(Modifier.fillMaxSize()) {
+            Scaffold(
+                containerColor = LocalPalette.current.background,
+                bottomBar = {
             if (showBottomBar) {
                 Box(
                     modifier = Modifier
@@ -357,9 +367,18 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         }
     ) { padding ->
         Box(Modifier.padding(padding)) {
-            PulseNavGraph(navController, repository, onThemeChanged)
+            PulseNavGraph(navController, repository, onThemeChanged, trailerMini)
         }
     }
+        // Mini floating trailer player, above content and dock.
+        MiniTrailerOverlay(
+            controller = trailerMini,
+            onExpand = {
+                trailerMini.expand()
+                navController.navigate(Routes.TRAILER_PLAYER)
+            }
+        )
+        } // end Box wrapping mobile Scaffold
     } // end else (mobile bottom dock)
 
     // Update popup, shown over whatever screen is visible (both form factors).
@@ -373,7 +392,8 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
 private fun PulseNavGraph(
     navController: NavHostController,
     repository: StreamRepository,
-    onThemeChanged: () -> Unit
+    onThemeChanged: () -> Unit,
+    trailerMini: TrailerMiniController? = null
 ) {
     NavHost(navController = navController, startDestination = Routes.SPLASH) {
         composable(Routes.SPLASH) {
@@ -438,6 +458,34 @@ private fun PulseNavGraph(
                 onGoToAddons = { navController.navigate(Routes.ADDONS) }
             )
         }
+        composable(Routes.TRAILERS) {
+            val ctx = androidx.compose.ui.platform.LocalContext.current.applicationContext
+            TrailersScreen(
+                repository = repository,
+                onPlay = { req ->
+                    repository.pendingPlayback = req
+                    // Mini floating player (mobile); TV falls back to the full player.
+                    val mini = trailerMini
+                    if (mini != null) {
+                        mini.play(ctx, req)
+                    } else {
+                        navController.navigate(Routes.TRAILER_PLAYER)
+                    }
+                },
+                onGoToAddons = { navController.navigate(Routes.ADDONS) }
+            )
+        }
+        composable(Routes.TRAILER_PLAYER) {
+            TrailerPlayerScreen(
+                repository = repository,
+                externalPlayer = trailerMini?.player,
+                onBack = {
+                    // YouTube behavior: back minimizes to the floating player.
+                    trailerMini?.minimize()
+                    navController.popBackStack()
+                }
+            )
+        }
         composable(Routes.SEARCH) {
             SearchScreen(
                 repository = repository,
@@ -481,7 +529,6 @@ private fun PulseNavGraph(
                 onGoToHomeCatalogs = { navController.navigate(Routes.HOME_CATALOGS) },
                 onGoToPlayback = { navController.navigate(Routes.PLAYBACK_SETTINGS) },
                 onGoToSubtitles = { navController.navigate(Routes.SUBTITLE_SETTINGS) },
-                onGoToAudio = { navController.navigate(Routes.AUDIO_SETTINGS) },
                 onGoToAppearance = { navController.navigate(Routes.APPEARANCE_SETTINGS) },
                 onGoToAbout = { navController.navigate(Routes.ABOUT) },
                 onGoToAccount = { navController.navigate(Routes.ACCOUNT) }
@@ -501,12 +548,6 @@ private fun PulseNavGraph(
         }
         composable(Routes.SUBTITLE_SETTINGS) {
             SubtitleSettingsScreen(
-                repository = repository,
-                onBack = { navController.popBackStack() }
-            )
-        }
-        composable(Routes.AUDIO_SETTINGS) {
-            AudioSettingsScreen(
                 repository = repository,
                 onBack = { navController.popBackStack() }
             )
