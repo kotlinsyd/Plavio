@@ -1074,7 +1074,6 @@ class StreamRepository(
         val targets = listOf(
             "https://plaviometa.vercel.app/manifest.json",
             "https://plaviohd.vercel.app/manifest.json",
-            "https://v3-cinemeta.strem.io/manifest.json",
             "https://opensubtitles-v3.strem.io/manifest.json",
             "https://subsense.nepiraw.com/manifest.json"
         )
