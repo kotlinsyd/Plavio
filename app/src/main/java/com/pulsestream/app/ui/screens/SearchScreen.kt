@@ -37,6 +37,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
@@ -49,6 +50,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pulsestream.app.ui.components.SafePosterImage
+import com.pulsestream.app.ui.tv.tvFocusRing
 import com.pulsestream.app.data.CachedMeta
 import com.pulsestream.app.data.SearchHistory
 import com.pulsestream.app.data.StreamRepository
@@ -64,12 +66,17 @@ fun SearchScreen(
     repository: StreamRepository,
     onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit
 ) {
-    var query by remember { mutableStateOf("") }
-    var selectedType by remember { mutableStateOf<String?>(null) }
+    // Survive rotation: query/type/genre are saveable, and the debounced
+    // search effect below re-runs on restore (results aren't parcelable,
+    // so they re-fetch instead of being saved).
+    var query by rememberSaveable { mutableStateOf("") }
+    var selectedType by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedGenre by rememberSaveable { mutableStateOf<String?>(null) }
+    // The query+type combo the saved genre belongs to — resets the genre
+    // when the search moves on (replaces the old remember(query) reset).
+    var genreOwner by rememberSaveable { mutableStateOf("") }
     var results by remember { mutableStateOf<List<CachedMeta>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
-    // Genre filter resets with each new query; filters the fetched results locally.
-    var selectedGenre by remember(query) { mutableStateOf<String?>(null) }
     val genres = remember(results) {
         results.flatMap { it.meta.genres }.distinct().sorted().take(14)
     }
@@ -87,6 +94,13 @@ fun SearchScreen(
             results = emptyList()
             searching = false
             return@LaunchedEffect
+        }
+        // Genre filter resets with each new query (and stays put on
+        // rotation, where owner still matches).
+        val owner = "$q|$selectedType"
+        if (owner != genreOwner) {
+            selectedGenre = null
+            genreOwner = owner
         }
         searching = true
         delay(500)
@@ -130,8 +144,10 @@ fun SearchScreen(
             ) {
                 items(SEARCH_TYPES, key = { it.second }) { (type, label) ->
                     FilterChip(
+                        modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
+                        // Re-tapping a selected chip toggles it back off.
                         selected = selectedType == type,
-                        onClick = { selectedType = type },
+                        onClick = { selectedType = if (selectedType == type) null else type },
                         label = { Text(label) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = LocalPalette.current.accent.copy(alpha = 0.25f),
@@ -152,6 +168,7 @@ fun SearchScreen(
                 ) {
                     item(key = "genre_all") {
                         FilterChip(
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
                             selected = selectedGenre == null,
                             onClick = { selectedGenre = null },
                             label = { Text("All genres") },
@@ -165,6 +182,7 @@ fun SearchScreen(
                     }
                     items(genres, key = { "genre_$it" }) { genre ->
                         FilterChip(
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
                             selected = selectedGenre == genre,
                             onClick = { selectedGenre = if (selectedGenre == genre) null else genre },
                             label = { Text(genre) },
@@ -223,6 +241,7 @@ fun SearchScreen(
                             ) {
                                 items(history, key = { it }) { past ->
                                     FilterChip(
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
                                         selected = false,
                                         onClick = { query = past },
                                         label = { Text(past) },
@@ -300,7 +319,11 @@ private val SEARCH_TYPES: List<Pair<String?, String>> = listOf(
 
 @Composable
 private fun GridPoster(item: CachedMeta, onClick: () -> Unit) {
-    Column(Modifier.clickable(onClick = onClick)) {
+    Column(
+        Modifier
+            .clickable(onClick = onClick)
+            .tvFocusRing(RoundedCornerShape(12.dp))
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
