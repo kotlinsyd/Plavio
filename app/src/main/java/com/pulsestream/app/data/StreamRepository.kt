@@ -30,6 +30,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Single source of truth: Room for persistence, StremioApi for network,
  * in-memory caches for catalogs (search) and the pending playback request (navigation).
  */
+
+/** Outcome of a manual per-addon manifest refresh. */
+sealed interface AddonRefreshOutcome {
+    data class Updated(val oldVersion: String, val newVersion: String) : AddonRefreshOutcome
+    data class UpToDate(val version: String) : AddonRefreshOutcome
+}
+
 class StreamRepository(
     private val db: AppDatabase,
     val api: StremioApi,
@@ -96,6 +103,40 @@ class StreamRepository(
         }
     }
 
+    /**
+     * Re-fetch an installed addon's manifest.json from its stored base URL
+     * and update the local record (name, version, description, types,
+     * resources, configure flag, logo). User-owned fields — enabled,
+     * manual order, starred, pre-installed flag, show-on-home, install
+     * date — are preserved. On any fetch/parse failure the stored record
+     * is left untouched and the error is returned.
+     */
+    suspend fun refreshAddon(id: String): Result<AddonRefreshOutcome> = withContext(Dispatchers.IO) {
+        runCatching {
+            val dao = db.addonDao()
+            val current = dao.getAll().firstOrNull { it.id == id }
+                ?: throw IllegalStateException("Addon not found")
+            val manifest = api.fetchManifest(current.baseUrl)
+            val updated = current.copy(
+                name = manifest.name,
+                version = manifest.version,
+                description = manifest.description,
+                types = manifest.types.joinToString(","),
+                resources = manifest.resources.joinToString(","),
+                configurable = manifest.configurable,
+                logoUrl = manifest.logo ?: current.logoUrl
+            )
+            dao.upsert(updated)
+            // Drop the cached manifest so catalogs/streams use the fresh one.
+            manifestCache.remove(current.baseUrl)
+            if (current.version.isNotBlank() && manifest.version != current.version) {
+                AddonRefreshOutcome.Updated(current.version, manifest.version)
+            } else {
+                AddonRefreshOutcome.UpToDate(manifest.version)
+            }
+        }
+    }
+
     suspend fun removeAddon(id: String) = withContext(Dispatchers.IO) {
         val baseUrl = db.addonDao().getAll().firstOrNull { it.id == id }?.baseUrl
         db.addonDao().deleteById(id)
@@ -156,6 +197,60 @@ class StreamRepository(
     suspend fun catalogAddons(): List<InstalledAddon> = withContext(Dispatchers.IO) {
         enabledAddons().filter { it.hasCatalog }
     }
+
+    /**
+     * Trending movies + series for the Trailers tab. PlavioMeta first (its
+     * metas carry trailerStreams), then any other enabled catalog addon.
+     * Returns catalog items only — trailer YouTube ids resolve lazily per
+     * tap via [getMetaFromAny], so the tab loads fast.
+     */
+    suspend fun trendingForTrailers(): List<TrailerItem> = withContext(Dispatchers.IO) {
+        val addons = catalogAddons()
+        if (addons.isEmpty()) return@withContext emptyList()
+        val ordered = addons.sortedBy { metaRank(it) }
+        val out = linkedMapOf<String, TrailerItem>()
+        for (addon in ordered) {
+            val manifest = runCatching { cachedManifest(addon.baseUrl) }.getOrNull() ?: continue
+            for (type in listOf("movie", "series")) {
+                val catalog = manifest.catalogs.firstOrNull { it.type == type && "trend" in it.id.lowercase() }
+                    ?: manifest.catalogs.firstOrNull { it.type == type }
+                    ?: continue
+                val items = runCatching { api.fetchCatalog(addon.baseUrl, type, catalog.id) }.getOrNull()
+                    ?: continue
+                items.forEach { meta ->
+                    out.putIfAbsent(
+                        "${addon.id}|${meta.id}",
+                        TrailerItem(addon.id, addon.baseUrl, type, meta)
+                    )
+                }
+            }
+            // One addon's trending rows cover movies+series — no need to merge more.
+            if (out.isNotEmpty()) break
+        }
+        out.values.toList()
+    }
+
+    /**
+     * TTL-cached trending trailers, split into (movies, series). Revisiting
+     * the Trailers tab within the TTL reuses memory — no spinner, no network.
+     * Pass [forceRefresh] for pull-to-refresh.
+     */
+    suspend fun trendingTrailersCached(
+        forceRefresh: Boolean = false
+    ): Pair<List<TrailerItem>, List<TrailerItem>> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        trailersCache?.let { (ts, data) ->
+            if (!forceRefresh && now - ts < TRAILERS_CACHE_TTL_MS) return@withContext data
+        }
+        val all = trendingForTrailers()
+        val data = all.filter { it.type == "movie" } to all.filter { it.type == "series" }
+        trailersCache = now to data
+        data
+    }
+
+    /** In-memory Trailers tab data: (fetchedAt, movies to series). */
+    @Volatile
+    private var trailersCache: Pair<Long, Pair<List<TrailerItem>, List<TrailerItem>>>? = null
 
     /** Whether an addon's catalogs appear on the Home screen. */
     suspend fun setAddonShowOnHome(id: String, show: Boolean) = withContext(Dispatchers.IO) {
@@ -1131,6 +1226,8 @@ class StreamRepository(
         private const val M3U_CACHE_TTL_MS = 15L * 60L * 1000L
         /** Freshness of the in-memory Live-tab TV rows. */
         private const val TV_ROWS_TTL_MS = 15L * 60L * 1000L
+        /** Freshness of the in-memory Trailers-tab data. */
+        private const val TRAILERS_CACHE_TTL_MS = 15L * 60L * 1000L
     }
 
     /**
