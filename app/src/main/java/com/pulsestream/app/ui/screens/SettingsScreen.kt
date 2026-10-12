@@ -15,10 +15,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrightnessHigh
@@ -27,7 +29,6 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.ClosedCaption
-import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FastForward
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Style
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Person
@@ -46,6 +48,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -82,12 +86,15 @@ import com.pulsestream.app.data.update.UpdateInfo
 import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.UpdatePrompt
 import com.pulsestream.app.ui.components.GlowBackground
+import com.pulsestream.app.ui.components.StreamCardPreview
+import com.pulsestream.app.ui.components.StreamCardStyle
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.AccentTheme
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.GlassWhite
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
+import com.pulsestream.app.ui.tv.tvFocusRing
 import kotlinx.coroutines.launch
 
 @Composable
@@ -98,11 +105,26 @@ fun SettingsScreen(
     onGoToHomeCatalogs: () -> Unit = {},
     onGoToPlayback: () -> Unit = {},
     onGoToSubtitles: () -> Unit = {},
-    onGoToAudio: () -> Unit = {},
     onGoToAppearance: () -> Unit = {},
     onGoToAbout: () -> Unit = {},
     onGoToAccount: () -> Unit = {}
 ) {
+    val settings = repository.settings
+    var cardStyleKey by remember { mutableStateOf(settings.streamCardStyle) }
+    var showCardStyleDialog by remember { mutableStateOf(false) }
+
+    if (showCardStyleDialog) {
+        StreamCardStyleDialog(
+            initial = cardStyleKey,
+            onDismiss = { showCardStyleDialog = false },
+            onSelect = { key ->
+                cardStyleKey = key
+                settings.streamCardStyle = key
+                showCardStyleDialog = false
+            }
+        )
+    }
+
     GlowBackground {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -124,7 +146,7 @@ fun SettingsScreen(
                 SettingsNavRow(
                     icon = Icons.Filled.PlayArrow,
                     title = "Playback",
-                    subtitle = "Autoplay, next episode, screen, skip intro",
+                    subtitle = "Autoplay, next episode, screen, skip intro, audio",
                     onClick = onGoToPlayback
                 )
             }
@@ -140,17 +162,6 @@ fun SettingsScreen(
                 )
             }
 
-            // ---- Audio ----
-            item { SettingsSectionHeader("Audio") }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Audiotrack,
-                    title = "Audio",
-                    subtitle = "Preferred audio language",
-                    onClick = onGoToAudio
-                )
-            }
-
             // ---- Appearance ----
             item { SettingsSectionHeader("Appearance") }
             item {
@@ -159,6 +170,14 @@ fun SettingsScreen(
                     title = "Appearance",
                     subtitle = "Accent color and AMOLED black",
                     onClick = onGoToAppearance
+                )
+            }
+            item(key = "cardstyle") {
+                SettingsNavRow(
+                    icon = Icons.Filled.Style,
+                    title = "Stream card style",
+                    subtitle = StreamCardStyle.fromKey(cardStyleKey).label,
+                    onClick = { showCardStyleDialog = true }
                 )
             }
 
@@ -776,4 +795,77 @@ private fun SocialIconRow() {
             }
         }
     }
+}
+/** Single-select dialog for the stream card visual style, with live previews. */
+@Composable
+private fun StreamCardStyleDialog(
+    initial: String,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit
+) {
+    var selected by remember { mutableStateOf(initial) }
+    val accent = LocalPalette.current.accent
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Stream card style", color = TextPrimary) },
+        text = {
+            Column {
+                Text(
+                    "How stream cards look in the sources list.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 420.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(vertical = 4.dp)
+                ) {
+                    items(StreamCardStyle.values(), key = { it.key }) { style ->
+                        val isSelected = style.key == selected
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .border(
+                                    if (isSelected) 1.5.dp else 1.dp,
+                                    if (isSelected) accent else GlassBorder,
+                                    RoundedCornerShape(12.dp)
+                                )
+                                .clickable { selected = style.key }
+                                .tvFocusRing(RoundedCornerShape(12.dp))
+                                .padding(10.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = { selected = style.key },
+                                    colors = RadioButtonDefaults.colors(selectedColor = accent)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    style.label,
+                                    color = TextPrimary,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            // Live miniature of the real card — non-interactive.
+                            StreamCardPreview(style = style, modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSelect(selected) }) {
+                Text("Done", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextSecondary)
+            }
+        }
+    )
 }

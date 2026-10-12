@@ -23,14 +23,23 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +49,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,17 +69,25 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.pulsestream.app.data.AddonShare
+import com.pulsestream.app.data.AddonRefreshOutcome
+import com.pulsestream.app.data.SharedAddon
 import com.pulsestream.app.data.StreamRepository
+import com.pulsestream.app.data.StremioApi
 import com.pulsestream.app.data.db.InstalledAddon
 import com.pulsestream.app.ui.components.EmptyState
 import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.DotsLoader
+import com.pulsestream.app.ui.tv.TvFocusGreen
+import com.pulsestream.app.ui.tv.tvFocusRing
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 sealed interface AddUiState {
     data object Idle : AddUiState
@@ -77,8 +95,19 @@ sealed interface AddUiState {
     data class Error(val message: String) : AddUiState
 }
 
+/** One-shot result of a manual addon refresh, shown under the addon row. */
+data class RefreshNote(val message: String, val isError: Boolean)
+
 class AddonsViewModel(private val repo: StreamRepository) : ViewModel() {
     var addState by mutableStateOf<AddUiState>(AddUiState.Idle)
+        private set
+
+    /** Addon ids currently being refreshed (spinner on their row). */
+    var refreshingIds by mutableStateOf(setOf<String>())
+        private set
+
+    /** Latest refresh result per addon id, shown under the row. */
+    var refreshNotes by mutableStateOf(mapOf<String, RefreshNote>())
         private set
 
     fun addAddon(url: String, onDone: () -> Unit) {
@@ -96,8 +125,86 @@ class AddonsViewModel(private val repo: StreamRepository) : ViewModel() {
 
     fun reset() { addState = AddUiState.Idle }
 
+    /** Import a shared addon bundle: installs every addon in it, one by one. */
+    fun importBundle(
+        code: String,
+        onDone: (installed: Int, failed: Int, alreadyInstalled: Int) -> Unit
+    ) {
+        viewModelScope.launch {
+            val shared = AddonShare.decode(code)
+            if (shared.isNullOrEmpty()) {
+                addState = AddUiState.Error("That doesn't look like a Plavio addon bundle.")
+                onDone(0, 0, 0)
+                return@launch
+            }
+            addState = AddUiState.Adding
+            // Dedup by normalized manifest URL: re-importing the same bundle
+            // skips what's already installed instead of "installing" it
+            // again (addAddonFromUrl upserts and would bump sortOrder).
+            val known = repo.addons.first()
+                .mapTo(mutableSetOf()) { StremioApi.normalizeBaseUrl(it.baseUrl) }
+            var ok = 0
+            var failed = 0
+            var skipped = 0
+            for (s in shared) {
+                val norm = runCatching { StremioApi.normalizeBaseUrl(s.url) }.getOrNull()
+                if (norm != null && norm in known) {
+                    skipped++
+                    continue
+                }
+                val r = repo.addAddonFromUrl(s.url)
+                if (r.isSuccess) {
+                    ok++
+                    if (norm != null) known.add(norm)
+                } else {
+                    failed++
+                }
+            }
+            addState = AddUiState.Idle
+            onDone(ok, failed, skipped)
+        }
+    }
+
     fun remove(addon: InstalledAddon) {
         viewModelScope.launch { repo.removeAddon(addon.id) }
+    }
+
+    /**
+     * Re-fetch the addon's manifest.json and update its stored metadata.
+     * The stored record is only touched on success — a failed refresh
+     * keeps the old data and reports the reason under the row.
+     */
+    fun refreshAddon(addon: InstalledAddon) {
+        if (addon.id in refreshingIds) return
+        viewModelScope.launch {
+            refreshingIds = refreshingIds + addon.id
+            refreshNotes = refreshNotes - addon.id
+            val result = repo.refreshAddon(addon.id)
+            refreshingIds = refreshingIds - addon.id
+            val note = result.fold(
+                onSuccess = { outcome ->
+                    when (outcome) {
+                        is AddonRefreshOutcome.Updated -> RefreshNote(
+                            "${addon.name} updated: v${outcome.oldVersion} → v${outcome.newVersion}",
+                            isError = false
+                        )
+                        is AddonRefreshOutcome.UpToDate -> RefreshNote(
+                            if (outcome.version.isNotBlank())
+                                "${addon.name} is already up to date (v${outcome.version})"
+                            else "${addon.name} is already up to date",
+                            isError = false
+                        )
+                    }
+                },
+                onFailure = {
+                    RefreshNote(
+                        "Couldn't refresh ${addon.name}: ${it.message ?: "network error"}",
+                        isError = true
+                    )
+                }
+            )
+            refreshNotes = refreshNotes + (addon.id to note)
+        }
     }
 
     fun setEnabled(addon: InstalledAddon, enabled: Boolean) {
@@ -124,13 +231,34 @@ class AddonsViewModel(private val repo: StreamRepository) : ViewModel() {
 }
 
 @Composable
-fun AddonsScreen(repository: StreamRepository, onBack: () -> Unit = {}) {
+fun AddonsScreen(
+    repository: StreamRepository,
+    onBack: () -> Unit = {},
+    onGoToTvSetup: () -> Unit = {}
+) {
     val vm: AddonsViewModel = viewModel(factory = vmFactory { AddonsViewModel(repository) })
     val addons by repository.addons.collectAsState(initial = emptyList())
     var showDialog by remember { mutableStateOf(false) }
+    var showImportDialog by remember { mutableStateOf(false) }
+    // Pre-fill for the import dialog when a plavio-addons:// deep link opened
+    // the app (MainActivity stashed the link on the repository).
+    var importPrefill by remember { mutableStateOf<String?>(null) }
+    val pendingBundle by repository.pendingAddonBundle.collectAsState()
+    LaunchedEffect(pendingBundle) {
+        if (pendingBundle != null) {
+            repository.clearPendingAddonBundle()
+            importPrefill = pendingBundle
+            showImportDialog = true
+        }
+    }
+    // Bundle-share selection mode: tick addons, export as one shareable link.
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf(setOf<String>()) }
+    val context = LocalContext.current
     // Single list in the user's manual order — toggling on/off never moves a row.
     val ordered = remember(addons) { addons.sortedBy { it.sortOrder } }
     val enabledCount = remember(addons) { addons.count { it.enabled } }
+    val isTv = com.pulsestream.app.ui.tv.rememberIsTv()
 
     GlowBackground {
         LazyColumn(
@@ -144,23 +272,65 @@ fun AddonsScreen(repository: StreamRepository, onBack: () -> Unit = {}) {
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(top = 16.dp)
                     ) {
-                        IconButton(
-                            onClick = onBack,
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = TextPrimary
-                            )
+                        if (selectionMode) {
+                            IconButton(
+                                onClick = {
+                                    selectionMode = false
+                                    selectedIds = emptySet()
+                                },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Cancel selection",
+                                    tint = TextPrimary
+                                )
+                            }
+                        } else {
+                            IconButton(
+                                onClick = onBack,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.ArrowBack,
+                                    contentDescription = "Back",
+                                    tint = TextPrimary
+                                )
+                            }
                         }
                         Spacer(Modifier.width(4.dp))
                         Text(
-                            text = "Addons",
+                            text = if (selectionMode) "${selectedIds.size} selected" else "Addons",
                             style = MaterialTheme.typography.headlineMedium,
                             fontWeight = FontWeight.Bold,
-                            color = TextPrimary
+                            color = TextPrimary,
+                            modifier = Modifier.weight(1f)
                         )
+                        if (!selectionMode) {
+                            // Import a shared bundle.
+                            IconButton(
+                                onClick = { vm.reset(); showImportDialog = true },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.Download,
+                                    contentDescription = "Import addon bundle",
+                                    tint = TextSecondary
+                                )
+                            }
+                            // Enter bundle-share selection mode.
+                            IconButton(
+                                onClick = { selectionMode = true },
+                                modifier = Modifier.size(40.dp),
+                                enabled = addons.isNotEmpty()
+                            ) {
+                                Icon(
+                                    Icons.Filled.Share,
+                                    contentDescription = "Share addons",
+                                    tint = TextSecondary
+                                )
+                            }
+                        }
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -174,6 +344,14 @@ fun AddonsScreen(repository: StreamRepository, onBack: () -> Unit = {}) {
 
             item(key = "install-card") {
                 InstallAddonCard(onClick = { vm.reset(); showDialog = true })
+            }
+
+            // TV only: push addons from the phone over home Wi-Fi instead of
+            // typing long URLs with the remote.
+            if (isTv) {
+                item(key = "tv-setup-card") {
+                    TvSetupCard(onClick = onGoToTvSetup)
+                }
             }
 
             if (ordered.isEmpty()) {
@@ -190,14 +368,82 @@ fun AddonsScreen(repository: StreamRepository, onBack: () -> Unit = {}) {
                     val idx = ordered.indexOfFirst { it.id == addon.id }
                     AddonRow(
                         addon = addon,
+                        selectionMode = selectionMode,
+                        selected = addon.id in selectedIds,
+                        onSelect = {
+                            selectedIds = if (addon.id in selectedIds) {
+                                selectedIds - addon.id
+                            } else {
+                                selectedIds + addon.id
+                            }
+                        },
                         onToggle = { vm.setEnabled(addon, it) },
                         onRemove = { vm.remove(addon) },
                         onStar = { vm.toggleStar(addon) },
+                        onRefresh = { vm.refreshAddon(addon) },
+                        refreshing = addon.id in vm.refreshingIds,
+                        refreshNote = vm.refreshNotes[addon.id],
                         onUp = { vm.moveUp(addon, ordered) },
                         onDown = { vm.moveDown(addon, ordered) },
                         canUp = idx > 0,
                         canDown = idx < ordered.size - 1
                     )
+                }
+            }
+
+            // Bundle-share action bar (selection mode only).
+            if (selectionMode) {
+                item(key = "share-bar") {
+                    val chosen = ordered.filter { it.id in selectedIds }
+                    Surface(
+                        onClick = {
+                            if (chosen.isNotEmpty()) {
+                                val link = AddonShare.encode(
+                                    chosen.map {
+                                        SharedAddon(it.name, it.baseUrl)
+                                    }
+                                )
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(
+                                        Intent.EXTRA_TEXT,
+                                        "My Plavio addons (${
+                                            chosen.joinToString(", ") { it.name }
+                                        }):\n$link"
+                                    )
+                                }
+                                context.startActivity(
+                                    Intent.createChooser(intent, "Share addon bundle")
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(50),
+                        color = if (chosen.isNotEmpty()) LocalPalette.current.accent
+                        else Color.White.copy(alpha = 0.06f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                Icons.Filled.Share,
+                                contentDescription = null,
+                                tint = if (chosen.isNotEmpty()) Color(0xFF0A0A12)
+                                else TextSecondary.copy(alpha = 0.5f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                if (chosen.isEmpty()) "Tick addons to share"
+                                else "Share ${chosen.size} addon${if (chosen.size == 1) "" else "s"}",
+                                fontWeight = FontWeight.Bold,
+                                color = if (chosen.isNotEmpty()) Color(0xFF0A0A12)
+                                else TextSecondary.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -221,6 +467,15 @@ fun AddonsScreen(repository: StreamRepository, onBack: () -> Unit = {}) {
             onConfirm = { url -> vm.addAddon(url) { showDialog = false } }
         )
     }
+
+    if (showImportDialog) {
+        ImportBundleDialog(
+            state = vm.addState,
+            initialCode = importPrefill ?: "",
+            onDismiss = { showImportDialog = false; importPrefill = null; vm.reset() },
+            onImport = { code, onResult -> vm.importBundle(code, onResult) }
+        )
+    }
 }
 
 @Composable
@@ -239,21 +494,24 @@ private fun StatPill(text: String, color: Color) {
     }
 }
 
-/** Prominent install affordance at the top of the list. */
+/** Slim capsule install affordance at the top of the list. */
 @Composable
 private fun InstallAddonCard(onClick: () -> Unit) {
-    GlassCard(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onClick
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        color = Color.White.copy(alpha = 0.05f),
+        border = BorderStroke(1.dp, GlassBorder),
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(14.dp),
+            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(46.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .size(34.dp)
+                    .clip(CircleShape)
                     .background(LocalPalette.current.gradient),
                 contentAlignment = Alignment.Center
             ) {
@@ -261,7 +519,7 @@ private fun InstallAddonCard(onClick: () -> Unit) {
                     Icons.Filled.Add,
                     contentDescription = null,
                     tint = Color(0xFF0A0A12),
-                    modifier = Modifier.size(26.dp)
+                    modifier = Modifier.size(20.dp)
                 )
             }
             Spacer(Modifier.width(12.dp))
@@ -273,135 +531,269 @@ private fun InstallAddonCard(onClick: () -> Unit) {
                     color = TextPrimary
                 )
                 Text(
-                    "Paste a manifest URL — it usually ends with /manifest.json",
+                    "Paste a manifest URL",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = TextSecondary
+            )
         }
     }
 }
 
-/** Compact addon row: logo, name, star, cute on/off pill, reorder + actions. */
+/** TV only: open the QR phone-pairing setup instead of typing URLs. */
+@Composable
+private fun TvSetupCard(onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        color = TvFocusGreen.copy(alpha = 0.10f),
+        border = BorderStroke(1.dp, TvFocusGreen.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .tvFocusRing(RoundedCornerShape(50))
+    ) {
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(TvFocusGreen),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Filled.PhoneAndroid,
+                    contentDescription = null,
+                    tint = Color(0xFF0A0A12),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Add from phone",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Text(
+                    "Scan a QR code, paste URLs on your phone",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = TextSecondary
+            )
+        }
+    }
+}
+
 @Composable
 private fun AddonRow(
     addon: InstalledAddon,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+    onSelect: () -> Unit = {},
     onToggle: (Boolean) -> Unit,
     onRemove: () -> Unit,
     onStar: () -> Unit,
+    onRefresh: () -> Unit,
+    refreshing: Boolean = false,
+    refreshNote: RefreshNote? = null,
     onUp: () -> Unit,
     onDown: () -> Unit,
     canUp: Boolean,
     canDown: Boolean
 ) {
     val context = LocalContext.current
-    GlassCard(
-        modifier = Modifier.fillMaxWidth()
+    var expanded by remember { mutableStateOf(false) }
+    Surface(
+        shape = RoundedCornerShape(28.dp),
+        color = Color.White.copy(alpha = 0.04f),
+        border = BorderStroke(1.dp, GlassBorder),
+        modifier = Modifier
+            .fillMaxWidth()
             .alpha(if (addon.enabled) 1f else 0.55f)
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            AddonLogo(addon, size = 54.dp)
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                // Name + version.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        addon.name,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
+        Column {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        if (selectionMode) onSelect() else expanded = !expanded
+                    }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (selectionMode) {
+                    androidx.compose.material3.Checkbox(
+                        checked = selected,
+                        onCheckedChange = { onSelect() },
+                        colors = androidx.compose.material3.CheckboxDefaults.colors(
+                            checkedColor = LocalPalette.current.accent
+                        )
                     )
-                    if (addon.version.isNotBlank()) {
-                        Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(6.dp))
+                }
+                AddonLogo(addon, size = 40.dp)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "v${addon.version}",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = LocalPalette.current.accent,
-                            maxLines = 1
+                            addon.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
-                    }
-                    if (addon.preinstalled) {
-                        Spacer(Modifier.width(6.dp))
-                        PreinstalledBadge()
-                    }
-                }
-                // Description, like a proper addon listing.
-                if (addon.description.isNotBlank()) {
-                    Spacer(Modifier.height(3.dp))
-                    Text(
-                        addon.description,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Spacer(Modifier.height(4.dp))
-                val caps = buildList {
-                    if (addon.hasCatalog) add("Catalogs")
-                    if (addon.hasStream) add("Streams")
-                    if (addon.hasSubtitles) add("Subtitles")
-                }
-                if (caps.isNotEmpty()) {
-                    Text(
-                        caps.joinToString(" • "),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextSecondary.copy(alpha = 0.8f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
-                // Actions.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OnOffPill(enabled = addon.enabled, onToggle = onToggle)
-                    Spacer(Modifier.width(4.dp))
-                    IconButton(onClick = onStar, modifier = Modifier.size(36.dp)) {
-                        Icon(
-                            if (addon.starred) Icons.Filled.Star else Icons.Outlined.Star,
-                            contentDescription = if (addon.starred) "Unstar" else "Star for priority",
-                            tint = if (addon.starred) Color(0xFFFBBF24) else TextSecondary.copy(alpha = 0.6f),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    TinyIconButton(onClick = onUp, enabled = canUp) {
-                        Icon(Icons.Filled.KeyboardArrowUp, "Move up", modifier = Modifier.size(18.dp))
-                    }
-                    TinyIconButton(onClick = onDown, enabled = canDown) {
-                        Icon(Icons.Filled.KeyboardArrowDown, "Move down", modifier = Modifier.size(18.dp))
-                    }
-                    if (addon.configurable) {
-                        TinyIconButton(onClick = {
-                            val intent = Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("${addon.baseUrl}/configure")
+                        if (addon.version.isNotBlank()) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "v${addon.version}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = LocalPalette.current.accent,
+                                maxLines = 1
                             )
-                            context.startActivity(intent)
-                        }) {
+                        }
+                    }
+                    if (addon.starred || addon.preinstalled) {
+                        Spacer(Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (addon.starred) {
+                                Icon(
+                                    Icons.Filled.Star,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFBBF24),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            if (addon.preinstalled) PreinstalledBadge()
+                        }
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                OnOffPill(enabled = addon.enabled, onToggle = onToggle)
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    Modifier.padding(start = 62.dp, end = 14.dp, bottom = 12.dp)
+                ) {
+                    if (addon.description.isNotBlank()) {
+                        Text(
+                            addon.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    val caps = buildList {
+                        if (addon.hasCatalog) add("Catalogs")
+                        if (addon.hasStream) add("Streams")
+                        if (addon.hasSubtitles) add("Subtitles")
+                    }
+                    if (caps.isNotEmpty()) {
+                        Text(
+                            caps.joinToString(" • "),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary.copy(alpha = 0.8f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onStar, modifier = Modifier.size(36.dp)) {
                             Icon(
-                                Icons.Filled.Settings,
-                                "Configure addon",
-                                tint = LocalPalette.current.accent,
+                                if (addon.starred) Icons.Filled.Star else Icons.Outlined.Star,
+                                contentDescription = if (addon.starred) "Unstar" else "Star for priority",
+                                tint = if (addon.starred) Color(0xFFFBBF24) else TextSecondary.copy(alpha = 0.6f),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        TinyIconButton(onClick = onRefresh, enabled = !refreshing) {
+                            if (refreshing) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 2.dp,
+                                    color = LocalPalette.current.accent,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Filled.Refresh,
+                                    "Refresh addon",
+                                    tint = TextSecondary.copy(alpha = 0.8f),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        TinyIconButton(onClick = onUp, enabled = canUp) {
+                            Icon(Icons.Filled.KeyboardArrowUp, "Move up", modifier = Modifier.size(18.dp))
+                        }
+                        TinyIconButton(onClick = onDown, enabled = canDown) {
+                            Icon(Icons.Filled.KeyboardArrowDown, "Move down", modifier = Modifier.size(18.dp))
+                        }
+                        if (addon.configurable) {
+                            TinyIconButton(onClick = {
+                                // Normalize + build with HttpUrl so query-string addon
+                                // configs stay in the query instead of breaking the path.
+                                val configureUrl = StremioApi.normalizeBaseUrl(addon.baseUrl)
+                                    .toHttpUrlOrNull()?.newBuilder()
+                                    ?.addPathSegment("configure")?.build()?.toString()
+                                    ?: "${addon.baseUrl}/configure"
+                                val intent = Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse(configureUrl)
+                                )
+                                context.startActivity(intent)
+                            }) {
+                                Icon(
+                                    Icons.Filled.Settings,
+                                    "Configure addon",
+                                    tint = LocalPalette.current.accent,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        TinyIconButton(onClick = onRemove) {
+                            Icon(
+                                Icons.Filled.Delete,
+                                "Remove",
+                                tint = Color(0xFFFF6B6B),
                                 modifier = Modifier.size(18.dp)
                             )
                         }
                     }
-                    Spacer(Modifier.weight(1f))
-                    TinyIconButton(onClick = onRemove) {
-                        Icon(
-                            Icons.Filled.Delete,
-                            "Remove",
-                            tint = Color(0xFFFF6B6B),
-                            modifier = Modifier.size(18.dp)
+                    if (refreshNote != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            refreshNote.message,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (refreshNote.isError) Color(0xFFFF6B6B)
+                            else LocalPalette.current.accent,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -572,6 +964,104 @@ private fun AddAddonDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) }
+        }
+    )
+}
+
+/** Paste-a-bundle dialog: one shared link installs every addon in it. */
+@Composable
+private fun ImportBundleDialog(
+    state: AddUiState,
+    initialCode: String = "",
+    onDismiss: () -> Unit,
+    onImport: (String, (installed: Int, failed: Int, alreadyInstalled: Int) -> Unit) -> Unit
+) {
+    var code by remember(initialCode) { mutableStateOf(initialCode) }
+    var result by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = LocalPalette.current.panel,
+        title = { Text("Import addon bundle", color = TextPrimary, fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                if (result != null) {
+                    Text(result!!, color = TextPrimary, style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    Text(
+                        "Paste a bundle link someone shared with you — every addon in it installs at once.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { code = it },
+                        placeholder = { Text("plavio-addons://…", color = TextSecondary) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = LocalPalette.current.accent,
+                            unfocusedBorderColor = GlassBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = LocalPalette.current.accent
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (state is AddUiState.Adding) {
+                        Spacer(Modifier.height(12.dp))
+                        DotsLoader()
+                    }
+                    if (state is AddUiState.Error) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            state.message,
+                            color = Color(0xFFFF6B6B),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (result == null) {
+                TextButton(
+                    onClick = {
+                        onImport(code) { installed, failed, alreadyInstalled ->
+                            val plural = { n: Int -> if (n == 1) "" else "s" }
+                            result = when {
+                                installed == 0 && failed == 0 && alreadyInstalled == 0 ->
+                                    "That doesn't look like a Plavio addon bundle."
+                                installed == 0 && failed == 0 ->
+                                    "All $alreadyInstalled addon${plural(alreadyInstalled)} " +
+                                        "already installed — nothing new."
+                                failed == 0 ->
+                                    "Installed $installed addon${plural(installed)} ✓" +
+                                        (if (alreadyInstalled > 0)
+                                            " ($alreadyInstalled already installed)"
+                                        else "")
+                                else -> "Installed $installed, $failed failed (offline or dead link)."
+                            }
+                        }
+                    },
+                    enabled = state !is AddUiState.Adding && code.isNotBlank()
+                ) {
+                    Text(
+                        if (state is AddUiState.Adding) "Installing…" else "Install all",
+                        color = LocalPalette.current.accent,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            } else {
+                TextButton(onClick = onDismiss) {
+                    Text("Done", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            if (result == null) {
+                TextButton(onClick = onDismiss) { Text("Cancel", color = TextSecondary) }
+            }
         }
     )
 }
