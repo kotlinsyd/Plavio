@@ -1,5 +1,6 @@
 package com.pulsestream.app
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -26,12 +28,14 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import kotlinx.coroutines.launch
@@ -51,15 +55,19 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import kotlinx.coroutines.withContext
 import com.pulsestream.app.data.update.UpdateChecker
+import com.pulsestream.app.data.AddonShare
+import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.update.UpdateInfo
 import com.pulsestream.app.ui.components.CrashReportDialog
 import com.pulsestream.app.ui.components.UpdatePrompt
 import com.pulsestream.app.ui.nav.Routes
 import com.pulsestream.app.ui.screens.LiveScreen
+import com.pulsestream.app.ui.screens.OnboardingScreen
 import com.pulsestream.app.ui.screens.SplashScreen
 import com.pulsestream.app.ui.screens.SettingsScreen
 import com.pulsestream.app.ui.screens.AccountScreen
@@ -68,6 +76,8 @@ import com.pulsestream.app.ui.screens.CatalogScreen
 import com.pulsestream.app.ui.screens.DetailScreen
 import com.pulsestream.app.ui.screens.HomeCatalogsScreen
 import com.pulsestream.app.ui.screens.PlaybackSettingsScreen
+import com.pulsestream.app.ui.screens.SubtitleSettingsScreen
+import com.pulsestream.app.ui.screens.AudioSettingsScreen
 import com.pulsestream.app.ui.screens.AppearanceSettingsScreen
 import com.pulsestream.app.ui.screens.AboutScreen
 import com.pulsestream.app.ui.screens.LicensesScreen
@@ -81,11 +91,19 @@ import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.PulseStreamTheme
 import com.pulsestream.app.ui.theme.TextSecondary
 import com.pulsestream.app.ui.theme.paletteFor
+import com.pulsestream.app.ui.tv.TvAddonSetupScreen
+import com.pulsestream.app.ui.tv.TvBottomBar
+import com.pulsestream.app.ui.tv.rememberIsTv
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import com.pulsestream.app.ui.tv.tvFocusRing
+import com.pulsestream.app.data.AnalyticsPing
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        handleAddonDeepLink(intent)
         setContent {
             val app = applicationContext as PulseApp
             // If the last run crashed, show the log with a Copy button.
@@ -117,6 +135,27 @@ class MainActivity : ComponentActivity() {
                 PulseNav(onThemeChanged = { themeTick++ })
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAddonDeepLink(intent)
+    }
+
+    /**
+     * plavio-addons:// deep link (manifest VIEW intent-filter): stash the
+     * bundle link on the repository. PulseNav navigates to the Addons tab and
+     * AddonsScreen opens its import dialog pre-filled — both cold start and
+     * while the app is already running funnel through here.
+     */
+    private fun handleAddonDeepLink(intent: Intent?) {
+        if (intent == null) return
+        // Validates the link actually carries a decodable bundle.
+        if (AddonShare.bundleFromIntent(intent).isNullOrEmpty()) return
+        val link = intent.dataString ?: return
+        val app = applicationContext as PulseApp
+        app.repository.setPendingAddonBundle(link)
     }
 }
 
@@ -180,11 +219,103 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
-    val showBottomBar = tabs.any { it.route == currentDestination?.route }
+    val isTv = rememberIsTv()
 
-    Scaffold(
-        containerColor = LocalPalette.current.background,
-        bottomBar = {
+    // Deep link: a plavio-addons:// link opened the app (cold start or while
+    // running — MainActivity stashed it via handleAddonDeepLink). Jump to the
+    // Addons tab; AddonsScreen picks up the pending bundle and opens its
+    // import dialog pre-filled. Skipped on splash/onboarding so the startup
+    // flow isn't hijacked — the effect refires once the real destination
+    // lands. Same nav options as the dock (single top, state kept).
+    val pendingBundle by repository.pendingAddonBundle.collectAsState()
+    LaunchedEffect(pendingBundle, currentDestination) {
+        val route = currentDestination?.route
+        if (pendingBundle != null && route != null &&
+            route != Routes.SPLASH && route != Routes.ONBOARDING
+        ) {
+            navController.navigate(Routes.ADDONS) {
+                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+        }
+    }
+
+    if (isTv) {
+        // TV: bottom-center nav bar (replaced the old left rail). The bar is
+        // hidden on splash/onboarding/player, same as the rail was. Content
+        // gets bottom padding so the bar never covers anything; the bar is
+        // drawn below the content in a Column, not overlaid.
+        val barHiddenRoutes = setOf(Routes.SPLASH, Routes.ONBOARDING, Routes.PLAYER)
+        val destRoutes = currentDestination?.hierarchy?.mapNotNull { it.route }.orEmpty()
+        val showBar = destRoutes.none { it in barHiddenRoutes }
+        val barFocus = remember { FocusRequester() }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(LocalPalette.current.background)
+        ) {
+            // Top-left Home button: jumps home and parks focus on the bar.
+            if (showBar) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, top = 10.dp, end = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = {
+                            navController.navigate(Routes.HOME) {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    saveState = true
+                                }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                            runCatching { barFocus.requestFocus() }
+                        },
+                        modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
+                    ) {
+                        Icon(
+                            Icons.Filled.Home,
+                            contentDescription = "Home",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                PulseNavGraph(navController, repository, onThemeChanged)
+            }
+            if (showBar) {
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    TvBottomBar(
+                        currentDestination = currentDestination,
+                        barFocus = barFocus,
+                        onNavigate = { route ->
+                            navController.navigate(route) {
+                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    } else {
+        val showBottomBar = tabs.any { it.route == currentDestination?.route }
+        Scaffold(
+            containerColor = LocalPalette.current.background,
+            bottomBar = {
             if (showBottomBar) {
                 Box(
                     modifier = Modifier
@@ -226,165 +357,220 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         }
     ) { padding ->
         Box(Modifier.padding(padding)) {
-            NavHost(navController = navController, startDestination = Routes.SPLASH) {
-                composable(Routes.SPLASH) {
-                    // Warm the home catalog cache while the splash animation
-                    // plays — by the time Home appears, content is ready.
-                    // Fire-and-forget: never blocks or extends the animation.
-                    LaunchedEffect(Unit) {
-                        launch { runCatching { repository.refreshCatalogRows() } }
-                        launch { runCatching { repository.pruneOversizedCache() } }
-                    }
-                    SplashScreen(
-                        onDone = {
-                            navController.navigate(Routes.HOME) {
-                                popUpTo(Routes.SPLASH) { inclusive = true }
-                            }
-                        }
-                    )
-                }
-                composable(Routes.HOME) {
-                    HomeScreen(
-                        repository = repository,
-                        onOpenDetail = { addonId, type, metaId ->
-                            navController.navigate(Routes.detail(addonId, type, metaId))
-                        },
-                        onResumePlayback = {
-                            navController.navigate(Routes.PLAYER)
-                        },
-                        onGoToAddons = { navController.navigate(Routes.ADDONS) },
-                        onGoToWatchlist = { navController.navigate(Routes.WATCHLIST) },
-                        onOpenCatalog = { row ->
-                            repository.pendingCatalog = row
-                            navController.navigate(
-                                Routes.catalog(row.addonId, row.type, row.catalogId)
-                            )
-                        }
-                    )
-                }
-                composable(Routes.LIVE) {
-                    LiveScreen(
-                        repository = repository,
-                        onPlay = { navController.navigate(Routes.PLAYER) },
-                        onGoToAddons = { navController.navigate(Routes.ADDONS) }
-                    )
-                }
-                composable(Routes.SEARCH) {
-                    SearchScreen(
-                        repository = repository,
-                        onOpenDetail = { addonId, type, metaId ->
-                            navController.navigate(Routes.detail(addonId, type, metaId))
-                        }
-                    )
-                }
-                composable(Routes.WATCHLIST) {
-                    WatchlistScreen(
-                        repository = repository,
-                        onOpenDetail = { addonId, type, metaId ->
-                            navController.navigate(Routes.detail(addonId, type, metaId))
-                        }
-                    )
-                }
-                composable(Routes.ADDONS) {
-                    AddonsScreen(
-                        repository = repository,
-                        onBack = { navController.popBackStack() }
-                    )
-                }
-                composable(Routes.HOME_CATALOGS) {
-                    HomeCatalogsScreen(
-                        repository = repository,
-                        onBack = { navController.popBackStack() }
-                    )
-                }
-                composable(Routes.SETTINGS) {
-                    SettingsScreen(
-                        repository = repository,
-                        onThemeChanged = onThemeChanged,
-                        onGoToAddons = { navController.navigate(Routes.ADDONS) },
-                        onGoToHomeCatalogs = { navController.navigate(Routes.HOME_CATALOGS) },
-                        onGoToPlayback = { navController.navigate(Routes.PLAYBACK_SETTINGS) },
-                        onGoToAppearance = { navController.navigate(Routes.APPEARANCE_SETTINGS) },
-                        onGoToAbout = { navController.navigate(Routes.ABOUT) },
-                        onGoToAccount = { navController.navigate(Routes.ACCOUNT) }
-                    )
-                }
-                composable(Routes.ACCOUNT) {
-                    AccountScreen(
-                        repository = repository,
-                        onBack = { navController.popBackStack() }
-                    )
-                }
-                composable(Routes.PLAYBACK_SETTINGS) {
-                    PlaybackSettingsScreen(
-                        repository = repository,
-                        onBack = { navController.popBackStack() }
-                    )
-                }
-                composable(Routes.APPEARANCE_SETTINGS) {
-                    AppearanceSettingsScreen(
-                        repository = repository,
-                        onThemeChanged = onThemeChanged,
-                        onBack = { navController.popBackStack() }
-                    )
-                }
-                composable(Routes.ABOUT) {
-                    AboutScreen(
-                        onBack = { navController.popBackStack() },
-                        onGoToLicenses = { navController.navigate(Routes.LICENSES) }
-                    )
-                }
-                composable(Routes.LICENSES) {
-                    LicensesScreen(
-                        onBack = { navController.popBackStack() }
-                    )
-                }
-                composable(
-                    Routes.DETAIL,
-                    arguments = listOf(
-                        navArgument("addonId") { type = NavType.StringType },
-                        navArgument("type") { type = NavType.StringType },
-                        navArgument("metaId") { type = NavType.StringType }
-                    )
-                ) { entry ->
-                    DetailScreen(
-                        repository = repository,
-                        addonId = Routes.dec(entry.arguments!!.getString("addonId")!!),
-                        type = Routes.dec(entry.arguments!!.getString("type")!!),
-                        metaId = Routes.dec(entry.arguments!!.getString("metaId")!!),
-                        onBack = { navController.popBackStack() },
-                        onPlay = { navController.navigate(Routes.PLAYER) }
-                    )
-                }
-                composable(Routes.PLAYER) {
-                    PlayerScreen(
-                        repository = repository,
-                        onBack = { navController.popBackStack() }
-                    )
-                }
-                composable(
-                    Routes.CATALOG,
-                    arguments = listOf(
-                        navArgument("addonId") { type = NavType.StringType },
-                        navArgument("type") { type = NavType.StringType },
-                        navArgument("catalogId") { type = NavType.StringType }
-                    )
-                ) {
-                    CatalogScreen(
-                        repository = repository,
-                        onBack = { navController.popBackStack() },
-                        onOpenDetail = { addonId, type, metaId ->
-                            navController.navigate(Routes.detail(addonId, type, metaId))
-                        }
-                    )
-                }
-            }
+            PulseNavGraph(navController, repository, onThemeChanged)
         }
+    }
+    } // end else (mobile bottom dock)
 
-        // Update popup, shown over whatever screen is visible.
-        UpdatePrompt(
-            info = updateInfo,
-            onDismiss = { updateInfo = null }
-        )
+    // Update popup, shown over whatever screen is visible (both form factors).
+    UpdatePrompt(
+        info = updateInfo,
+        onDismiss = { updateInfo = null }
+    )
+}
+
+@Composable
+private fun PulseNavGraph(
+    navController: NavHostController,
+    repository: StreamRepository,
+    onThemeChanged: () -> Unit
+) {
+    NavHost(navController = navController, startDestination = Routes.SPLASH) {
+        composable(Routes.SPLASH) {
+            // Warm the home catalog cache while the splash animation
+            // plays — by the time Home appears, content is ready.
+            // Fire-and-forget: never blocks or extends the animation.
+            LaunchedEffect(Unit) {
+                launch { runCatching { repository.refreshCatalogRows() } }
+                launch { runCatching { repository.pruneOversizedCache() } }
+            }
+            SplashScreen(
+                onDone = {
+                    val next = if (repository.settings.onboardingDone) {
+                        Routes.HOME
+                    } else {
+                        Routes.ONBOARDING
+                    }
+                    navController.navigate(next) {
+                        popUpTo(Routes.SPLASH) { inclusive = true }
+                    }
+                }
+            )
+        }
+        composable(Routes.ONBOARDING) {
+            OnboardingScreen(
+                repository = repository,
+                onDone = {
+                    navController.navigate(Routes.HOME) {
+                        popUpTo(Routes.ONBOARDING) { inclusive = true }
+                    }
+                }
+            )
+        }
+        composable(Routes.HOME) {
+            HomeScreen(
+                repository = repository,
+                onOpenDetail = { addonId, type, metaId ->
+                    navController.navigate(Routes.detail(addonId, type, metaId))
+                },
+                onResumePlayback = {
+                    navController.navigate(Routes.PLAYER)
+                },
+                onGoToAddons = { navController.navigate(Routes.ADDONS) },
+                onGoToWatchlist = { navController.navigate(Routes.WATCHLIST) },
+                onOpenCatalog = { row ->
+                    repository.pendingCatalog = row
+                    navController.navigate(
+                        Routes.catalog(row.addonId, row.type, row.catalogId)
+                    )
+                }
+            )
+        }
+        composable(Routes.LIVE) {
+            LiveScreen(
+                repository = repository,
+                onPlay = { req ->
+                    // #3: the Live tab builds the PlaybackRequest — it must be
+                    // handed to the player, not dropped.
+                    repository.pendingPlayback = req
+                    navController.navigate(Routes.PLAYER)
+                },
+                onGoToAddons = { navController.navigate(Routes.ADDONS) }
+            )
+        }
+        composable(Routes.SEARCH) {
+            SearchScreen(
+                repository = repository,
+                onOpenDetail = { addonId, type, metaId ->
+                    navController.navigate(Routes.detail(addonId, type, metaId))
+                }
+            )
+        }
+        composable(Routes.WATCHLIST) {
+            WatchlistScreen(
+                repository = repository,
+                onOpenDetail = { addonId, type, metaId ->
+                    navController.navigate(Routes.detail(addonId, type, metaId))
+                }
+            )
+        }
+        composable(Routes.ADDONS) {
+            AddonsScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() },
+                onGoToTvSetup = { navController.navigate(Routes.TV_ADDON_SETUP) }
+            )
+        }
+        composable(Routes.TV_ADDON_SETUP) {
+            TvAddonSetupScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.HOME_CATALOGS) {
+            HomeCatalogsScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.SETTINGS) {
+            SettingsScreen(
+                repository = repository,
+                onThemeChanged = onThemeChanged,
+                onGoToAddons = { navController.navigate(Routes.ADDONS) },
+                onGoToHomeCatalogs = { navController.navigate(Routes.HOME_CATALOGS) },
+                onGoToPlayback = { navController.navigate(Routes.PLAYBACK_SETTINGS) },
+                onGoToSubtitles = { navController.navigate(Routes.SUBTITLE_SETTINGS) },
+                onGoToAudio = { navController.navigate(Routes.AUDIO_SETTINGS) },
+                onGoToAppearance = { navController.navigate(Routes.APPEARANCE_SETTINGS) },
+                onGoToAbout = { navController.navigate(Routes.ABOUT) },
+                onGoToAccount = { navController.navigate(Routes.ACCOUNT) }
+            )
+        }
+        composable(Routes.ACCOUNT) {
+            AccountScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.PLAYBACK_SETTINGS) {
+            PlaybackSettingsScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.SUBTITLE_SETTINGS) {
+            SubtitleSettingsScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.AUDIO_SETTINGS) {
+            AudioSettingsScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.APPEARANCE_SETTINGS) {
+            AppearanceSettingsScreen(
+                repository = repository,
+                onThemeChanged = onThemeChanged,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.ABOUT) {
+            AboutScreen(
+                onBack = { navController.popBackStack() },
+                onGoToLicenses = { navController.navigate(Routes.LICENSES) }
+            )
+        }
+        composable(Routes.LICENSES) {
+            LicensesScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(
+            Routes.DETAIL,
+            arguments = listOf(
+                navArgument("addonId") { type = NavType.StringType },
+                navArgument("type") { type = NavType.StringType },
+                navArgument("metaId") { type = NavType.StringType }
+            )
+        ) { entry ->
+            DetailScreen(
+                repository = repository,
+                addonId = Routes.dec(entry.arguments!!.getString("addonId")!!),
+                type = Routes.dec(entry.arguments!!.getString("type")!!),
+                metaId = Routes.dec(entry.arguments!!.getString("metaId")!!),
+                onBack = { navController.popBackStack() },
+                onPlay = { navController.navigate(Routes.PLAYER) },
+                onOpenDetail = { relatedAddonId, relatedType, relatedMetaId ->
+                    navController.navigate(Routes.detail(relatedAddonId, relatedType, relatedMetaId))
+                }
+            )
+        }
+        composable(Routes.PLAYER) {
+            PlayerScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(
+            Routes.CATALOG,
+            arguments = listOf(
+                navArgument("addonId") { type = NavType.StringType },
+                navArgument("type") { type = NavType.StringType },
+                navArgument("catalogId") { type = NavType.StringType }
+            )
+        ) {
+            CatalogScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() },
+                onOpenDetail = { addonId, type, metaId ->
+                    navController.navigate(Routes.detail(addonId, type, metaId))
+                }
+            )
+        }
     }
 }
+
