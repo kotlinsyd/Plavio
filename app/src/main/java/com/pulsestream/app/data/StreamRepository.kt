@@ -518,9 +518,18 @@ class StreamRepository(
      */
     suspend fun searchAll(query: String, type: String? = null): List<CachedMeta> =
         withContext(Dispatchers.IO) {
+            // Warm the in-memory search cache from the DB when Home hasn't
+            // loaded it yet this session (e.g. the user opened the Search
+            // tab first, or the cache was pruned) — otherwise local search
+            // silently returns nothing.
+            if (catalogCache.isEmpty()) {
+                runCatching { loadCatalogRowsCached() }
+            }
             val local = search(query, type)
             val seen = local.map { it.addonId + it.meta.id }.toMutableSet()
-            local + searchRemote(query, type).filter { seen.add(it.addonId + it.meta.id) }
+            // A remote failure must never wipe out local results.
+            val remote = runCatching { searchRemote(query, type) }.getOrDefault(emptyList())
+            local + remote.filter { seen.add(it.addonId + it.meta.id) }
         }
 
     /** In-memory manifest cache so Home/Live/search don't refetch manifests per load. */
