@@ -81,6 +81,9 @@ import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.LoadingState
 import com.pulsestream.app.ui.components.AddonTabs
 import com.pulsestream.app.ui.components.StreamCard
+import com.pulsestream.app.ui.components.StreamCardStyle
+import com.pulsestream.app.ui.components.StreamList
+import com.pulsestream.app.ui.components.streamListItems
 import com.pulsestream.app.ui.components.StreamTab
 import com.pulsestream.app.ui.components.addonKey
 import com.pulsestream.app.ui.components.rememberStreamBrowserState
@@ -700,14 +703,13 @@ private fun DetailContent(
                         )
                     }
                 } else {
-                    itemsIndexed(
-                        browserState.filtered,
-                        key = { index, stream -> "${index}_${stream.url}" }
-                    ) { _, stream ->
-                        StreamCard(stream = stream) {
+                    streamListItems(
+                        streams = browserState.filtered,
+                        style = StreamCardStyle.fromKey(repository.settings.streamCardStyle),
+                        onPick = { stream ->
                             startPlayback(vm, repository, stream, s.subtitles, s.streams, onPlay)
                         }
-                    }
+                    )
                 }
             }
         }
@@ -746,6 +748,7 @@ private fun DetailContent(
     val streamsContent = vm.streamsState as? StreamsUiState.Content
     SourcePickerPopup(
         visible = sourcePickerOpen,
+        cardStyle = StreamCardStyle.fromKey(repository.settings.streamCardStyle),
         streams = allStreams,
         loading = vm.streamsState is StreamsUiState.Loading,
         errorMessage = (vm.streamsState as? StreamsUiState.Error)?.message,
@@ -841,7 +844,8 @@ private fun SourcePickerPopup(
     errorMessage: String?,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
-    onPick: (StreamItem) -> Unit
+    onPick: (StreamItem) -> Unit,
+    cardStyle: StreamCardStyle = StreamCardStyle.FUSION
 ) {
     val springy = androidx.compose.animation.core.spring<Float>(
         dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
@@ -904,7 +908,8 @@ private fun SourcePickerPopup(
                         errorMessage = errorMessage,
                         onDismiss = onDismiss,
                         onRetry = onRetry,
-                        onPick = onPick
+                        onPick = onPick,
+                        cardStyle = cardStyle
                     )
                 }
             }
@@ -923,7 +928,8 @@ private fun PickerCardBody(
     errorMessage: String?,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
-    onPick: (StreamItem) -> Unit
+    onPick: (StreamItem) -> Unit,
+    cardStyle: StreamCardStyle = StreamCardStyle.FUSION
 ) {
     val palette = LocalPalette.current
     val tabState = rememberPickerTabState(streams)
@@ -1035,14 +1041,15 @@ private fun PickerCardBody(
                 )
             }
             else -> {
-                LazyColumn(
+                val isGrid = cardStyle == StreamCardStyle.TILE_GRID
+                StreamList(
+                    streams = tabState.filtered,
+                    style = cardStyle,
+                    onPick = onPick,
                     modifier = Modifier.heightIn(max = 400.dp),
-                    contentPadding = PaddingValues(bottom = 12.dp)
-                ) {
-                    items(tabState.filtered, key = { it.url }) { stream ->
-                        StreamCard(stream = stream) { onPick(stream) }
-                    }
-                }
+                    contentPadding = if (isGrid) PaddingValues(16.dp)
+                    else PaddingValues(bottom = 12.dp)
+                )
             }
         }
     }
