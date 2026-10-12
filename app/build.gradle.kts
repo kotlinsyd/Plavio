@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 50
-        versionName = "0.8.20"
+        versionCode = 53
+        versionName = "0.8.23"
     }
 
     buildTypes {
@@ -27,6 +27,22 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+    flavorDimensions += "device"
+    productFlavors {
+        create("mobile") {
+            dimension = "device"
+        }
+        create("tv") {
+            dimension = "device"
+            // Plavio TV: separate Leanback app identity for Android TV / Google TV.
+            applicationIdSuffix = ".tv"
+            versionNameSuffix = "-tv"
+            // TV's own version sequence (com.pulsestream.app.tv).
+            versionCode = 55
+            versionName = "0.8.25"
+            resValue("string", "app_name", "Plavio TV")
         }
     }
     compileOptions {
@@ -64,6 +80,8 @@ dependencies {
     implementation(libs.media3.exoplayer.dash)
     implementation(libs.okhttp)
     implementation(libs.coil.compose)
+    implementation(libs.zxing.core)
+    implementation(libs.nanohttpd)
     // Crash reporting (Firebase Crashlytics) — automatic, no extra permissions.
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.crashlytics)
