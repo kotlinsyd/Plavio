@@ -67,39 +67,161 @@ fun subtitleLanguageName(code: String): String =
     SUBTITLE_LANGUAGE_OPTIONS.find { it.first == code }?.second ?: code.uppercase()
 
 /**
+ * Audio language options: the same curated ISO 639-1 set as subtitles
+ * (an audio track's language tag usually matches these codes).
+ */
+val AUDIO_LANGUAGE_OPTIONS: List<Pair<String, String>> = SUBTITLE_LANGUAGE_OPTIONS
+
+/** Display name for a preferred audio-language code, or the code itself. */
+fun audioLanguageName(code: String): String =
+    AUDIO_LANGUAGE_OPTIONS.find { it.first == code }?.second ?: code.uppercase()
+
+/** Subtitle text-color choices (ARGB) offered in Settings > Playback. */
+val SUBTITLE_COLOR_OPTIONS: List<Pair<Int, String>> = listOf(
+    0xFFFFFFFF.toInt() to "White",
+    0xFFFFFF00.toInt() to "Yellow",
+    0xFF00FFFF.toInt() to "Cyan",
+    0xFF00FF00.toInt() to "Green",
+    0xFFFF69B4.toInt() to "Pink",
+    0xFFFFA500.toInt() to "Orange",
+    0xFFFF0000.toInt() to "Red"
+)
+
+/** Subtitle background/shade choices (ARGB; includes semi-transparent). */
+val SUBTITLE_BG_OPTIONS: List<Pair<Int, String>> = listOf(
+    0x00000000 to "None",
+    0xCC000000.toInt() to "Black",
+    0xAA222222.toInt() to "Dark gray",
+    0xAAFFFFFF.toInt() to "White",
+    0xAA0000FF.toInt() to "Blue"
+)
+
+/** Subtitle text-size choices (label to scale factor). */
+val SUBTITLE_SIZE_OPTIONS: List<Pair<Float, String>> = listOf(
+    0.75f to "Small",
+    1.0f to "Normal",
+    1.3f to "Large",
+    1.6f to "Extra large"
+)
+
+/** Subtitle edge/outline style choices (label to stored index). */
+val SUBTITLE_EDGE_OPTIONS: List<Pair<Int, String>> = listOf(
+    0 to "None",
+    1 to "Outline",
+    2 to "Drop shadow",
+    3 to "Raised",
+    4 to "Depressed"
+)
+
+fun subtitleColorName(color: Int): String =
+    SUBTITLE_COLOR_OPTIONS.find { it.first == color }?.second ?: "Custom"
+
+fun subtitleBgName(color: Int): String =
+    SUBTITLE_BG_OPTIONS.find { it.first == color }?.second ?: "Custom"
+
+fun subtitleSizeName(scale: Float): String =
+    SUBTITLE_SIZE_OPTIONS.find { it.first == scale }?.second ?: "${(scale * 100).toInt()}%"
+
+fun subtitleEdgeName(index: Int): String =
+    SUBTITLE_EDGE_OPTIONS.find { it.first == index }?.second ?: "Drop shadow"
+
+/**
  * True if a subtitle/track language tag matches a preferred language code.
- * Lenient: handles ISO 639-1 vs 639-2/B differences ("en" vs "eng",
- * "bs" vs "bos") and OpenSubtitles quirks ("pob" = Brazilian Portuguese)
- * via prefix/alias matching.
+ * Handles ISO 639-1 vs 639-2/B differences ("en" vs "eng", "bs" vs "bos")
+ * and OpenSubtitles quirks ("pob" = Brazilian Portuguese) via canonical
+ * mapping — plus BCP-47 subtag matching ("en" matches "en-US"/"en_US").
+ *
+ * Matching is exact or at a subtag boundary only: "hi" must NOT match "hil".
  */
 fun subtitleLangMatches(tag: String?, preferredCode: String): Boolean {
     val t = tag?.lowercase()?.trim().orEmpty()
     if (t.isEmpty()) return false
     val p = preferredCode.lowercase().trim()
-    if (t == p) return true
-    // Alias normalization.
-    fun norm(code: String): String = when (code) {
-        "bos" -> "bs"
-        "pob" -> "pt"
-        "scc" -> "sr"
-        else -> code
+    // ISO 639-2/B (and OpenSubtitles quirks) → canonical 639-1 primary subtag.
+    fun canon(code: String): String {
+        val parts = code.split('-', '_')
+        val head = when (parts[0]) {
+            "eng" -> "en"
+            "spa" -> "es"
+            "fre", "fra" -> "fr"
+            "deu", "ger" -> "de"
+            "ita" -> "it"
+            "por", "pob" -> "pt"
+            "rus" -> "ru"
+            "ara" -> "ar"
+            "hin" -> "hi"
+            "urd" -> "ur"
+            "tur" -> "tr"
+            "zho", "chi" -> "zh"
+            "jpn" -> "ja"
+            "kor" -> "ko"
+            "nld", "dut" -> "nl"
+            "swe" -> "sv"
+            "nor", "nob" -> "no"
+            "dan" -> "da"
+            "fin" -> "fi"
+            "pol" -> "pl"
+            "ces", "cze" -> "cs"
+            "slk", "slo" -> "sk"
+            "ron", "rum" -> "ro"
+            "ell", "gre" -> "el"
+            "heb" -> "he"
+            "tha" -> "th"
+            "vie" -> "vi"
+            "ind" -> "id"
+            "msa", "may" -> "ms"
+            "tam" -> "ta"
+            "tel" -> "te"
+            "ben" -> "bn"
+            "mar" -> "mr"
+            "pan" -> "pa"
+            "guj" -> "gu"
+            "ukr" -> "uk"
+            "hun" -> "hu"
+            "srp", "scc" -> "sr"
+            "hrv" -> "hr"
+            "bos" -> "bs"
+            "slv" -> "sl"
+            "bul" -> "bg"
+            "cat" -> "ca"
+            else -> parts[0]
+        }
+        return (listOf(head) + parts.drop(1)).joinToString("-")
     }
-    val normT = norm(t)
-    val normP = norm(p)
+    val normT = canon(t)
+    val normP = canon(p)
     if (normT == normP) return true
-    return normT.startsWith(normP) || normP.startsWith(normT)
+    // Subtag-boundary prefix only — never a bare string prefix.
+    fun startsSubtag(longer: String, shorter: String): Boolean =
+        longer.length > shorter.length &&
+            longer.startsWith(shorter) &&
+            longer[shorter.length] == '-'
+    return startsSubtag(normT, normP) || startsSubtag(normP, normT)
 }
 
 /** Tiny SharedPreferences-backed store for user settings (no extra dependency). */
 class SettingsStore(context: Context) {
 
+    private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
-        context.getSharedPreferences("pulse_settings", Context.MODE_PRIVATE)
+        appContext.getSharedPreferences("pulse_settings", Context.MODE_PRIVATE)
+    /**
+     * Onboarding flag lives in its OWN prefs file: Android auto-backup must
+     * never restore onboarding_done=true on a fresh install / new device,
+     * or the first-run guide is silently skipped (see backup_rules.xml).
+     */
+    private val onboardingPrefs: SharedPreferences =
+        appContext.getSharedPreferences("pulse_onboarding", Context.MODE_PRIVATE)
 
     /** Play the first source automatically (v0.2.0 behavior) vs. manual play. */
     var autoplay: Boolean
         get() = prefs.getBoolean(KEY_AUTOPLAY, true)
         set(value) = prefs.edit().putBoolean(KEY_AUTOPLAY, value).apply()
+
+    /** Automatically start the next episode when one finishes (series only). */
+    var autoPlayNext: Boolean
+        get() = prefs.getBoolean(KEY_AUTOPLAY_NEXT, true)
+        set(value) = prefs.edit().putBoolean(KEY_AUTOPLAY_NEXT, value).apply()
 
     /** Keep the screen awake while the player is open. */
     var keepScreenOn: Boolean
@@ -117,6 +239,29 @@ class SettingsStore(context: Context) {
 
     fun setPreinstallDone(manifestId: String) =
         prefs.edit().putBoolean(KEY_PREINSTALL_PREFIX + manifestId, true).apply()
+
+    /**
+     * Clears every preinstall_done_* marker. Called when the database had
+     * to be recreated from corruption: the DB is empty but the flags
+     * survived, which would silently skip reinstalling the bundled addons
+     * (PlavioMeta/Cinemeta/OpenSubtitles/SubSense). Clearing them lets
+     * ensurePreinstalledAddons() run again.
+     */
+    fun clearPreinstallFlags() {
+        val stale = prefs.all.keys.filter { it.startsWith(KEY_PREINSTALL_PREFIX) }
+        if (stale.isNotEmpty()) {
+            prefs.edit().apply { stale.forEach(::remove) }.apply()
+        }
+    }
+
+    /**
+     * "System default" subtitle appearance: when true the player skips its
+     * own styling (no setStyle()) so Android's Settings > Accessibility >
+     * Captions preferences apply instead.
+     */
+    var useSystemCaptions: Boolean
+        get() = prefs.getBoolean(KEY_SYSTEM_CAPTIONS, false)
+        set(value) = prefs.edit().putBoolean(KEY_SYSTEM_CAPTIONS, value).apply()
 
     /** Simkl access token (null = not linked). */
     var simklToken: String?
@@ -188,8 +333,99 @@ class SettingsStore(context: Context) {
             .putString(KEY_SUBTITLE_LANGS, value.take(2).joinToString(","))
             .apply()
 
+    /** First-run onboarding completed (v0.8.21+). False = show the 3-step guide. */
+    var onboardingDone: Boolean
+        get() {
+            if (onboardingPrefs.contains(KEY_ONBOARDING_DONE)) {
+                return onboardingPrefs.getBoolean(KEY_ONBOARDING_DONE, false)
+            }
+            // One-time migration from the old shared file (pre-backup-rules builds).
+            val legacy = prefs.getBoolean(KEY_ONBOARDING_DONE, false)
+            onboardingPrefs.edit().putBoolean(KEY_ONBOARDING_DONE, legacy).apply()
+            return legacy
+        }
+        set(value) = onboardingPrefs.edit().putBoolean(KEY_ONBOARDING_DONE, value).apply()
+
+    /**
+     * Preferred audio language (ISO 639-1 code, single). Null = no preference
+     * (ExoPlayer's default track selection). When set and a title's audio
+     * tracks include it, the player auto-selects it at playback start.
+     */
+    var preferredAudioLanguage: String?
+        get() = prefs.getString(KEY_AUDIO_LANG, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            if (value == null) prefs.edit().remove(KEY_AUDIO_LANG).apply()
+            else prefs.edit().putString(KEY_AUDIO_LANG, value).apply()
+        }
+
+    /** Subtitle text color (ARGB int). Default: white. */
+    var subtitleTextColor: Int
+        get() = prefs.getInt(KEY_SUB_COLOR, 0xFFFFFFFF.toInt())
+        set(value) = prefs.edit().putInt(KEY_SUB_COLOR, value).apply()
+
+    /** Subtitle text size scale (1.0 = default). Range 0.6 – 2.0. */
+    var subtitleTextSizeScale: Float
+        get() = prefs.getFloat(KEY_SUB_SIZE, 1.0f)
+        set(value) = prefs.edit().putFloat(KEY_SUB_SIZE, value.coerceIn(0.6f, 2.0f)).apply()
+
+    /** Subtitle background color (ARGB int). Default: semi-transparent black. */
+    var subtitleBackgroundColor: Int
+        get() = prefs.getInt(KEY_SUB_BG, 0xCC000000.toInt())
+        set(value) = prefs.edit().putInt(KEY_SUB_BG, value).apply()
+
+    /**
+     * Subtitle edge style: 0 = none, 1 = outline, 2 = drop shadow,
+     * 3 = raised, 4 = depressed. Default: 2 (drop shadow).
+     */
+    var subtitleEdgeType: Int
+        get() = prefs.getInt(KEY_SUB_EDGE, 2)
+        set(value) = prefs.edit().putInt(KEY_SUB_EDGE, value.coerceIn(0, 4)).apply()
+
+    /** Pinned Live TV channels, keys "addonId|metaId" ("m3u|url" for M3U). */
+    var liveFavorites: Set<String>
+        get() = prefs.getStringSet(KEY_LIVE_FAVS, emptySet())?.toSet() ?: emptySet()
+        set(value) = prefs.edit().putStringSet(KEY_LIVE_FAVS, value).apply()
+
+    /** Recently watched Live TV channel keys, most-recent first (max 20). */
+    var liveRecent: List<String>
+        get() = prefs.getString(KEY_LIVE_RECENT, "")
+            ?.split("\n")?.map { it.trim() }?.filter { it.isNotEmpty() }?.take(20)
+            ?: emptyList()
+        set(value) = prefs.edit()
+            .putString(KEY_LIVE_RECENT, value.take(20).joinToString("\n")).apply()
+
+    /** User-added M3U/IPTV playlist URLs. */
+    var m3uPlaylists: List<String>
+        get() = prefs.getString(KEY_M3U_LISTS, "")
+            ?.split("\n")?.map { it.trim() }?.filter { it.isNotEmpty() }
+            ?: emptyList()
+        set(value) = prefs.edit()
+            .putString(KEY_M3U_LISTS, value.joinToString("\n")).apply()
+
+    /**
+     * Epoch millis of the last successful Home catalog refresh.
+     * Per-section freshness: the Live tab writes its own rows into the same
+     * catalog_cache table, so Home freshness must be tracked separately —
+     * otherwise a Live visit would suppress Home's background refresh.
+     */
+    var homeCatalogsRefreshedAt: Long
+        get() = prefs.getLong(KEY_HOME_REFRESHED_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_HOME_REFRESHED_AT, value).apply()
+
     companion object {
         private const val KEY_AUTOPLAY = "autoplay"
+        private const val KEY_AUTOPLAY_NEXT = "autoplay_next_episode"
+        private const val KEY_ONBOARDING_DONE = "onboarding_done"
+        private const val KEY_AUDIO_LANG = "preferred_audio_language"
+        private const val KEY_SUB_COLOR = "subtitle_text_color"
+        private const val KEY_SUB_SIZE = "subtitle_text_size_scale"
+        private const val KEY_SUB_BG = "subtitle_background_color"
+        private const val KEY_SUB_EDGE = "subtitle_edge_type"
+        private const val KEY_SYSTEM_CAPTIONS = "use_system_captions"
+        private const val KEY_LIVE_FAVS = "live_favorites"
+        private const val KEY_LIVE_RECENT = "live_recent"
+        private const val KEY_M3U_LISTS = "m3u_playlists"
+        private const val KEY_HOME_REFRESHED_AT = "home_catalogs_refreshed_at"
         private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
         private const val KEY_SHOW_SKIP = "show_skip_button"
         private const val KEY_SUBTITLE_LANGS = "subtitle_languages"
