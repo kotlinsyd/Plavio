@@ -120,6 +120,8 @@ sealed interface PickState {
 }
 
 class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
+    /** Set from the composable; used for TV-aware probing headers. */
+    var isTv: Boolean = false
     var metaState by mutableStateOf<MetaUiState>(MetaUiState.Loading)
         private set
     var streamsState by mutableStateOf<StreamsUiState>(StreamsUiState.Idle)
@@ -240,7 +242,7 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
         probeJob?.cancel()
         probeJob = viewModelScope.launch {
             pickState = PickState.Probing
-            val best = StreamProber.findBest(streams)
+            val best = StreamProber.findBest(streams, isTv)
             pickState = if (best != null) PickState.Found(best) else PickState.None
         }
     }
@@ -316,6 +318,8 @@ fun DetailScreen(
 ) {
     val vm: DetailViewModel = viewModel(factory = vmFactory { DetailViewModel(repository) })
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    // TV-aware probing: the prober must send the same UA the player will.
+    vm.isTv = rememberIsTv()
 
     // Resolve the addon base URL (from search cache or the database) as a hint,
     // then load. Metadata/streams may come from *other* installed addons.
