@@ -3,6 +3,11 @@ package com.pulsestream.app
 import android.app.Application
 import android.util.Log
 import androidx.room.Room
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
+import com.pulsestream.app.data.AnalyticsPing
 import com.pulsestream.app.data.InstallCounter
 import com.pulsestream.app.data.SettingsStore
 import com.pulsestream.app.data.StremioApi
@@ -14,13 +19,38 @@ import com.pulsestream.app.data.db.MIGRATION_3_4
 import com.pulsestream.app.data.db.MIGRATION_4_5
 import com.pulsestream.app.data.db.MIGRATION_5_6
 import com.pulsestream.app.data.db.MIGRATION_6_7
+import com.pulsestream.app.ui.tv.isTelevision
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
-class PulseApp : Application() {
+class PulseApp : Application(), ImageLoaderFactory {
+
+    /**
+     * TV-tuned image pipeline: on memory-constrained TVs (48MB heap class
+     * seen in the field) Coil's default ~25% memory cache plus hundreds of
+     * posters causes lag and OOMs. Cap it to 8% on TV; phones keep default.
+     */
+    override fun newImageLoader(): ImageLoader {
+        val lowMem = isTelevision()
+        return ImageLoader.Builder(this)
+            .memoryCache {
+                MemoryCache.Builder(this)
+                    .maxSizePercent(if (lowMem) 0.08 else 0.25)
+                    .build()
+            }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizePercent(0.02)
+                    .build()
+            }
+            // Downscale posters on TV: cards are ~128dp wide, no need for full-res.
+            .respectCacheHeaders(false)
+            .build()
+    }
 
     lateinit var repository: StreamRepository
         private set
@@ -58,6 +88,8 @@ class PulseApp : Application() {
         appScope.launch { repository.pruneOversizedCache() }
         // Count this install once for the About screen counter.
         appScope.launch { InstallCounter.trackInstallOnce(this@PulseApp) }
+        // One-time install ping for the PlavioHD app-stats backend.
+        appScope.launch { AnalyticsPing.trackInstallOnce(this@PulseApp) }
     }
 
     /**
