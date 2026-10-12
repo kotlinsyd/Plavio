@@ -26,6 +26,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Contrast
+import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FastForward
@@ -95,6 +97,8 @@ fun SettingsScreen(
     onGoToAddons: () -> Unit = {},
     onGoToHomeCatalogs: () -> Unit = {},
     onGoToPlayback: () -> Unit = {},
+    onGoToSubtitles: () -> Unit = {},
+    onGoToAudio: () -> Unit = {},
     onGoToAppearance: () -> Unit = {},
     onGoToAbout: () -> Unit = {},
     onGoToAccount: () -> Unit = {}
@@ -114,15 +118,52 @@ fun SettingsScreen(
                 )
             }
 
+            // ---- Playback ----
+            item { SettingsSectionHeader("Playback") }
             item {
                 SettingsNavRow(
-                    icon = Icons.Filled.Person,
-                    title = "Account",
-                    subtitle = "Trakt and Simkl sync",
-                    onClick = onGoToAccount
+                    icon = Icons.Filled.PlayArrow,
+                    title = "Playback",
+                    subtitle = "Autoplay, next episode, screen, skip intro",
+                    onClick = onGoToPlayback
                 )
             }
 
+            // ---- Subtitles ----
+            item { SettingsSectionHeader("Subtitles") }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.ClosedCaption,
+                    title = "Subtitles",
+                    subtitle = "Preferred languages and appearance",
+                    onClick = onGoToSubtitles
+                )
+            }
+
+            // ---- Audio ----
+            item { SettingsSectionHeader("Audio") }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Audiotrack,
+                    title = "Audio",
+                    subtitle = "Preferred audio language",
+                    onClick = onGoToAudio
+                )
+            }
+
+            // ---- Appearance ----
+            item { SettingsSectionHeader("Appearance") }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Contrast,
+                    title = "Appearance",
+                    subtitle = "Accent color and AMOLED black",
+                    onClick = onGoToAppearance
+                )
+            }
+
+            // ---- Content & Language ----
+            item { SettingsSectionHeader("Content & Language") }
             item {
                 val installedAddons by repository.addons.collectAsState(initial = emptyList())
                 val enabledAddons = remember(installedAddons) { installedAddons.count { it.enabled } }
@@ -140,25 +181,6 @@ fun SettingsScreen(
                     onClick = onGoToAddons
                 )
             }
-
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.PlayArrow,
-                    title = "Playback",
-                    subtitle = "Autoplay, keep screen on, skip button",
-                    onClick = onGoToPlayback
-                )
-            }
-
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Contrast,
-                    title = "Appearance",
-                    subtitle = "Accent color and AMOLED black",
-                    onClick = onGoToAppearance
-                )
-            }
-
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.GridView,
@@ -168,6 +190,19 @@ fun SettingsScreen(
                 )
             }
 
+            // ---- Account ----
+            item { SettingsSectionHeader("Account") }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Person,
+                    title = "Account",
+                    subtitle = "Trakt and Simkl sync",
+                    onClick = onGoToAccount
+                )
+            }
+
+            // ---- About ----
+            item { SettingsSectionHeader("About") }
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.Info,
@@ -527,9 +562,12 @@ fun AboutCard() {
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
                     .clickable {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("https://plaviomedia.vercel.app"))
-                        )
+                        // Devices with no browser must not force-close.
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://plaviomedia.vercel.app"))
+                            )
+                        }
                     }
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
@@ -639,13 +677,23 @@ fun AppUpdaterCard() {
                     checking = true
                     status = null
                     scope.launch {
-                        val info = UpdateChecker.checkNow(appContext)
-                        checking = false
-                        if (info != null) {
-                            updateInfo = info
-                        } else {
-                            status = "No updates found — you're on the latest version."
+                        // Classified outcome: tell offline apart from
+                        // up-to-date instead of "latest version" for all of it.
+                        when (val result = UpdateChecker.checkNowDetailed(appContext)) {
+                            is UpdateChecker.UpdateCheckResult.Update -> {
+                                updateInfo = result.info
+                            }
+                            UpdateChecker.UpdateCheckResult.UpToDate -> {
+                                status = "You're on the latest version."
+                            }
+                            UpdateChecker.UpdateCheckResult.Offline -> {
+                                status = "Couldn't check — you're offline."
+                            }
+                            is UpdateChecker.UpdateCheckResult.Error -> {
+                                status = "Couldn't check for updates: ${result.message}"
+                            }
                         }
+                        checking = false
                     }
                 },
                 enabled = !checking,
