@@ -1,6 +1,7 @@
 package com.pulsestream.app.ui.screens
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.media.AudioManager
@@ -97,8 +98,10 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -120,6 +123,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.ExoPlayer
@@ -501,7 +505,25 @@ fun PlayerScreen(
         // proxied URLs like /api/manifest?url=<encoded ...m3u8> play as HLS
         // instead of being misidentified as progressive.
         val inferredMime = forcedMime ?: PlaybackHeaders.inferMimeType(req.streamUrl)
+        // Memory-conscious buffering: on low-RAM devices (e.g. 48MB-heap TVs)
+        // the default ~50s HLS buffer exhausts the heap mid-playback and OOMs.
+        // Use a smaller buffer window so playback survives constrained heaps.
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val lowMemory = am.isLowRamDevice || am.memoryClass <= 64
+        val loadControl = if (lowMemory) {
+            DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    /* minBufferMs = */ 15_000,
+                    /* maxBufferMs = */ 30_000,
+                    /* bufferForPlaybackMs = */ 2_500,
+                    /* bufferForPlaybackAfterRebufferMs = */ 5_000
+                )
+                .build()
+        } else {
+            DefaultLoadControl()
+        }
         return ExoPlayer.Builder(context)
+            .setLoadControl(loadControl)
             .setRenderersFactory(
                 DefaultRenderersFactory(context).setExtensionRendererMode(
                     DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER))
@@ -1464,8 +1486,17 @@ fun PlayerScreen(
 
     // ---- Android TV D-pad: works when the touch gestures can't. ----
     val playPauseFocus = remember { FocusRequester() }
+    // TV: the player container itself is focusable and holds D-pad focus
+    // whenever the transport controls are hidden, so the remote never goes
+    // dead (NuvioTV parity: containerFocusRequester pattern).
+    val containerFocus = remember { FocusRequester() }
     // TV: land D-pad focus on the error overlay's Retry button when it shows.
     val errorRetryFocus = remember { FocusRequester() }
+    // Tracks whether any transport button currently holds focus. The D-pad
+    // key handler uses this: if controls are visible but nothing grabbed
+    // focus (e.g. requestFocus failed), Center/Up/Down re-request focus on
+    // the play/pause button instead of being swallowed with no effect.
+    var transportFocused by remember { mutableStateOf(false) }
     LaunchedEffect(playerError, isTv) {
         if (isTv && playerError != null) {
             delay(300)
@@ -1473,9 +1504,23 @@ fun PlayerScreen(
         }
     }
     LaunchedEffect(showControls, isTv, locked) {
-        if (isTv && showControls && !locked) {
+        if (!isTv) return@LaunchedEffect
+        if (showControls && !locked) {
             delay(350) // let the controls fade in first
             runCatching { playPauseFocus.requestFocus() }
+        } else if (!showControls && playerError == null) {
+            // Controls hidden: park focus on the container so D-pad events
+            // always have a target (container's onPreviewKeyEvent toggles
+            // controls back on). Without this the remote goes dead.
+            runCatching { containerFocus.requestFocus() }
+        }
+    }
+    // TV: initial focus on the container so the remote works immediately,
+    // before the user ever opens the controls.
+    LaunchedEffect(isTv) {
+        if (isTv && playerError == null) {
+            delay(300)
+            runCatching { containerFocus.requestFocus() }
         }
     }
     val tvKeys = if (isTv) {
@@ -1507,16 +1552,30 @@ fun PlayerScreen(
                 Key.DirectionLeft -> if (dialogOpen) false else { seekByWithFeedback(-10_000); true }
                 Key.DirectionRight -> if (dialogOpen) false else { seekByWithFeedback(10_000); true }
                 Key.DirectionCenter, Key.Enter, Key.NumPadEnter ->
-                    if (dialogOpen || showControls) false else { toggleControls(); true }
+                    if (dialogOpen) false
+                    else if (showControls && !transportFocused) {
+                        runCatching { playPauseFocus.requestFocus() }; true
+                    } else if (showControls) false else { toggleControls(); true }
                 Key.DirectionUp, Key.DirectionDown ->
-                    if (dialogOpen || showControls) false else { toggleControls(); true }
+                    if (dialogOpen) false
+                    else if (showControls && !transportFocused) {
+                        runCatching { playPauseFocus.requestFocus() }; true
+                    } else if (showControls) false else { toggleControls(); true }
                 else -> false
                 }
             }
         }
     } else Modifier
 
-    Box(tvKeys.fillMaxSize().background(Color.Black)) {
+    // TV: the root container is focusable and holds the containerFocus
+    // requester, so D-pad key events always reach onPreviewKeyEvent even
+    // when no transport button has focus (NuvioTV parity).
+    val tvContainerModifier = if (isTv) {
+        Modifier
+            .focusRequester(containerFocus)
+            .focusable()
+    } else Modifier
+    Box(tvKeys.fillMaxSize().background(Color.Black).then(tvContainerModifier)) {
         // Video surface with the full gesture set.
         Box(Modifier.fillMaxSize().videoGestures()) {
             AndroidView(
@@ -1772,7 +1831,8 @@ fun PlayerScreen(
 
                 // ---- Center transport ----
                 Row(
-                    Modifier.align(Alignment.Center),
+                    Modifier.align(Alignment.Center)
+                        .onFocusChanged { transportFocused = it.hasFocus },
                     horizontalArrangement = Arrangement.spacedBy(36.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
