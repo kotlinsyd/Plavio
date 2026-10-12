@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
@@ -37,6 +38,7 @@ import com.pulsestream.app.ui.theme.AppPalette
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
+import com.pulsestream.app.ui.tv.tvFocusRing
 
 @Composable
 fun AboutScreen(
@@ -100,12 +102,15 @@ private fun LegalRows(
                 icon = Icons.Filled.PrivacyTip,
                 title = "Privacy Policy",
                 onClick = {
-                    context.startActivity(
-                        Intent(
-                            Intent.ACTION_VIEW,
-                            Uri.parse("https://plaviomedia.vercel.app/privacy.html")
+                    // Devices with no browser must not force-close.
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://plaviomedia.vercel.app/privacy.html")
+                            )
                         )
-                    )
+                    }
                 },
                 palette = palette
             )
@@ -113,12 +118,14 @@ private fun LegalRows(
                 icon = Icons.Filled.Gavel,
                 title = "Terms of Service",
                 onClick = {
-                    context.startActivity(
-                        Intent(
-                            Intent.ACTION_VIEW,
-                            Uri.parse("https://plaviomedia.vercel.app/terms.html")
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://plaviomedia.vercel.app/terms.html")
+                            )
                         )
-                    )
+                    }
                 },
                 palette = palette
             )
@@ -137,6 +144,7 @@ private fun LegalRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
+            .tvFocusRing(RoundedCornerShape(12.dp))
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
