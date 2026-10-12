@@ -1,5 +1,6 @@
 package com.pulsestream.app.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -19,34 +21,45 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -54,6 +67,8 @@ import com.pulsestream.app.ui.components.PlayButton
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.data.MetaDetail
 import com.pulsestream.app.data.PlaybackRequest
+import com.pulsestream.app.data.RelatedContent
+import com.pulsestream.app.data.RelatedSection
 import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.data.StreamProber
 import com.pulsestream.app.data.StreamRepository
@@ -66,13 +81,19 @@ import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.LoadingState
 import com.pulsestream.app.ui.components.AddonTabs
 import com.pulsestream.app.ui.components.StreamCard
+import com.pulsestream.app.ui.components.StreamTab
+import com.pulsestream.app.ui.components.addonKey
 import com.pulsestream.app.ui.components.rememberStreamBrowserState
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
+import com.pulsestream.app.ui.tv.rememberIsTv
+import com.pulsestream.app.ui.tv.tvFocusRing
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 sealed interface MetaUiState {
     data object Loading : MetaUiState
@@ -112,6 +133,9 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
     /** "Plavio Pick": best verified stream, probed in the background. */
     var pickState by mutableStateOf<PickState>(PickState.Idle)
         private set
+    /** "More like this" + "More from <actor>" rows from PlavioMeta. */
+    var relatedState by mutableStateOf<List<RelatedSection>>(emptyList())
+        private set
 
     /** Set when the user pressed Play while streams were still loading. */
     private var pendingAutoPlay = false
@@ -124,6 +148,9 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
 
     fun load(hintBaseUrl: String?, type: String, id: String) {
         this.hintBaseUrl = hintBaseUrl
+        // Drop stale related rows immediately — the new fetch is async and the
+        // old title's rows would flash until it returns.
+        relatedState = emptyList()
         viewModelScope.launch {
             metaState = MetaUiState.Loading
             try {
@@ -134,6 +161,7 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
                     metaState = MetaUiState.Error("Couldn't find details for this title in any installed addon.")
                 } else {
                     metaState = MetaUiState.Content(meta)
+                    loadRelated(meta.type, meta.id)
                     if (meta.type == "series" && meta.videos.isNotEmpty()) {
                         val seasons = meta.videos.map { it.season }.distinct().sorted()
                         selectSeason(seasons.first(), meta)
@@ -189,7 +217,7 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
                         maybeProbePick(result.streams)
                         if (pendingAutoPlay) {
                             pendingAutoPlay = false
-                            autoPlayEvent = AutoPlay(result.streams.first(), result.subtitles)
+                            playBestOrFirst()
                         }
                     }
                     // Empty intermediate emissions: stay on Loading, don't flash an error.
@@ -217,22 +245,15 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
         }
     }
 
-    /** Plavio Pick button: play the best verified stream. */
-    fun onPickPressed() {
-        val pick = pickState as? PickState.Found ?: return
-        val subtitles = (streamsState as? StreamsUiState.Content)?.subtitles ?: emptyList()
-        autoPlayEvent = AutoPlay(pick.stream, subtitles)
-    }
-
     /**
-     * Play button: start the first available stream immediately.
-     * If streams are still loading, fire as soon as they arrive.
+     * Play button: always tries the fastest verified stream first.
+     * If the background probe already found a winner, play it. If the probe
+     * is still running, give it a brief moment, then play the winner or fall
+     * back to the first available stream.
      */
     fun onPlayPressed() {
         when (val s = streamsState) {
-            is StreamsUiState.Content -> {
-                if (s.streams.isNotEmpty()) autoPlayEvent = AutoPlay(s.streams.first(), s.subtitles)
-            }
+            is StreamsUiState.Content -> playBestOrFirst()
             is StreamsUiState.Error -> { /* nothing playable — leave the error visible */ }
             else -> {
                 pendingAutoPlay = true
@@ -246,10 +267,40 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
         }
     }
 
+    private fun playBestOrFirst() {
+        val s = streamsState as? StreamsUiState.Content ?: return
+        val pick = pickState as? PickState.Found
+        if (pick != null) {
+            autoPlayEvent = AutoPlay(pick.stream, s.subtitles)
+            return
+        }
+        if (pickState is PickState.Probing) {
+            viewModelScope.launch {
+                withTimeoutOrNull(2500) { probeJob?.join() }
+                val best = pickState as? PickState.Found
+                val cur = streamsState as? StreamsUiState.Content ?: return@launch
+                if (best != null) autoPlayEvent = AutoPlay(best.stream, cur.subtitles)
+                else if (cur.streams.isNotEmpty()) autoPlayEvent = AutoPlay(cur.streams.first(), cur.subtitles)
+            }
+            return
+        }
+        if (s.streams.isNotEmpty()) autoPlayEvent = AutoPlay(s.streams.first(), s.subtitles)
+    }
+
     fun consumeAutoPlay(): AutoPlay? {
         val e = autoPlayEvent
         autoPlayEvent = null
         return e
+    }
+
+    /**
+     * "More like this" + "More from <actor>" rows. Needs an IMDb tt id
+     * (Cinemeta/PlavioMeta ids); quietly empty for anything else.
+     */
+    fun loadRelated(type: String, metaId: String) {
+        viewModelScope.launch {
+            relatedState = RelatedContent.fetch(type, metaId.substringBefore(":"))
+        }
     }
 }
 
@@ -260,13 +311,15 @@ fun DetailScreen(
     type: String,
     metaId: String,
     onBack: () -> Unit,
-    onPlay: () -> Unit
+    onPlay: () -> Unit,
+    onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit = { _, _, _ -> }
 ) {
     val vm: DetailViewModel = viewModel(factory = vmFactory { DetailViewModel(repository) })
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
 
     // Resolve the addon base URL (from search cache or the database) as a hint,
     // then load. Metadata/streams may come from *other* installed addons.
-    LaunchedEffect(addonId, metaId) {
+    LaunchedEffect(addonId, type, metaId) {
         val baseUrl = repository.getAddonBaseUrl(addonId)
         vm.load(baseUrl, type, metaId)
     }
@@ -274,6 +327,9 @@ fun DetailScreen(
     // Play button: autoplay the first available stream as soon as it's ready.
     LaunchedEffect(vm.autoPlayEvent) {
         vm.consumeAutoPlay()?.let { autoplay ->
+            // #12: streams may finish loading after the user already backed
+            // out — never navigate to the player from a dead screen.
+            if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return@LaunchedEffect
             val allStreams = (vm.streamsState as? StreamsUiState.Content)?.streams ?: emptyList()
             startPlayback(vm, repository, autoplay.stream, autoplay.subtitles, allStreams, onPlay)
         }
@@ -299,7 +355,8 @@ fun DetailScreen(
                 addonId = addonId,
                 repository = repository,
                 onBack = onBack,
-                onPlay = onPlay
+                onPlay = onPlay,
+                onOpenDetail = onOpenDetail
             )
         }
     }
@@ -326,6 +383,7 @@ private fun startPlayback(
     val ids = resolvePlaybackIds(meta, vm.selectedVideo)
     repository.pendingPlayback = PlaybackRequest(
         streamUrl = stream.url,
+        headers = stream.headers,
         title = title,
         poster = vm.selectedVideo?.thumbnail ?: meta.poster,
         videoId = vm.selectedVideo?.id ?: meta.id,
@@ -355,6 +413,7 @@ private fun BackBar(onBack: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DetailContent(
     vm: DetailViewModel,
@@ -362,7 +421,8 @@ private fun DetailContent(
     addonId: String,
     repository: StreamRepository,
     onBack: () -> Unit,
-    onPlay: () -> Unit
+    onPlay: () -> Unit,
+    onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit
 ) {
     val isSeries = meta.type == "series" && meta.videos.isNotEmpty()
     val seasons = rememberSeasonList(meta)
@@ -370,8 +430,16 @@ private fun DetailContent(
     // sources stream in progressively.
     val allStreams = (vm.streamsState as? StreamsUiState.Content)?.streams ?: emptyList()
     val browserState = rememberStreamBrowserState(allStreams)
+    // Mini floating source-picker card (the button next to Play opens this
+    // instead of scrolling to the sources section).
+    var sourcePickerOpen by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
 
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
         item {
             Box(Modifier.fillMaxWidth().height(260.dp)) {
                 SafePosterImage(
@@ -460,10 +528,18 @@ private fun DetailContent(
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(10.dp))
-                PlavioPickButton(
-                    pickState = vm.pickState,
-                    onClick = { vm.onPickPressed() }
-                )
+                IconButton(
+                    onClick = { sourcePickerOpen = true },
+                    modifier = Modifier
+                        .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(50))
+                        .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                ) {
+                    Icon(
+                        Icons.Filled.FormatListBulleted,
+                        contentDescription = "Choose source manually",
+                        tint = TextPrimary
+                    )
+                }
                 Spacer(Modifier.width(10.dp))
                 IconButton(
                     onClick = {
@@ -553,14 +629,16 @@ private fun DetailContent(
         }
         item {
             Spacer(Modifier.height(8.dp))
-            Text(
-                if (isSeries) "Sources for selected episode" else "Sources",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-            AddonTabs(browserState)
+            Column(Modifier) {
+                Text(
+                    if (isSeries) "Sources for selected episode" else "Sources",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+                AddonTabs(browserState)
+            }
         }
         when (val s = vm.streamsState) {
             is StreamsUiState.Idle, StreamsUiState.Loading -> item {
@@ -598,7 +676,53 @@ private fun DetailContent(
                 }
             }
         }
+        // "More like this" + "More from <actor>" rows from PlavioMeta.
+        // Quietly absent when the endpoint has nothing (e.g. keyless mode).
+        vm.relatedState.forEach { section ->
+            item(key = "related_${section.id}") {
+                com.pulsestream.app.ui.components.SectionTitle(section.title)
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(section.metas, key = { it.id }) { related ->
+                        com.pulsestream.app.ui.components.PosterCard(
+                            meta = related,
+                            // launchSingleTop-style: tapping the title that's already
+                            // open is a no-op, so the backstack never stacks the
+                            // same detail destination twice.
+                            onClick = {
+                                if (related.id != meta.id || related.type != meta.type) {
+                                    onOpenDetail(addonId, related.type, related.id)
+                                }
+                            }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+        }
     }
+
+    // Mini floating source-picker card: same-size button next to Play opens
+    // this with a springy pop instead of scrolling to the sources section.
+    // The popup gets the full stream list and runs its own per-addon tabs
+    // (the inline section below keeps the shared "All" browser state).
+    val streamsContent = vm.streamsState as? StreamsUiState.Content
+    SourcePickerPopup(
+        visible = sourcePickerOpen,
+        streams = allStreams,
+        loading = vm.streamsState is StreamsUiState.Loading,
+        errorMessage = (vm.streamsState as? StreamsUiState.Error)?.message,
+        onDismiss = { sourcePickerOpen = false },
+        onRetry = { vm.loadStreams(meta.type, vm.selectedVideo?.id ?: meta.id) },
+        onPick = { stream ->
+            sourcePickerOpen = false
+            if (streamsContent != null) {
+                startPlayback(vm, repository, stream, streamsContent.subtitles, streamsContent.streams, onPlay)
+            }
+        }
+    )
 }
 
 @Composable
@@ -628,56 +752,261 @@ private fun resolvePlaybackIds(meta: MetaDetail, video: Video?): PlaybackIds {
     )
 }
 
+
+/** Rounded-rectangle shape for the picker card — follows the app theme. */
+private val PickerShape = RoundedCornerShape(20.dp)
+
 /**
- * "Plavio Pick": small green play button next to the main Play button.
- * Hidden until the background probe verifies a best stream; shows a
- * spinner while checking.
+ * Per-addon tab state for the source picker. Unlike the shared inline
+ * [com.pulsestream.app.ui.components.StreamBrowserState] (which has an "All"
+ * tab), the picker shows one tab per addon and selects the first addon by
+ * default.
+ */
+@Stable
+private class PickerTabState(
+    val tabs: List<StreamTab>,
+    val selectedKey: String?,
+    val filtered: List<StreamItem>,
+    val onSelect: (String) -> Unit
+)
+
+@Composable
+private fun rememberPickerTabState(streams: List<StreamItem>): PickerTabState {
+    var selectedKey by remember { mutableStateOf<String?>(null) }
+    // groupBy preserves first-encounter order; the stream list arrives
+    // prioritized (starred addons first), so the first tab is the top addon.
+    val tabs = remember(streams) {
+        streams.groupBy { it.addonKey() }
+            .map { (key, list) -> StreamTab(key, key, list.size) }
+    }
+    val safeKey = if (tabs.any { it.key == selectedKey }) selectedKey else tabs.firstOrNull()?.key
+    val filtered = remember(streams, safeKey) {
+        if (safeKey == null) emptyList() else streams.filter { it.addonKey() == safeKey }
+    }
+    return remember(tabs, safeKey, filtered) {
+        PickerTabState(tabs, safeKey, filtered) { selectedKey = it }
+    }
+}
+
+/**
+ * Mini floating source-picker card. The same-size button next to Play pops
+ * this open with a springy scale+fade+rise animation; tapping the dimmed
+ * scrim or the close button dismisses it the same way in reverse.
+ *
+ * The card is a plain rounded rectangle in the app theme's panel color.
+ * A tab row lists one tab per addon ("Name · count"); tapping a tab filters
+ * the list to that addon's streams. On stream failure the REAL error is shown
+ * with a working Retry instead of the generic "no sources" line.
  */
 @Composable
-private fun PlavioPickButton(
-    pickState: PickState,
-    onClick: () -> Unit
+private fun SourcePickerPopup(
+    visible: Boolean,
+    streams: List<StreamItem>,
+    loading: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+    onPick: (StreamItem) -> Unit
 ) {
-    val green = Color(0xFF22C55E)
-    when (pickState) {
-        PickState.Idle, PickState.None -> {
-            // Nothing verified yet — stay out of the way.
-        }
-        PickState.Probing -> {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "Plavio Pick",
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                    color = green
+    val springy = androidx.compose.animation.core.spring<Float>(
+        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+        stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+    )
+    androidx.compose.animation.AnimatedVisibility(
+        visible = visible,
+        enter = androidx.compose.animation.fadeIn(
+            animationSpec = androidx.compose.animation.core.tween(180)
+        ),
+        exit = androidx.compose.animation.fadeOut(
+            animationSpec = androidx.compose.animation.core.tween(150)
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.62f))
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = visible,
+                enter = androidx.compose.animation.scaleIn(
+                    initialScale = 0.82f, animationSpec = springy
+                ) + androidx.compose.animation.fadeIn(
+                    animationSpec = androidx.compose.animation.core.tween(160)
+                ) + androidx.compose.animation.slideInVertically(
+                    initialOffsetY = { it / 6 },
+                    animationSpec = androidx.compose.animation.core.tween(220)
+                ),
+                exit = androidx.compose.animation.scaleOut(
+                    targetScale = 0.9f,
+                    animationSpec = androidx.compose.animation.core.tween(140)
+                ) + androidx.compose.animation.fadeOut(
+                    animationSpec = androidx.compose.animation.core.tween(140)
                 )
-                Spacer(Modifier.height(6.dp))
-                CircularProgressIndicator(
-                    modifier = Modifier.size(26.dp),
-                    color = green,
-                    strokeWidth = 3.dp
+            ) {
+                // Stop scrim clicks from falling through the card.
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .heightIn(max = 520.dp)
+                        .clip(PickerShape)
+                        .background(LocalPalette.current.panel)
+                        .border(1.dp, GlassBorder, PickerShape)
+                        .clickable(
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            indication = null,
+                            onClick = {}
+                        )
+                ) {
+                    PickerCardBody(
+                        streams = streams,
+                        loading = loading,
+                        errorMessage = errorMessage,
+                        onDismiss = onDismiss,
+                        onRetry = onRetry,
+                        onPick = onPick
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Picker card content: header, per-addon tab row, then the filtered stream
+ * list (or the loading / real-error / empty states).
+ */
+@Composable
+private fun PickerCardBody(
+    streams: List<StreamItem>,
+    loading: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+    onPick: (StreamItem) -> Unit
+) {
+    val palette = LocalPalette.current
+    val tabState = rememberPickerTabState(streams)
+    val isTv = rememberIsTv()
+    val firstTabFocus = remember { FocusRequester() }
+    // On TV, land D-pad focus on the first addon tab once tabs exist.
+    var tvFocusLanded by remember { mutableStateOf(false) }
+    LaunchedEffect(isTv, tabState.tabs.isNotEmpty(), tvFocusLanded) {
+        if (isTv && tabState.tabs.isNotEmpty() && !tvFocusLanded) {
+            tvFocusLanded = true
+            delay(300)
+            runCatching { firstTabFocus.requestFocus() }
+        }
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                "Choose source",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Close",
+                    tint = TextSecondary
                 )
             }
         }
-        is PickState.Found -> {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "Plavio Pick",
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                    color = green
-                )
-                Spacer(Modifier.height(4.dp))
-                IconButton(
-                    onClick = onClick,
-                    modifier = Modifier
-                        .size(52.dp)
-                        .background(green, RoundedCornerShape(50))
+        if (tabState.tabs.isNotEmpty()) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                itemsIndexed(tabState.tabs, key = { _, tab -> tab.key }) { index, tab ->
+                    val selected = tab.key == tabState.selectedKey
+                    Box(
+                        modifier = Modifier
+                            .then(if (index == 0) Modifier.focusRequester(firstTabFocus) else Modifier)
+                            .tvFocusRing(RoundedCornerShape(50))
+                            .clip(RoundedCornerShape(50))
+                            .background(
+                                if (selected) palette.accent.copy(alpha = 0.22f)
+                                else Color.White.copy(alpha = 0.06f)
+                            )
+                            .border(
+                                1.dp,
+                                if (selected) palette.accent else GlassBorder,
+                                RoundedCornerShape(50)
+                            )
+                            .clickable { tabState.onSelect(tab.key) }
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            text = "${tab.label} · ${tab.count}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (selected) TextPrimary else TextSecondary,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        when {
+            loading && streams.isEmpty() -> {
+                Box(
+                    Modifier.fillMaxWidth().padding(32.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        Icons.Filled.PlayArrow,
-                        contentDescription = "Play Plavio Pick",
-                        tint = Color(0xFF0A0A12),
-                        modifier = Modifier.size(30.dp)
+                    CircularProgressIndicator(
+                        color = palette.accent,
+                        modifier = Modifier.size(32.dp)
                     )
+                }
+            }
+            errorMessage != null && streams.isEmpty() -> {
+                // Audit #24: show the REAL stream error (not "no sources yet"),
+                // with a Retry that re-queries every addon.
+                Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
+                    Text(
+                        errorMessage,
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = onRetry,
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.accent)
+                    ) {
+                        Text("Retry", color = Color(0xFF0A0A12), fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            streams.isEmpty() -> {
+                Text(
+                    "No sources found yet — they appear here as each addon answers.",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
+                )
+            }
+            else -> {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 400.dp),
+                    contentPadding = PaddingValues(bottom = 12.dp)
+                ) {
+                    items(tabState.filtered, key = { it.url }) { stream ->
+                        StreamCard(stream = stream) { onPick(stream) }
+                    }
                 }
             }
         }
