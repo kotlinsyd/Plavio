@@ -32,8 +32,14 @@ object StreamProber {
     /**
      * Returns the best working stream, or null when nothing verifiable answered.
      * Runs fully on Dispatchers.IO; safe to call from a ViewModel scope.
+     *
+     * Uses [PlaybackHeaders.buildPlaybackHeaders] so probing sends exactly
+     * what the player will send — no more "healthy in probe, fails in player".
      */
-    suspend fun findBest(streams: List<StreamItem>): StreamItem? = withContext(Dispatchers.IO) {
+    suspend fun findBest(
+        streams: List<StreamItem>,
+        isTv: Boolean = false
+    ): StreamItem? = withContext(Dispatchers.IO) {
         val candidates = streams
             .filter { it.url.startsWith("http://") || it.url.startsWith("https://") }
             .take(MAX_PROBES)
@@ -46,7 +52,7 @@ object StreamProber {
                     async {
                         gate.acquire()
                         try {
-                            probeOne(stream)
+                            probeOne(stream, isTv)
                         } finally {
                             gate.release()
                         }
@@ -61,22 +67,24 @@ object StreamProber {
             ?.stream
     }
 
-    private fun probeOne(stream: StreamItem): Probe? {
-        val ttfb = headTtfb(stream.url) ?: rangedGetTtfb(stream.url) ?: return null
+    private fun probeOne(stream: StreamItem, isTv: Boolean): Probe? {
+        val headers = PlaybackHeaders.buildPlaybackHeaders(stream.headers, isTv)
+        val ttfb = headTtfb(stream, headers) ?: rangedGetTtfb(stream, headers) ?: return null
         return Probe(stream, ttfb, resolutionScore(stream))
     }
 
     /** Returns time-to-first-byte in ms when HEAD succeeds, else null. */
-    private fun headTtfb(url: String): Long? {
+    private fun headTtfb(stream: StreamItem, headers: Map<String, String>): Long? {
         var conn: HttpURLConnection? = null
         return try {
             val start = SystemClock.elapsedRealtime()
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            conn = (URL(stream.url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "HEAD"
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "Plavio/1.0")
+                // Same headers the player will send (Nuvio parity).
+                headers.forEach { (k, v) -> setRequestProperty(k, v) }
             }
             conn.connect()
             val code = conn.responseCode
@@ -89,16 +97,16 @@ object StreamProber {
     }
 
     /** Returns time-to-first-byte in ms when a 1KB ranged GET succeeds, else null. */
-    private fun rangedGetTtfb(url: String): Long? {
+    private fun rangedGetTtfb(stream: StreamItem, headers: Map<String, String>): Long? {
         var conn: HttpURLConnection? = null
         return try {
             val start = SystemClock.elapsedRealtime()
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            conn = (URL(stream.url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "Plavio/1.0")
+                headers.forEach { (k, v) -> setRequestProperty(k, v) }
                 setRequestProperty("Range", "bytes=0-1023")
             }
             conn.connect()
