@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 57
-        versionName = "0.8.27"
+        versionCode = 59
+        versionName = "0.8.29"
     }
 
     buildTypes {
@@ -40,8 +40,8 @@ android {
             applicationIdSuffix = ".tv"
             versionNameSuffix = "-tv"
             // TV's own version sequence (com.pulsestream.app.tv).
-            versionCode = 60
-            versionName = "0.8.30"
+            versionCode = 61
+            versionName = "0.8.31"
             resValue("string", "app_name", "Plavio TV")
         }
     }
@@ -87,5 +87,7 @@ dependencies {
     implementation(libs.firebase.crashlytics)
     // Usage stats (Firebase Analytics) — active/total users dashboard, automatic.
     implementation("com.google.firebase:firebase-analytics")
+    // YouTube trailer extraction for the Trailers tab (same as ShortsBox).
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
     ksp(libs.room.compiler)
 }

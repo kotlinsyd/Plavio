@@ -5,8 +5,16 @@ package com.pulsestream.app.data
 data class CatalogRef(
     val type: String,
     val id: String,
-    val name: String
-)
+    val name: String,
+    /**
+     * Catalog "extra" keys the addon declares (e.g. "search", "genre").
+     * A catalog supports the Stremio search extra only when "search" is here —
+     * addons without it answer 404 to search= queries.
+     */
+    val extra: List<String> = emptyList()
+) {
+    val supportsSearch: Boolean get() = "search" in extra.map { it.lowercase() }
+}
 
 data class AddonManifest(
     val id: String,
@@ -51,6 +59,12 @@ data class Video(
     val released: String? = null
 )
 
+/** A YouTube trailer reference from an addon's meta (PlavioMeta `trailerStreams`). */
+data class TrailerStream(
+    val title: String,
+    val ytId: String
+)
+
 data class MetaDetail(
     val id: String,
     val type: String,
@@ -62,7 +76,9 @@ data class MetaDetail(
     val releaseInfo: String? = null,
     val imdbRating: String? = null,
     val genres: List<String> = emptyList(),
-    val videos: List<Video> = emptyList()
+    val videos: List<Video> = emptyList(),
+    /** YouTube trailers (PlavioMeta `trailerStreams`); empty when the addon provides none. */
+    val trailerStreams: List<TrailerStream> = emptyList()
 )
 
 data class StreamItem(
@@ -72,7 +88,13 @@ data class StreamItem(
     /** Name of the addon this stream came from (set when merging multi-addon results). */
     val sourceName: String? = null,
     /** Id of the addon this stream came from — used for star priority. */
-    val sourceId: String? = null
+    val sourceId: String? = null,
+    /**
+     * Extra HTTP request headers the stream URL needs (parsed from the
+     * addon's behaviorHints.proxyHeaders.request). Sent by the player and
+     * the stream prober. Empty for normal direct links.
+     */
+    val headers: Map<String, String> = emptyMap()
 )
 
 data class Subtitle(
@@ -131,7 +153,30 @@ data class PlaybackRequest(
     /** Series name for the player header (null for movies). */
     val seriesName: String? = null,
     /** Episode title for the player header (series only). */
-    val episodeTitle: String? = null
+    val episodeTitle: String? = null,
+    /** Extra HTTP request headers the stream URL needs (from the addon's proxyHeaders). */
+    val headers: Map<String, String> = emptyMap(),
+    /**
+     * Trailer playback (Trailers tab): skips auto-play-next-episode, resume
+     * position saving, and Trakt/Simkl scrobbling.
+     */
+    val isTrailer: Boolean = false
+)
+
+/** One entry on the Trailers tab: catalog item + where to fetch its meta/trailers. */
+data class TrailerItem(
+    val addonId: String,
+    val baseUrl: String,
+    val type: String,
+    val meta: MetaPreview
+)
+
+/** A Live TV channel reference for the player's channel-zap handoff. */
+data class TvChannelRef(
+    val addonId: String,
+    val metaId: String,
+    val name: String,
+    val poster: String?
 )
 
 /** Pulls a quality tag like "1080p"/"4K" out of a stream's name/title, if present. */
