@@ -21,9 +21,18 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.pulsestream.app.BuildConfig
 
-/** True when running on an Android TV / Google TV device (or the tv product flavor). */
+/**
+ * True on real Android TV / Google TV devices — some cheap TV boxes report
+ * UI_MODE_TYPE_NORMAL, so the tv product flavor ALSO counts: if the user
+ * installed the TV APK, they get TV behavior regardless of what the box
+ * claims. (This was the v0.8.29 invisible-focus bug: the rail used its own
+ * focus tracking and lit up green, while every tvFocusRing() card silently
+ * no-op'd because isTelevision() returned false.)
+ */
 fun Context.isTelevision(): Boolean {
+    if (BuildConfig.FLAVOR == "tv") return true
     val uiMode = (getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager)
         ?.currentModeType ?: resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK
     return uiMode == Configuration.UI_MODE_TYPE_TELEVISION
