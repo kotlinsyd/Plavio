@@ -47,6 +47,17 @@ class StreamRepository(
     @Volatile
     var pendingPlayback: PlaybackRequest? = null
 
+    /**
+     * Deep-link handoff: a plavio-addons:// VIEW intent carries a share-bundle
+     * link. MainActivity stashes the raw link here; AddonsScreen opens its
+     * import dialog pre-filled with it, then clears it.
+     */
+    private val _pendingAddonBundle = MutableStateFlow<String?>(null)
+    val pendingAddonBundle: StateFlow<String?> = _pendingAddonBundle.asStateFlow()
+
+    fun setPendingAddonBundle(link: String) { _pendingAddonBundle.value = link }
+    fun clearPendingAddonBundle() { _pendingAddonBundle.value = null }
+
     /** In-memory handoff for the catalog "view all" screen. */
     @Volatile
     var pendingCatalog: CatalogRow? = null
@@ -85,13 +96,22 @@ class StreamRepository(
     }
 
     suspend fun removeAddon(id: String) = withContext(Dispatchers.IO) {
+        val baseUrl = db.addonDao().getAll().firstOrNull { it.id == id }?.baseUrl
         db.addonDao().deleteById(id)
+        // The DB row is gone but in-memory caches would keep serving the
+        // addon's catalogs/manifest — invalidate both.
+        if (baseUrl != null) manifestCache.remove(baseUrl)
+        catalogCache = catalogCache.filter { it.addonId != id }
     }
 
     /** User on/off switch for an addon. Disabled addons are excluded everywhere. */
     suspend fun setAddonEnabled(id: String, enabled: Boolean) = withContext(Dispatchers.IO) {
         db.addonDao().getAll().firstOrNull { it.id == id }?.let { addon ->
             db.addonDao().upsert(addon.copy(enabled = enabled))
+            // Same staleness trap as removeAddon: drop the in-memory caches
+            // so a disabled addon stops appearing in search immediately.
+            manifestCache.remove(addon.baseUrl)
+            if (!enabled) catalogCache = catalogCache.filter { it.addonId != id }
         }
     }
 
@@ -173,15 +193,21 @@ class StreamRepository(
     }
 
     /**
-     * True when the catalog cache holds rows fetched within [maxAgeMs].
-     * Used to skip the background refresh when the splash just warmed it.
+     * True when Home's catalog cache was refreshed within [maxAgeMs].
+     * Freshness is tracked per-section via [SettingsStore.homeCatalogsRefreshedAt]:
+     * the Live tab writes its own rows into the same catalog_cache table, so
+     * judging freshness from the table's max fetchedAt let a Live visit
+     * suppress Home's background refresh for 15 minutes.
      */
     suspend fun isCatalogCacheFresh(maxAgeMs: Long = 15 * 60 * 1000): Boolean =
         withContext(Dispatchers.IO) {
+            val refreshedAt = settings.homeCatalogsRefreshedAt
+            if (refreshedAt <= 0L) return@withContext false
+            if (System.currentTimeMillis() - refreshedAt >= maxAgeMs) return@withContext false
             try {
-                val rows = db.catalogCacheDao().getAll()
-                if (rows.isEmpty()) return@withContext false
-                System.currentTimeMillis() - rows.maxOf { it.fetchedAt } < maxAgeMs
+                // The timestamp says Home refreshed — make sure there are
+                // actually Home rows (Live/M3U rows don't count).
+                db.catalogCacheDao().getAll().any { it.addonId != "m3u" }
             } catch (_: Exception) {
                 false
             }
@@ -248,8 +274,12 @@ class StreamRepository(
             }
         )
         val installedIds = installed.map { it.id }
-        if (installedIds.isEmpty()) db.catalogCacheDao().clearAll()
-        else db.catalogCacheDao().pruneExcept(installedIds)
+        // "m3u" is a virtual addonId for cached M3U playlist rows — never
+        // prune those here; M3U rows manage their own TTL and cleanup.
+        if (installedIds.isEmpty()) db.catalogCacheDao().pruneExcept(listOf("m3u"))
+        else db.catalogCacheDao().pruneExcept(installedIds + "m3u")
+        // Per-section freshness marker for isCatalogCacheFresh (see #31).
+        settings.homeCatalogsRefreshedAt = now
 
         updateSearchCache(rows)
         // Preferred metadata source's catalogs first (PlavioMeta by default).
@@ -300,11 +330,20 @@ class StreamRepository(
         }
     }
 
+    /** In-memory Live-tab TV rows: (fetchedAt, rows) — repeat visits within the TTL skip the network. */
+    @Volatile
+    private var tvRowsMemoryCache: Pair<Long, List<CatalogRow>>? = null
+
     /**
      * Live TV rows for the Live tab: catalogs of type "tv" from enabled
-     * addons. Always fetched fresh (live listings change); never cached.
+     * addons. Served from the in-memory cache when fresh (15 min TTL) so
+     * every ON_RESUME doesn't re-download every catalog.
      */
     suspend fun loadTvRows(): List<CatalogRow> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        tvRowsMemoryCache?.let { (ts, rows) ->
+            if (now - ts < TV_ROWS_TTL_MS) return@withContext rows
+        }
         val installed = enabledAddons().filter { it.hasCatalog }
         val rows = coroutineScope {
             installed.map { addon ->
@@ -333,7 +372,7 @@ class StreamRepository(
         }
         // Persist so the next visit is instant (see loadTvRowsCached).
         if (rows.isNotEmpty()) {
-            val now = System.currentTimeMillis()
+            val fetchedAt = System.currentTimeMillis()
             runCatching {
                 db.catalogCacheDao().upsertAll(
                     rows.map { row ->
@@ -346,11 +385,14 @@ class StreamRepository(
                             catalogId = row.catalogId,
                             catalogName = row.catalogName,
                             itemsJson = cappedItemsJson(row.items),
-                            fetchedAt = now
+                            fetchedAt = fetchedAt
                         )
                     }
                 )
             }
+            // Only cache successful non-empty loads — a failed visit must
+            // retry on the next resume instead of serving emptiness for 15 min.
+            tvRowsMemoryCache = fetchedAt to rows
         }
         rows
     }
@@ -407,48 +449,57 @@ class StreamRepository(
     /**
      * Live search against installed addons (the catalog `search=` extra).
      * This is what finds titles that were never browsed into the local cache.
+     *
+     * Protocol-correct: `search=` is only fired at catalogs that declare the
+     * "search" extra — addons without it answer 404, so querying them is
+     * pure waste. A hard overall timeout keeps "Searching…" from hanging.
      */
     suspend fun searchRemote(query: String, type: String? = null): List<CachedMeta> =
         withContext(Dispatchers.IO) {
             val q = query.trim()
             if (q.length < 2) return@withContext emptyList()
-            val types = if (type != null) listOf(type) else listOf("movie", "series")
-            // Query every addon concurrently — sequential requests were the
-            // main reason search felt slow on mobile networks.
-            val out = linkedMapOf<String, CachedMeta>()
-            coroutineScope {
-                enabledAddons()
-                    .filter { it.hasCatalog }
-                    .map { addon ->
-                        async {
-                            val manifest = cachedManifest(addon.baseUrl)
-                                ?: return@async emptyList<CachedMeta>()
-                            val found = mutableListOf<CachedMeta>()
-                            for (t in types) {
-                                val catalog = manifest.catalogs.firstOrNull { it.type == t }
-                                    ?: continue
-                                val metas =
-                                    runCatching { api.searchCatalog(addon.baseUrl, t, catalog.id, q) }
-                                        .getOrNull() ?: continue
-                                metas.forEach { m ->
-                                    found.add(
-                                        CachedMeta(
-                                            addon.id,
-                                            addon.name,
-                                            addon.baseUrl,
-                                            m.copy(type = t)
-                                        )
-                                    )
+            withTimeoutOrNull(REMOTE_SEARCH_TIMEOUT_MS) {
+                val types = if (type != null) listOf(type) else listOf("movie", "series")
+                // Query every addon concurrently — sequential requests were the
+                // main reason search felt slow on mobile networks.
+                val out = linkedMapOf<String, CachedMeta>()
+                coroutineScope {
+                    enabledAddons()
+                        .filter { it.hasCatalog }
+                        .map { addon ->
+                            async {
+                                val manifest = cachedManifest(addon.baseUrl)
+                                    ?: return@async emptyList<CachedMeta>()
+                                val found = mutableListOf<CachedMeta>()
+                                for (t in types) {
+                                    val targets = manifest.catalogs
+                                        .filter { it.type == t && it.supportsSearch }
+                                        .take(3)
+                                    for (catalog in targets) {
+                                        val metas =
+                                            runCatching { api.searchCatalog(addon.baseUrl, t, catalog.id, q) }
+                                                .getOrNull() ?: continue
+                                        metas.forEach { m ->
+                                            found.add(
+                                                CachedMeta(
+                                                    addon.id,
+                                                    addon.name,
+                                                    addon.baseUrl,
+                                                    m.copy(type = t)
+                                                )
+                                            )
+                                        }
+                                    }
                                 }
+                                found
                             }
-                            found
                         }
-                    }
-                    .awaitAll()
-                    .flatten()
-                    .forEach { cm -> out.putIfAbsent(cm.addonId + cm.meta.id, cm) }
-            }
-            out.values.toList()
+                        .awaitAll()
+                        .flatten()
+                        .forEach { cm -> out.putIfAbsent(cm.addonId + cm.meta.id, cm) }
+                }
+                out.values.toList()
+            } ?: emptyList()
         }
 
     /**
@@ -473,6 +524,21 @@ class StreamRepository(
         val manifest = runCatching { api.fetchManifest(baseUrl) }.getOrNull() ?: return null
         manifestCache[baseUrl] = now to manifest
         return manifest
+    }
+
+    /**
+     * Manual manifest refresh: bypasses the TTL cache and re-fetches from
+     * the network. Use after an addon gains capabilities (e.g. newly
+     * search-capable catalogs) instead of waiting out the TTL.
+     */
+    suspend fun refreshManifest(baseUrl: String): AddonManifest? {
+        manifestCache.remove(baseUrl)
+        return cachedManifest(baseUrl)
+    }
+
+    /** Drops the whole in-memory manifest cache (e.g. on pull-to-refresh). */
+    fun clearManifestCache() {
+        manifestCache.clear()
     }
 
     suspend fun getMeta(baseUrl: String, type: String, id: String): MetaDetail? =
@@ -543,8 +609,12 @@ class StreamRepository(
     suspend fun getMetaFromAny(hintBaseUrl: String?, type: String, id: String): MetaDetail? =
         withContext(Dispatchers.IO) {
             for (addon in metaAddonsFor(type, hintBaseUrl)) {
-                val meta = runCatching { api.fetchMeta(addon.baseUrl, type, id) }.getOrNull()
-                if (meta != null) return@withContext meta
+                // Per-addon budget instead of unbounded sequential waits —
+                // one hanging addon must not stall the whole lookup.
+                val meta = withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
+                    runCatching { api.fetchMeta(addon.baseUrl, type, id) }.getOrNull()
+                } ?: continue
+                return@withContext meta
             }
             null
         }
@@ -668,22 +738,268 @@ class StreamRepository(
         name: String,
         poster: String?
     ) = withContext(Dispatchers.IO) {
-        val key = "$addonId|$type|$metaId"
-        if (db.watchlistDao().getByKey(key) != null) {
-            db.watchlistDao().deleteByKey(key)
-        } else {
-            db.watchlistDao().upsert(
-                WatchlistItem(
-                    key = key,
-                    addonId = addonId,
-                    type = type,
-                    metaId = metaId,
-                    name = name,
-                    poster = poster,
-                    addedAt = System.currentTimeMillis()
+        // Read-modify-write: serialize concurrent toggles so a double-tap
+        // can't upsert after the delete.
+        writeMutex.withLock {
+            val key = "$addonId|$type|$metaId"
+            if (db.watchlistDao().getByKey(key) != null) {
+                db.watchlistDao().deleteByKey(key)
+            } else {
+                db.watchlistDao().upsert(
+                    WatchlistItem(
+                        key = key,
+                        addonId = addonId,
+                        type = type,
+                        metaId = metaId,
+                        name = name,
+                        poster = poster,
+                        addedAt = System.currentTimeMillis()
+                    )
                 )
+            }
+        }
+    }
+
+    // ---- Live TV: M3U playlists, favorites, recents, zap handoff ----
+
+    /** In-memory channel list handoff so the player can zap up/down. */
+    @Volatile
+    var pendingTvChannels: List<TvChannelRef> = emptyList()
+        private set
+
+    /** Index into [pendingTvChannels] of the currently playing channel. */
+    @Volatile
+    var pendingTvIndex: Int = 0
+
+    fun setTvZapList(channels: List<TvChannelRef>, index: Int) {
+        pendingTvChannels = channels
+        pendingTvIndex = if (channels.isEmpty()) 0 else index.coerceIn(channels.indices)
+    }
+
+    /** Result of loading the stored M3U playlists: channel rows + per-playlist errors. */
+    data class M3uLoadResult(
+        val rows: List<CatalogRow>,
+        /** Human-readable failures, one per failed playlist, naming the playlist host. */
+        val errors: List<String>
+    )
+
+    /** Serializes read-modify-write settings updates (playlist add/remove, watchlist toggles). */
+    private val writeMutex = Mutex()
+
+    /** In-memory M3U playlist cache: normalized URL -> (fetchedAt, channels). */
+    private val m3uMemoryCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<M3uChannel>>>()
+
+    /**
+     * Adds an M3U/IPTV playlist URL. Fetches + parses it now so a bad URL
+     * fails fast with a readable error; the URL is stored for reloads.
+     * Returns the channel count. Never throws — validation failures come
+     * back as Result.failure.
+     */
+    suspend fun addM3uPlaylist(url: String): Result<Int> = withContext(Dispatchers.IO) {
+        // Strip control characters so the "\n"-joined settings list can never
+        // be corrupted by a crafted URL.
+        val clean = M3uParser.normalizeUrl(url.trim().filterNot { it == '\n' || it == '\r' })
+        if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Paste a full http(s) playlist URL")
             )
         }
+        getM3uChannels(clean).map { channels ->
+            writeMutex.withLock {
+                val current = settings.m3uPlaylists
+                if (current.none { M3uParser.normalizeUrl(it) == clean }) {
+                    settings.m3uPlaylists = current + clean
+                }
+            }
+            channels.size
+        }
+    }
+
+    suspend fun removeM3uPlaylist(url: String) = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            val norm = M3uParser.normalizeUrl(url)
+            // Clean up orphaned state before dropping the URL: cached
+            // channels, disk rows, and any pins/recents pointing at this
+            // playlist's channels ("m3u|<stream url>" keys).
+            val channels = m3uMemoryCache[norm]?.second
+                ?: m3uDiskRows(url).flatMap { row ->
+                    CatalogCodec.decodeMetas(row.itemsJson)
+                        .map { meta -> M3uChannel(meta.name, meta.id, meta.poster, null) }
+                }
+            val pinKeys = channels.map { "m3u|${it.url}" }.toSet()
+            settings.m3uPlaylists = settings.m3uPlaylists
+                .filter { M3uParser.normalizeUrl(it) != norm }
+            if (pinKeys.isNotEmpty()) {
+                settings.liveFavorites = settings.liveFavorites - pinKeys
+                settings.liveRecent = settings.liveRecent.filter { it !in pinKeys }
+            }
+            m3uMemoryCache.remove(norm)
+            // Both spellings: playlists stored by older builds may be raw.
+            db.catalogCacheDao().deleteM3uPlaylist(url)
+            db.catalogCacheDao().deleteM3uPlaylist(norm)
+        }
+    }
+
+    /**
+     * Loads every stored playlist into grouped "tv" catalog rows.
+     * Playlists are fetched CONCURRENTLY (not sequentially), served from
+     * the memory/disk cache when fresh (15 min TTL), and failures are
+     * reported per-playlist instead of silently dropping channels.
+     */
+    suspend fun loadM3uRows(): M3uLoadResult = withContext(Dispatchers.IO) {
+        val urls = settings.m3uPlaylists
+        if (urls.isEmpty()) return@withContext M3uLoadResult(emptyList(), emptyList())
+        val outcomes = coroutineScope {
+            urls.map { url -> async { loadOnePlaylist(url) } }.awaitAll()
+        }
+        M3uLoadResult(
+            rows = outcomes.flatMap { it.first },
+            errors = outcomes.mapNotNull { it.second }
+        )
+    }
+
+    /** One playlist -> (rows, optional error message naming the playlist). Never throws. */
+    private suspend fun loadOnePlaylist(url: String): Pair<List<CatalogRow>, String?> {
+        val host = playlistHost(url)
+        return getM3uChannels(url).fold(
+            onSuccess = { channels -> m3uChannelsToRows(url, host, channels) to null },
+            onFailure = { e ->
+                // A dead playlist must not nuke the tab: keep the last
+                // cached channels visible (if any) and name the failure.
+                val stale = m3uDiskRows(url).map { row ->
+                    CatalogRow(
+                        addonId = row.addonId,
+                        addonName = row.addonName,
+                        baseUrl = row.baseUrl,
+                        catalogName = row.catalogName,
+                        type = row.type,
+                        catalogId = row.catalogId,
+                        items = CatalogCodec.decodeMetas(row.itemsJson)
+                    )
+                }.filter { it.items.isNotEmpty() }
+                val msg = "$host: ${readableM3uError(e)}"
+                if (stale.isNotEmpty()) stale to "$msg — showing cached channels"
+                else emptyList<CatalogRow>() to msg
+            }
+        )
+    }
+
+    /**
+     * Channels for one playlist: fresh memory cache -> fresh disk cache
+     * (Room catalog_cache, addonId "m3u") -> network (cached to both on
+     * success). Never throws.
+     */
+    private suspend fun getM3uChannels(url: String): Result<List<M3uChannel>> {
+        val key = M3uParser.normalizeUrl(url)
+        val now = System.currentTimeMillis()
+        m3uMemoryCache[key]?.let { (ts, channels) ->
+            if (now - ts < M3U_CACHE_TTL_MS) return Result.success(channels)
+        }
+        val diskRows = m3uDiskRows(url)
+        if (diskRows.isNotEmpty() && diskRows.all { now - it.fetchedAt < M3U_CACHE_TTL_MS }) {
+            val channels = diskRows.flatMap { row ->
+                val group = row.catalogName.takeIf { it != "All channels" }
+                CatalogCodec.decodeMetas(row.itemsJson).map { meta ->
+                    M3uChannel(meta.name, meta.id, meta.poster, group)
+                }
+            }
+            m3uMemoryCache[key] = now to channels
+            return Result.success(channels)
+        }
+        return M3uParser.fetch(url).onSuccess { channels ->
+            m3uMemoryCache[key] = now to channels
+            writeM3uDiskRows(url, playlistHost(url), channels, now)
+        }
+    }
+
+    /** Cached M3U rows for one playlist from Room (tolerates raw and normalized baseUrls). */
+    private suspend fun m3uDiskRows(url: String): List<CatalogCache> {
+        val norm = M3uParser.normalizeUrl(url)
+        return runCatching {
+            db.catalogCacheDao().getAll()
+                .filter { it.addonId == "m3u" && M3uParser.normalizeUrl(it.baseUrl) == norm }
+        }.getOrDefault(emptyList())
+    }
+
+    private suspend fun writeM3uDiskRows(
+        url: String,
+        host: String,
+        channels: List<M3uChannel>,
+        now: Long
+    ) {
+        runCatching {
+            // Replace (not merge): a shrunken playlist must not leave stale
+            // group rows behind.
+            db.catalogCacheDao().deleteM3uPlaylist(url)
+            db.catalogCacheDao().upsertAll(
+                m3uChannelsToRows(url, host, channels).map { row ->
+                    CatalogCache(
+                        key = "${row.addonId}|${row.type}|${row.catalogId}",
+                        addonId = row.addonId,
+                        addonName = row.addonName,
+                        baseUrl = row.baseUrl,
+                        type = row.type,
+                        catalogId = row.catalogId,
+                        catalogName = row.catalogName,
+                        itemsJson = cappedItemsJson(row.items),
+                        fetchedAt = now
+                    )
+                }
+            )
+        }
+    }
+
+    private fun m3uChannelsToRows(
+        playlistUrl: String,
+        host: String,
+        channels: List<M3uChannel>
+    ): List<CatalogRow> {
+        if (channels.isEmpty()) return emptyList()
+        return channels
+            .groupBy { it.group?.takeIf { g -> g.isNotBlank() } ?: "All channels" }
+            .map { (group, list) ->
+                CatalogRow(
+                    addonId = "m3u",
+                    addonName = host,
+                    baseUrl = playlistUrl,
+                    catalogName = group,
+                    type = "tv",
+                    catalogId = "m3u:${M3uParser.normalizeUrl(playlistUrl).hashCode()}:${group.hashCode()}",
+                    items = list.map { ch ->
+                        MetaPreview(
+                            id = ch.url,
+                            type = "tv",
+                            name = ch.name,
+                            poster = ch.logo
+                        )
+                    }
+                )
+            }
+    }
+
+    private fun playlistHost(url: String): String =
+        runCatching {
+            java.net.URI(url).host?.removePrefix("www.")?.takeIf { it.isNotBlank() } ?: "IPTV"
+        }.getOrDefault("IPTV")
+
+    private fun readableM3uError(e: Throwable): String = when (e) {
+        is java.net.UnknownHostException ->
+            "couldn't reach the server (check your connection)"
+        is java.net.SocketTimeoutException ->
+            "the server took too long to respond"
+        else -> e.message?.takeIf { it.isNotBlank() } ?: "couldn't load the playlist"
+    }
+
+    /** Toggle a channel pin. Keys: "addonId|metaId" ("m3u|<url>" for playlists). */
+    fun toggleLiveFavorite(key: String) {
+        val cur = settings.liveFavorites.toMutableSet()
+        if (!cur.add(key)) cur.remove(key)
+        settings.liveFavorites = cur
+    }
+
+    /** Push a channel key to the front of the recents (max 20). */
+    fun pushLiveRecent(key: String) {
+        settings.liveRecent = (listOf(key) + settings.liveRecent.filter { it != key }).take(20)
     }
 
     // ---- Subtitle search (feature 9) ----
@@ -757,6 +1073,7 @@ class StreamRepository(
     suspend fun ensurePreinstalledAddons() = withContext(Dispatchers.IO) {
         val targets = listOf(
             "https://plaviometa.vercel.app/manifest.json",
+            "https://plaviohd.vercel.app/manifest.json",
             "https://v3-cinemeta.strem.io/manifest.json",
             "https://opensubtitles-v3.strem.io/manifest.json",
             "https://subsense.nepiraw.com/manifest.json"
@@ -786,8 +1103,16 @@ class StreamRepository(
          * CursorWindow limit, so a row can never poison reads again.
          */
         private const val MAX_CACHED_ROW_BYTES = 900_000
-        /** Manifests rarely change — skip the round-trip for a day. */
-        private const val MANIFEST_TTL_MS = 24L * 3600L * 1000L
+        /** Manifests rarely change — skip the round-trip for 6h (24h delayed newly search-capable addons). */
+        private const val MANIFEST_TTL_MS = 6L * 3600L * 1000L
+        /** Hard ceiling for a whole remote-search pass so "Searching…" can't hang. */
+        private const val REMOTE_SEARCH_TIMEOUT_MS = 10_000L
+        /** Per-addon budget inside the sequential getMetaFromAny walk. */
+        private const val META_FETCH_TIMEOUT_MS = 15_000L
+        /** Freshness of cached M3U playlists (memory + disk). */
+        private const val M3U_CACHE_TTL_MS = 15L * 60L * 1000L
+        /** Freshness of the in-memory Live-tab TV rows. */
+        private const val TV_ROWS_TTL_MS = 15L * 60L * 1000L
     }
 
     /**
