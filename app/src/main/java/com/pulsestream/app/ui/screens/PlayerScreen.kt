@@ -163,6 +163,8 @@ import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.DotsLoadingIndicator
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.ui.components.StreamCard
+import com.pulsestream.app.ui.components.StreamCardStyle
+import com.pulsestream.app.ui.components.StreamList
 import com.pulsestream.app.ui.components.rememberStreamBrowserState
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
@@ -1283,6 +1285,8 @@ fun PlayerScreen(
         val req = latestRequest.value
         // #8: live TV never enters Continue Watching.
         if (req.type == "tv") return
+        // Trailers never enter Continue Watching either.
+        if (req.isTrailer) return
         val pos = pl.currentPosition
         val dur = pl.duration.takeIf { it > 0 } ?: C.TIME_UNSET
         // NonCancellable: onDispose cancels ioScope's children (#9) and must
@@ -1322,6 +1326,7 @@ fun PlayerScreen(
             if (player.playbackState == Player.STATE_ENDED &&
                 settings.autoPlayNext &&
                 !currentRequest.isMovie &&
+                !currentRequest.isTrailer &&
                 currentRequest.episodes.isNotEmpty() &&
                 endedHandledFor != currentRequest.videoId
             ) {
@@ -1336,20 +1341,22 @@ fun PlayerScreen(
                     playEpisode(next)
                 }
             }
-            simklScrobbler.tick(
-                currentRequest,
-                positionMs,
-                durationMs,
-                isPlaying,
-                player.playbackState == Player.STATE_ENDED
-            )
-            traktScrobbler.tick(
-                currentRequest,
-                positionMs,
-                durationMs,
-                isPlaying,
-                player.playbackState == Player.STATE_ENDED
-            )
+            if (!currentRequest.isTrailer) {
+                simklScrobbler.tick(
+                    currentRequest,
+                    positionMs,
+                    durationMs,
+                    isPlaying,
+                    player.playbackState == Player.STATE_ENDED
+                )
+                traktScrobbler.tick(
+                    currentRequest,
+                    positionMs,
+                    durationMs,
+                    isPlaying,
+                    player.playbackState == Player.STATE_ENDED
+                )
+            }
             delay(500)
         }
     }
@@ -2317,23 +2324,19 @@ fun PlayerScreen(
                         }
                     }
                     else -> {
-                        LazyColumn(
+                        val switchStyle = StreamCardStyle.fromKey(repository.settings.streamCardStyle)
+                        val switchIsGrid = switchStyle == StreamCardStyle.TILE_GRID
+                        StreamList(
+                            streams = browserState.filtered,
+                            style = switchStyle,
+                            onPick = { switchSource(it) },
                             modifier = Modifier.fillMaxWidth(),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            contentPadding = if (switchIsGrid) PaddingValues(16.dp)
+                            else PaddingValues(
                                 start = 4.dp, end = 4.dp, bottom = 32.dp
-                            )
-                        ) {
-                            items(
-                                browserState.filtered,
-                                key = { s -> "src_${s.url.hashCode()}" }
-                            ) { stream ->
-                                StreamCard(
-                                    stream = stream,
-                                    selected = stream.url == currentRequest.streamUrl,
-                                    onClick = { switchSource(stream) }
-                                )
-                            }
-                        }
+                            ),
+                            selectedUrl = currentRequest.streamUrl
+                        )
                     }
                 }
             }
