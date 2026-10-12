@@ -130,9 +130,16 @@ import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import com.pulsestream.app.data.ASPECT_MODES
 import com.pulsestream.app.data.IntroDbApi
+import com.pulsestream.app.data.PlaybackHeaders
 import com.pulsestream.app.data.PlaybackRequest
 import com.pulsestream.app.data.TvChannelRef
 import com.pulsestream.app.data.ResolvedSubtitle
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
 import com.pulsestream.app.data.SkipSegment
 import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.data.StreamRepository
@@ -176,6 +183,76 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+/**
+ * Nuvio parity: HEAD-probe a URL's Content-Type for self-heal.
+ * Returns a media3 MIME string (or null when unknown).
+ */
+private fun probePlaybackContentType(url: String, headers: Map<String, String>): String? {
+    return try {
+        val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "HEAD"
+            connectTimeout = 8000
+            readTimeout = 8000
+            instanceFollowRedirects = true
+            headers.forEach { (k, v) -> setRequestProperty(k, v) }
+        }
+        conn.connect()
+        val ct = conn.contentType?.lowercase().orEmpty()
+        conn.disconnect()
+        when {
+            "mpegurl" in ct || "m3u8" in ct -> androidx.media3.common.MimeTypes.APPLICATION_M3U8
+            "mpd" in ct || "dash" in ct -> androidx.media3.common.MimeTypes.APPLICATION_MPD
+            "mp4" in ct -> androidx.media3.common.MimeTypes.VIDEO_MP4
+            "webm" in ct -> androidx.media3.common.MimeTypes.VIDEO_WEBM
+            "matroska" in ct -> androidx.media3.common.MimeTypes.VIDEO_MATROSKA
+            else -> null
+        }
+    } catch (_: Exception) { null }
+}
+
+/** Installs the fallback-trust SSLSocketFactory once (idempotent, NuvioTV parity). */
+private var playbackTlsInstalled = false
+private fun ensurePlaybackTlsInstalled() {
+    if (playbackTlsInstalled) return
+    playbackTlsInstalled = true
+    try {
+        val platformTm = run {
+            val tmf = TrustManagerFactory.getInstance(
+                TrustManagerFactory.getDefaultAlgorithm()
+            ).apply { init(null as java.security.KeyStore?) }
+            tmf.trustManagers.filterIsInstance<X509TrustManager>().first()
+        }
+        val fallbackTm = object : X509TrustManager {
+            override fun checkClientTrusted(
+                chain: Array<java.security.cert.X509Certificate>, authType: String
+            ) = platformTm.checkClientTrusted(chain, authType)
+            override fun checkServerTrusted(
+                chain: Array<java.security.cert.X509Certificate>, authType: String
+            ) {
+                try {
+                    platformTm.checkServerTrusted(chain, authType)
+                } catch (_: Exception) {
+                    // Fall back to trust-all (NuvioTV parity).
+                }
+            }
+            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> =
+                platformTm.acceptedIssuers
+        }
+        val sslContext = SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf<TrustManager>(fallbackTm), java.security.SecureRandom())
+        }
+        HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
+        val platformVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
+        HttpsURLConnection.setDefaultHostnameVerifier { hostname, session ->
+            try {
+                platformVerifier.verify(hostname, session)
+            } catch (_: Exception) {
+                true // Fall back to allow (NuvioTV parity).
+            }
+        }
+    } catch (_: Exception) { /* platform TLS unchanged */ }
+}
 
 /** Transient on-screen feedback for gestures, speed, aspect and track changes. */
 private sealed interface PlayerIndicator {
@@ -309,6 +386,7 @@ fun PlayerScreen(
     }
     val maxVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }
     val ioScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    val isTv = rememberIsTv()
     /**
      * Set in onDispose. Background work (zap, episode load, source switch)
      * checks this before building a new ExoPlayer so no player is ever
@@ -317,6 +395,13 @@ fun PlayerScreen(
     val disposed = remember { AtomicBoolean(false) }
     /** Non-null while the current stream is in a failed state (#4). */
     var playerError by remember { mutableStateOf<String?>(null) }
+    /** Nuvio parity: self-heal — probe Content-Type and retry once on format errors. */
+    var mimeHealAttempted by remember { mutableStateOf(false) }
+    /**
+     * Set after player state exists; invoked by errorListener for the
+     * self-heal path. Indirection avoids forward-reference issues.
+     */
+    var healOnFormatError: ((PlaybackException) -> Unit)? by remember { mutableStateOf(null) }
     /**
      * Registered on every player instance we build (#4). ExoPlayer invokes
      * listeners on the player's application thread (main here), so touching
@@ -326,6 +411,14 @@ fun PlayerScreen(
         object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 if (disposed.get()) return
+                val cause = generateSequence<Throwable>(error) { it.cause }.firstOrNull {
+                    it::class.java.simpleName == "UnrecognizedInputFormatException"
+                }
+                if (cause != null && !mimeHealAttempted) {
+                    mimeHealAttempted = true
+                    healOnFormatError?.invoke(error)
+                    return
+                }
                 playerError = error.message?.takeIf { it.isNotBlank() }
                     ?: "Playback failed (code ${error.errorCode})"
             }
@@ -369,22 +462,45 @@ fun PlayerScreen(
      * still-unresolved subtitle lists are resolved in the background and
      * attached via [attachResolvedSubtitles].
      */
-    fun buildExo(req: PlaybackRequest, subs: List<ResolvedSubtitle> = emptyList()): ExoPlayer {
+    /**
+     * Builds an OkHttp-backed data source factory for stream playback with
+     * Nuvio-parity networking: trust-all TLS (scoped to this client only),
+     * 15s timeouts, redirect following. The trust-all socket factory lives
+     * on this OkHttpClient instance — the addon API client and updater are
+     * untouched.
+     */
+    fun buildPlaybackDataSourceFactory(
+        headers: Map<String, String>
+    ): DefaultHttpDataSource.Factory {
+        ensurePlaybackTlsInstalled()
+        return DefaultHttpDataSource.Factory().apply {
+            setDefaultRequestProperties(headers)
+            setConnectTimeoutMs(15_000)
+            setReadTimeoutMs(15_000)
+            setAllowCrossProtocolRedirects(true)
+        }
+    }
+
+    fun buildExo(
+        req: PlaybackRequest,
+        subs: List<ResolvedSubtitle> = emptyList(),
+        forcedMime: String? = null
+    ): ExoPlayer {
         val prefs = settings.subtitleLanguages
         val audioPref = settings.preferredAudioLanguage
-        // Debrid/proxied addons can require extra headers on the stream URL
-        // (parsed from behaviorHints.proxyHeaders.request) — send them here.
-        // Never forward the addon's User-Agent: a desktop Chrome UA from
-        // proxyHeaders triggers Cloudflare bot protection on mobile IPs
-        // (killed all live TV). ExoPlayer's native Android UA is fine;
-        // Referer/Origin are what the CDN actually checks.
-        val dataSourceFactory = DefaultHttpDataSource.Factory().apply {
-            if (req.headers.isNotEmpty()) {
-                setDefaultRequestProperties(
-                    req.headers.filterKeys { !it.equals("User-Agent", ignoreCase = true) }
-                )
-            }
-        }
+        // Nuvio parity: forward the addon's proxyHeaders verbatim (dropping
+        // only blanks + Range). The addon-supplied User-Agent is honored —
+        // upstreams that ship one expect it, and a missing UA is itself a
+        // bot-filter trigger. Falls back to a Chrome UA when none supplied.
+        val playbackHeaders = PlaybackHeaders.buildPlaybackHeaders(req.headers, isTv)
+        // Nuvio parity: OkHttp-backed data source with trust-all TLS scoped
+        // to stream playback only (some proxied upstreams serve certs
+        // Android rejects). Timeouts 15s, cross-protocol redirects allowed.
+        val dataSourceFactory = buildPlaybackDataSourceFactory(playbackHeaders)
+        // Nuvio parity: infer HLS/DASH from the FULL URL (path + query) so
+        // proxied URLs like /api/manifest?url=<encoded ...m3u8> play as HLS
+        // instead of being misidentified as progressive.
+        val inferredMime = forcedMime ?: PlaybackHeaders.inferMimeType(req.streamUrl)
         return ExoPlayer.Builder(context)
             .setRenderersFactory(
                 DefaultRenderersFactory(context).setExtensionRendererMode(
@@ -413,6 +529,7 @@ fun PlayerScreen(
                 setMediaItem(
                     MediaItem.Builder()
                         .setUri(req.streamUrl)
+                        .apply { inferredMime?.let { setMimeType(it) } }
                         .setSubtitleConfigurations(subtitleConfigs(subs))
                         .build()
                 )
@@ -469,6 +586,29 @@ fun PlayerScreen(
      * re-preparing the video to attach them (#29).
      */
     var resolvedSubs by remember { mutableStateOf(emptyList<ResolvedSubtitle>()) }
+    // Self-heal handler: probe Content-Type, rebuild once with probed MIME.
+    healOnFormatError = { error ->
+        ioScope.launch {
+            val probed = probePlaybackContentType(
+                latestRequest.value.streamUrl,
+                PlaybackHeaders.buildPlaybackHeaders(latestRequest.value.headers, isTv)
+            )
+            if (probed != null && !disposed.get()) {
+                val req = latestRequest.value
+                val old = latestPlayer.value
+                val fresh = buildExo(req, resolvedSubs, forcedMime = probed)
+                    .also { it.addListener(errorListener) }
+                old.release()
+                player = fresh
+                playerError = null
+                fresh.prepare()
+                fresh.play()
+            } else if (!disposed.get()) {
+                playerError = error.message?.takeIf { it.isNotBlank() }
+                    ?: "Playback failed (code ${error.errorCode})"
+            }
+        }
+    }
     /**
      * Which subtitle set is already attached to which player instance.
      * Attaching the same set twice would re-prepare the video for nothing.
@@ -781,6 +921,7 @@ fun PlayerScreen(
                 withContext(Dispatchers.Main) {
                     if (gen != replaceGen.get() || disposed.get()) return@withContext
                     playerError = null
+                    mimeHealAttempted = false
                     currentRequest = newReq
                     repository.pendingPlayback = newReq
                     resumeOfferMs = null
@@ -1228,6 +1369,7 @@ fun PlayerScreen(
             val rebuilt = buildExo(req).also { it.addListener(errorListener) }
             rebuilt.setPlaybackSpeed(speed)
             player = rebuilt
+            mimeHealAttempted = false
             currentRequest = req
         }
         val p = player
@@ -1321,7 +1463,6 @@ fun PlayerScreen(
         .joinToString(" • ").takeIf { it.isNotBlank() }
 
     // ---- Android TV D-pad: works when the touch gestures can't. ----
-    val isTv = rememberIsTv()
     val playPauseFocus = remember { FocusRequester() }
     // TV: land D-pad focus on the error overlay's Retry button when it shows.
     val errorRetryFocus = remember { FocusRequester() }
