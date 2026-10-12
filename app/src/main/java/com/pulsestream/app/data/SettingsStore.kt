@@ -318,6 +318,11 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_AMOLED, false)
         set(value) = prefs.edit().putBoolean(KEY_AMOLED, value).apply()
 
+    /** Stream card visual style key (see StreamCardStyle in ui.components). Default: fusion. */
+    var streamCardStyle: String
+        get() = prefs.getString(KEY_CARD_STYLE, "fusion") ?: "fusion"
+        set(value) = prefs.edit().putString(KEY_CARD_STYLE, value).apply()
+
     /**
      * Preferred subtitle languages (ISO 639-1 codes, up to 2).
      * Empty = no preference (first available subtitle is used).
@@ -431,6 +436,7 @@ class SettingsStore(context: Context) {
         private const val KEY_SUBTITLE_LANGS = "subtitle_languages"
         private const val KEY_ACCENT = "accent_theme"
         private const val KEY_AMOLED = "amoled_black"
+        private const val KEY_CARD_STYLE = "stream_card_style"
         private const val KEY_PREINSTALL_PREFIX = "preinstall_done_"
         private const val KEY_SIMKL_TOKEN = "simkl_token"
         private const val KEY_SIMKL_USERNAME = "simkl_username"

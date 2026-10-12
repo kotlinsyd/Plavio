@@ -21,11 +21,29 @@ object StremioParser {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
+    // Safe string read: a field that arrives as an object/array (addons in
+    // the wild do this) defaults to null instead of jsonPrimitive throwing
+    // IllegalArgumentException and aborting the entire parse.
     private fun JsonObject.str(key: String): String? =
-        this[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
 
     private fun JsonObject.strList(key: String): List<String> =
         (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
+
+    /**
+     * Reads behaviorHints.proxyHeaders.request — extra HTTP headers an addon
+     * requires on the stream URL (used by some debrid-backed addons).
+     * Returns an empty map when absent.
+     */
+    private fun parseProxyHeaders(s: JsonObject): Map<String, String> {
+        val hints = s["behaviorHints"] as? JsonObject ?: return emptyMap()
+        val proxy = hints["proxyHeaders"] as? JsonObject ?: return emptyMap()
+        val req = proxy["request"] as? JsonObject ?: return emptyMap()
+        return req.entries.mapNotNull { (k, v) ->
+            val value = (v as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+            if (value != null) k to value else null
+        }.toMap()
+    }
 
     private fun resourceNames(el: JsonElement): List<String> = when (el) {
         is JsonPrimitive -> listOfNotNull(el.contentOrNull)
@@ -43,7 +61,16 @@ object StremioParser {
             val c = el as? JsonObject ?: return@mapNotNull null
             val type = c.str("type") ?: return@mapNotNull null
             val cid = c.str("id") ?: return@mapNotNull null
-            CatalogRef(type = type, id = cid, name = c.str("name") ?: cid)
+            // "extra" declares supported query extras. Stremio shapes vary:
+            // strings ("search"), {name:"search"} objects, or {name, options}.
+            val extra = (c["extra"] as? JsonArray)?.mapNotNull { x ->
+                when (x) {
+                    is JsonPrimitive -> x.contentOrNull
+                    is JsonObject -> x.str("name")
+                    else -> null
+                }
+            } ?: emptyList()
+            CatalogRef(type = type, id = cid, name = c.str("name") ?: cid, extra = extra)
         } ?: emptyList()
         return AddonManifest(
             id = id,
@@ -54,8 +81,8 @@ object StremioParser {
             types = obj.strList("types"),
             catalogs = catalogs,
             resources = resources,
-            configurable = (obj["behaviorHints"] as? JsonObject)
-                ?.get("configurable")?.jsonPrimitive?.booleanOrNull ?: false
+            configurable = ((obj["behaviorHints"] as? JsonObject)
+                ?.get("configurable") as? JsonPrimitive)?.booleanOrNull ?: false
         )
     }
 
@@ -92,8 +119,8 @@ object StremioParser {
             Video(
                 id = vid,
                 title = v.str("title") ?: v.str("name") ?: vid,
-                season = v["season"]?.jsonPrimitive?.intOrNull ?: 0,
-                episode = v["episode"]?.jsonPrimitive?.intOrNull ?: 0,
+                season = (v["season"] as? JsonPrimitive)?.intOrNull ?: 0,
+                episode = (v["episode"] as? JsonPrimitive)?.intOrNull ?: 0,
                 overview = v.str("overview") ?: v.str("description"),
                 thumbnail = v.str("thumbnail"),
                 released = v.str("released")
@@ -103,8 +130,31 @@ object StremioParser {
             id = preview.id, type = preview.type, name = preview.name,
             poster = preview.poster, background = preview.background, logo = preview.logo,
             description = preview.description, releaseInfo = preview.releaseInfo,
-            imdbRating = preview.imdbRating, genres = preview.genres, videos = videos
+            imdbRating = preview.imdbRating, genres = preview.genres, videos = videos,
+            trailerStreams = parseTrailers(meta)
         )
+    }
+
+    /**
+     * YouTube trailer references. PlavioMeta serves `trailerStreams`
+     * ([{title, ytId}]); the Stremio-standard `trailers` array carries the
+     * YouTube id in `source` ([{source, type}]). Both shapes are accepted.
+     */
+    private fun parseTrailers(meta: JsonObject): List<TrailerStream> {
+        val out = linkedMapOf<String, TrailerStream>()
+        (meta["trailerStreams"] as? JsonArray)?.forEach { el ->
+            val o = el as? JsonObject ?: return@forEach
+            val ytId = o.str("ytId")?.trim()?.takeIf { it.isNotEmpty() } ?: return@forEach
+            out.putIfAbsent(ytId, TrailerStream(o.str("title") ?: "", ytId))
+        }
+        (meta["trailers"] as? JsonArray)?.forEach { el ->
+            val o = el as? JsonObject ?: return@forEach
+            val ytId = o.str("source")?.trim()?.takeIf { it.isNotEmpty() } ?: return@forEach
+            // Skip non-YouTube sources (ids are 11-char YouTube video ids).
+            if (!ytId.matches(Regex("[A-Za-z0-9_-]{11}"))) return@forEach
+            out.putIfAbsent(ytId, TrailerStream(o.str("title") ?: "", ytId))
+        }
+        return out.values.toList()
     }
 
     fun parseStreams(text: String): StreamResult {
@@ -115,7 +165,8 @@ object StremioParser {
             StreamItem(
                 url = url,
                 name = s.str("name"),
-                title = s.str("title") ?: s.str("description")
+                title = s.str("title") ?: s.str("description"),
+                headers = parseProxyHeaders(s)
             )
         } ?: emptyList()
         val subtitles = (obj["subtitles"] as? JsonArray)?.mapNotNull { el ->

@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.PlayArrow
@@ -49,6 +50,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.AUDIO_LANGUAGE_OPTIONS
 import com.pulsestream.app.data.SettingsStore
+import com.pulsestream.app.data.audioLanguageName
 import com.pulsestream.app.data.SUBTITLE_BG_OPTIONS
 import com.pulsestream.app.data.SUBTITLE_COLOR_OPTIONS
 import com.pulsestream.app.data.SUBTITLE_EDGE_OPTIONS
@@ -75,6 +77,8 @@ fun PlaybackSettingsScreen(
     var autoPlayNext by remember { mutableStateOf(settings.autoPlayNext) }
     var keepScreenOn by remember { mutableStateOf(settings.keepScreenOn) }
     var showSkip by remember { mutableStateOf(settings.showSkipButton) }
+    var audioLang by remember { mutableStateOf(settings.preferredAudioLanguage) }
+    var audioLangPickerOpen by remember { mutableStateOf(false) }
 
     GlowBackground {
         LazyColumn(
@@ -101,7 +105,7 @@ fun PlaybackSettingsScreen(
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "How videos start and behave while playing.",
+                        "How videos start, behave and sound while playing.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
                         modifier = Modifier.padding(start = 56.dp, end = 8.dp)
@@ -156,7 +160,31 @@ fun PlaybackSettingsScreen(
                     }
                 )
             }
+            item(key = "audioLang") {
+                SettingsNavRow(
+                    icon = Icons.Filled.Audiotrack,
+                    title = "Preferred audio language",
+                    subtitle = if (audioLang.isNullOrBlank()) {
+                        "Not set — title's default audio is used"
+                    } else {
+                        "Auto-plays ${audioLanguageName(audioLang!!)} when available"
+                    },
+                    onClick = { audioLangPickerOpen = true }
+                )
+            }
         }
+    }
+
+    if (audioLangPickerOpen) {
+        AudioLanguagePickerDialog(
+            initial = audioLang,
+            onDismiss = { audioLangPickerOpen = false },
+            onDone = { lang ->
+                settings.preferredAudioLanguage = lang
+                audioLang = lang
+                audioLangPickerOpen = false
+            }
+        )
     }
 }
 
