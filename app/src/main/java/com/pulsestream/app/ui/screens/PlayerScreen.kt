@@ -1304,6 +1304,7 @@ fun PlayerScreen(
 
     // Poll position / duration / playing / buffering / volume for the UI,
     // and track the active skip-segment window.
+    var endedHandledFor by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(player) {
         while (true) {
             positionMs = player.currentPosition
@@ -1316,6 +1317,25 @@ fun PlayerScreen(
             activeSegment = if (settings.showSkipButton) {
                 skipSegments.firstOrNull { positionMs >= it.startMs && positionMs <= it.endMs }
             } else null
+            // Auto-play next episode: when a series episode ends and the
+            // setting is on, advance to the next episode automatically.
+            if (player.playbackState == Player.STATE_ENDED &&
+                settings.autoPlayNext &&
+                !currentRequest.isMovie &&
+                currentRequest.episodes.isNotEmpty() &&
+                endedHandledFor != currentRequest.videoId
+            ) {
+                endedHandledFor = currentRequest.videoId
+                val eps = currentRequest.episodes.sortedWith(
+                    compareBy({ it.season }, { it.episode })
+                )
+                val idx = eps.indexOfFirst { it.id == currentRequest.videoId }
+                val next = if (idx >= 0) eps.getOrNull(idx + 1) else null
+                if (next != null) {
+                    pokeIndicator(PlayerIndicator.Message("Playing next episode…"))
+                    playEpisode(next)
+                }
+            }
             simklScrobbler.tick(
                 currentRequest,
                 positionMs,
@@ -1497,6 +1517,8 @@ fun PlayerScreen(
     // focus (e.g. requestFocus failed), Center/Up/Down re-request focus on
     // the play/pause button instead of being swallowed with no effect.
     var transportFocused by remember { mutableStateOf(false) }
+    /** True while the TV seekbar holds D-pad focus (arrows then seek). */
+    var seekbarFocused by remember { mutableStateOf(false) }
     LaunchedEffect(playerError, isTv) {
         if (isTv && playerError != null) {
             delay(300)
@@ -1546,16 +1568,27 @@ fun PlayerScreen(
                 Key.MediaPause -> { player.pause(); true }
                 Key.MediaFastForward -> { seekByWithFeedback(10_000); true }
                 Key.MediaRewind -> { seekByWithFeedback(-10_000); true }
-                // D-pad: with a dialog open, hand off to the dialog's focus;
-                // when controls are up, let focused buttons handle OK;
-                // arrows still seek so users don't get stuck.
-                Key.DirectionLeft -> if (dialogOpen) false else { seekByWithFeedback(-10_000); true }
-                Key.DirectionRight -> if (dialogOpen) false else { seekByWithFeedback(10_000); true }
+                // D-pad Left/Right: with a dialog open, hand off to the
+                // dialog. With the seekbar focused, its own handler seeks.
+                // With controls visible, let 2D focus search move between
+                // buttons (this is what makes every control reachable).
+                // With controls hidden, arrows seek directly.
+                Key.DirectionLeft -> when {
+                    dialogOpen || seekbarFocused || showControls -> false
+                    else -> { seekByWithFeedback(-10_000); true }
+                }
+                Key.DirectionRight -> when {
+                    dialogOpen || seekbarFocused || showControls -> false
+                    else -> { seekByWithFeedback(10_000); true }
+                }
                 Key.DirectionCenter, Key.Enter, Key.NumPadEnter ->
                     if (dialogOpen) false
                     else if (showControls && !transportFocused) {
                         runCatching { playPauseFocus.requestFocus() }; true
                     } else if (showControls) false else { toggleControls(); true }
+                // D-pad Up/Down: dialogs handle their own; visible controls
+                // get 2D focus navigation between rows; hidden controls are
+                // summoned (Down brings them up per the TV spec).
                 Key.DirectionUp, Key.DirectionDown ->
                     if (dialogOpen) false
                     else if (showControls && !transportFocused) {
@@ -1816,14 +1849,20 @@ fun PlayerScreen(
                         }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = {
-                            locked = true
-                            showControls = false
-                            pokeIndicator(PlayerIndicator.Message("Controls locked"))
-                        }) {
+                        IconButton(
+                            onClick = {
+                                locked = true
+                                showControls = false
+                                pokeIndicator(PlayerIndicator.Message("Controls locked"))
+                            },
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
+                        ) {
                             Icon(Icons.Filled.LockOpen, "Lock controls", tint = TextPrimary)
                         }
-                        IconButton(onClick = onBack) {
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
+                        ) {
                             Icon(Icons.Filled.ArrowBack, "Back", tint = TextPrimary)
                         }
                     }
@@ -1839,7 +1878,8 @@ fun PlayerScreen(
                     if (canZap()) {
                         IconButton(
                             onClick = { zapDelta(-1) },
-                            enabled = !zapping
+                            enabled = !zapping,
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
                         ) {
                             Icon(
                                 Icons.Filled.SkipPrevious, "Previous channel",
@@ -1847,7 +1887,10 @@ fun PlayerScreen(
                             )
                         }
                     }
-                    IconButton(onClick = { seekByWithFeedback(-10_000) }) {
+                    IconButton(
+                        onClick = { seekByWithFeedback(-10_000) },
+                        modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
+                    ) {
                         Icon(
                             Icons.Filled.Replay10, "Back 10 seconds",
                             tint = TextPrimary, modifier = Modifier.size(56.dp)
@@ -1855,7 +1898,9 @@ fun PlayerScreen(
                     }
                     IconButton(
                         onClick = { togglePlay() },
-                        modifier = Modifier.focusRequester(playPauseFocus)
+                        modifier = Modifier
+                            .focusRequester(playPauseFocus)
+                            .tvFocusRing(RoundedCornerShape(50))
                     ) {
                         Icon(
                             if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
@@ -1863,7 +1908,10 @@ fun PlayerScreen(
                             tint = TextPrimary, modifier = Modifier.size(76.dp)
                         )
                     }
-                    IconButton(onClick = { seekByWithFeedback(10_000) }) {
+                    IconButton(
+                        onClick = { seekByWithFeedback(10_000) },
+                        modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
+                    ) {
                         Icon(
                             Icons.Filled.Forward10, "Forward 10 seconds",
                             tint = TextPrimary, modifier = Modifier.size(56.dp)
@@ -1872,7 +1920,8 @@ fun PlayerScreen(
                     if (canZap()) {
                         IconButton(
                             onClick = { zapDelta(1) },
-                            enabled = !zapping
+                            enabled = !zapping,
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
                         ) {
                             Icon(
                                 Icons.Filled.SkipNext, "Next channel",
@@ -1898,7 +1947,10 @@ fun PlayerScreen(
                     SlimSeekBar(
                         positionMs = positionMs,
                         durationMs = durationMs,
-                        onSeek = { player.seekTo(it) }
+                        onSeek = { player.seekTo(it) },
+                        isTv = isTv,
+                        onSeekDelta = { seekByWithFeedback(it) },
+                        onFocusChanged = { seekbarFocused = it }
                     )
                     Row(
                         Modifier.fillMaxWidth().padding(top = 6.dp),
@@ -2311,6 +2363,7 @@ fun PlayerScreen(
                     ) {
                         items(seasons, key = { it }) { season ->
                             FilterChip(
+                                modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
                                 selected = selSeason == season,
                                 onClick = { selSeason = season },
                                 label = { Text(if (season == 0) "Specials" else "S$season") },
@@ -2433,17 +2486,37 @@ private fun SlimSeekBar(
     positionMs: Long,
     durationMs: Long,
     onSeek: (Long) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isTv: Boolean = false,
+    onSeekDelta: ((Long) -> Unit)? = null,
+    onFocusChanged: ((Boolean) -> Unit)? = null
 ) {
     var dragFrac by remember { mutableStateOf<Float?>(null) }
     val frac = (dragFrac ?: if (durationMs > 0) positionMs.toFloat() / durationMs else 0f)
         .coerceIn(0f, 1f)
     val density = LocalDensity.current
     val progressColor = LocalPalette.current.accent
+    // TV: the seekbar is a D-pad stop with the green ring; Left/Right seeks
+    // ±10s while focused, Up/Down moves to the other control rows.
+    val tvModifier = if (isTv) {
+        Modifier
+            .focusable()
+            .onFocusChanged { onFocusChanged?.invoke(it.isFocused) }
+            .tvFocusRing(RoundedCornerShape(8.dp))
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionLeft -> { onSeekDelta?.invoke(-10_000); true }
+                    Key.DirectionRight -> { onSeekDelta?.invoke(10_000); true }
+                    else -> false
+                }
+            }
+    } else Modifier
     Canvas(
         modifier
             .fillMaxWidth()
             .height(30.dp)
+            .then(tvModifier)
             .pointerInput(durationMs) {
                 detectTapGestures(onTap = { offset ->
                     onSeek(((offset.x / size.width).coerceIn(0f, 1f) * durationMs).toLong())
