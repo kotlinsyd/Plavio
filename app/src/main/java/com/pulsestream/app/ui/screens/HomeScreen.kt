@@ -3,6 +3,7 @@ package com.pulsestream.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -23,6 +25,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,8 +41,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import com.pulsestream.app.ui.tv.rememberIsTv
+import com.pulsestream.app.ui.tv.tvFocusRing
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -147,11 +156,20 @@ fun HomeScreen(
 ) {
     val vm: HomeViewModel = viewModel(factory = vmFactory { HomeViewModel(repository) })
     val watching by repository.continueWatching.collectAsState(initial = emptyList())
-    val watchlist by repository.watchlist.collectAsState(initial = emptyList())
+    val scope = rememberCoroutineScope()
+    // Watchlist lives ONLY in the Watchlist tab (top-right bookmark) — it is
+    // deliberately not shown on Home (v0.8.21 behavior fix).
     // Reload when Home catalog visibility changes in Settings.
     val catalogVersion by repository.catalogVisibility.collectAsState(initial = 0)
 
     LaunchedEffect(catalogVersion) { vm.load() }
+
+    // Android TV: initial D-pad focus target (the hero card).
+    val isTv = rememberIsTv()
+    val heroFocus = remember { FocusRequester() }
+    // Land focus on the hero ONCE per Home visit — never yank it back on
+    // every catalog refresh while the user is browsing the rows.
+    var heroFocusDone by remember { mutableStateOf(false) }
 
     GlowBackground {
         Column(Modifier.fillMaxSize()) {
@@ -197,6 +215,14 @@ fun HomeScreen(
                     // Hero carousel data: computed once per row-set, outside the
                     // LazyColumn DSL (remember can't run inside the list scope).
                     val featured = remember(state.rows) { featuredTitles(state.rows) }
+                    // TV: land D-pad focus on the hero once content is in.
+                    LaunchedEffect(isTv, featured.size) {
+                        if (isTv && featured.isNotEmpty() && !heroFocusDone) {
+                            heroFocusDone = true
+                            delay(600)
+                            runCatching { heroFocus.requestFocus() }
+                        }
+                    }
                     val pullRefreshState = rememberPullToRefreshState()
                     PullToRefreshBox(
                         isRefreshing = state.refreshing,
@@ -225,7 +251,7 @@ fun HomeScreen(
                         // stable while rows refresh underneath.
                         if (featured.isNotEmpty()) {
                             item(key = "hero_carousel") {
-                                HeroCarousel(featured, onOpenDetail)
+                                HeroCarousel(featured, onOpenDetail, heroFocus)
                                 Spacer(Modifier.height(8.dp))
                             }
                         }
@@ -243,7 +269,14 @@ fun HomeScreen(
                                         watching,
                                         key = { index, item -> "${item.key}_$index" }
                                     ) { _, item ->
-                                        ContinueWatchingCard(item) {
+                                        ContinueWatchingCard(
+                                            item,
+                                            onRemove = {
+                                                scope.launch {
+                                                    repository.deleteSavedPosition(item.key)
+                                                }
+                                            }
+                                        ) {
                                             repository.pendingPlayback = PlaybackRequest(
                                                 streamUrl = item.streamUrl,
                                                 title = item.title,
@@ -262,32 +295,8 @@ fun HomeScreen(
                                 Spacer(Modifier.height(8.dp))
                             }
                         }
-                        if (watchlist.isNotEmpty()) {
-                            // Explicit key — see "continue_watching" above.
-                            item(key = "watchlist") {
-                                SectionTitle("Watchlist")
-                                LazyRow(
-                                    contentPadding = PaddingValues(horizontal = 16.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    itemsIndexed(
-                                        watchlist,
-                                        key = { index, item -> "wl_${item.key}_$index" }
-                                    ) { _, item ->
-                                        PosterCard(
-                                            meta = com.pulsestream.app.data.MetaPreview(
-                                                id = item.metaId,
-                                                type = item.type,
-                                                name = item.name,
-                                                poster = item.poster
-                                            ),
-                                            onClick = { onOpenDetail(item.addonId, item.type, item.metaId) }
-                                        )
-                                    }
-                                }
-                                Spacer(Modifier.height(8.dp))
-                            }
-                        }
+                        // Watchlist intentionally NOT shown here (v0.8.21):
+                        // bookmarked titles live only in the Watchlist tab.
                         state.rows.forEach { row ->
                             // THE v0.3.0 scroll-crash fix: the key MUST include the
                             // catalog TYPE. Cinemeta declares the same catalog ids
@@ -354,7 +363,8 @@ private fun featuredTitles(rows: List<CatalogRow>, max: Int = 6): List<FeaturedT
 @Composable
 private fun HeroCarousel(
     featured: List<FeaturedTitle>,
-    onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit
+    onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit,
+    heroFocus: FocusRequester? = null
 ) {
     val pagerState = rememberPagerState(pageCount = { featured.size })
 
@@ -385,6 +395,9 @@ private fun HeroCarousel(
                 modifier = Modifier
                     .fillMaxSize()
                     .clickable { onOpenDetail(item.addonId, meta.type, meta.id) }
+                    .then(if (heroFocus != null && index == 0) Modifier.focusRequester(heroFocus) else Modifier)
+                    .focusable()
+                    .tvFocusRing(RoundedCornerShape(22.dp))
             ) {
                 SafePosterImage(
                     model = meta.background?.takeIf { it.isNotBlank() } ?: meta.poster,
@@ -464,9 +477,17 @@ private fun HeroCarousel(
 }
 
 @Composable
-private fun ContinueWatchingCard(item: PlaybackState, onClick: () -> Unit) {
+private fun ContinueWatchingCard(
+    item: PlaybackState,
+    onRemove: () -> Unit,
+    onClick: () -> Unit
+) {
     Column(
-        modifier = Modifier.width(200.dp).clickable(onClick = onClick)
+        modifier = Modifier
+            .width(200.dp)
+            .clickable(onClick = onClick)
+            .focusable()
+            .tvFocusRing(RoundedCornerShape(14.dp))
     ) {
         Box(
             modifier = Modifier
@@ -480,6 +501,25 @@ private fun ContinueWatchingCard(item: PlaybackState, onClick: () -> Unit) {
                 contentDescription = item.title,
                 modifier = Modifier.fillMaxSize()
             )
+            // Visible remove button: live channels can leak into Continue
+            // Watching with no expiry, so the user must be able to clear
+            // any entry by hand.
+            IconButton(
+                onClick = onRemove,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.Black.copy(alpha = 0.65f))
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Remove from Continue Watching",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
             if (item.durationMs > 0) {
                 LinearProgressIndicator(
                     progress = { (item.positionMs.toFloat() / item.durationMs).coerceIn(0f, 1f) },

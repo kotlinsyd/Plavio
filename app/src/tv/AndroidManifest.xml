@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Plavio TV: Android TV / Google TV identity. Merged with the main manifest. -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <!-- OOM hotfix (v0.8.28-tv): low-RAM TVs (48MB heap) crash loading
+         live channels — HTTP/2 segment buffers + unbounded catalog fetches
+         exhaust memory. Large heap raises the ceiling. -->
+    <application
+        android:banner="@drawable/tv_banner"
+        android:largeHeap="true">
+        <activity android:name=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

@@ -1,39 +1,61 @@
 package com.pulsestream.app.data
 
+import com.pulsestream.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
 /** HTTP client for the Stremio addon protocol. */
 class StremioApi {
 
+    // OOM hotfix (v0.8.28-tv): cap concurrent requests and pin HTTP/1.1.
+    // HTTP/2 multiplexes every stream through okio segment buffers; with many
+    // parallel catalog fetches on a 48MB-heap TV this exhausts memory and
+    // crashes (see crash report: OutOfMemoryError in Http2Connection).
     private val client = OkHttpClient.Builder()
         .callTimeout(25, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS)
+        .dispatcher(Dispatcher().apply { maxRequests = 8; maxRequestsPerHost = 4 })
+        .protocols(listOf(Protocol.HTTP_1_1))
         .build()
 
-    /**
-     * Normalizes user input into an addon base URL:
-     * accepts a full manifest URL or a bare host, strips /manifest.json and trailing slashes.
-     */
-    fun normalizeBaseUrl(input: String): String {
-        var url = input.trim()
-        require(url.isNotEmpty()) { "Please paste an addon URL" }
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            url = "https://$url"
+    companion object {
+        /**
+         * Normalizes user input into an addon base URL:
+         * accepts a full manifest URL or a bare host, strips /manifest.json and trailing slashes.
+         *
+         * Query strings are preserved: many addons carry their config there
+         * (e.g. /manifest.json?language=English), and dropping the query would
+         * lose the user's configuration. Idempotent — safe to call on an
+         * already-normalized URL (also repairs base URLs stored by older builds
+         * that kept a stray /manifest.json in the path).
+         */
+        fun normalizeBaseUrl(input: String): String {
+            var url = input.trim()
+            require(url.isNotEmpty()) { "Please paste an addon URL" }
+            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                url = "https://$url"
+            }
+            val parsed = url.toHttpUrlOrNull()
+                ?: throw IllegalArgumentException("That doesn't look like a valid URL")
+            val segments = parsed.pathSegments.filter { it.isNotEmpty() }
+            val stripped = if (segments.lastOrNull() == "manifest.json") segments.dropLast(1) else segments
+            return parsed.newBuilder().apply {
+                encodedPath("/")
+                stripped.forEach { addPathSegment(it) }
+            }.build().toString().trimEnd('/')
         }
-        url = url.removeSuffix("/manifest.json").trimEnd('/')
-        require(url.toHttpUrlOrNull() != null) { "That doesn't look like a valid URL" }
-        return url
     }
 
     private suspend fun get(url: String): String = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", "PulseStream/0.4.0")
+            .header("User-Agent", "Plavio/${BuildConfig.VERSION_NAME}")
             .header("Accept", "application/json")
             .build()
         client.newCall(request).execute().use { response ->
@@ -45,7 +67,10 @@ class StremioApi {
     }
 
     private fun endpoint(baseUrl: String, vararg segments: String): String {
-        val builder = baseUrl.toHttpUrlOrNull()?.newBuilder()
+        // Normalize first: repairs base URLs stored by older builds that kept a
+        // stray /manifest.json in the path (query-string addon configs).
+        val clean = normalizeBaseUrl(baseUrl)
+        val builder = clean.toHttpUrlOrNull()?.newBuilder()
             ?: throw IllegalArgumentException("Invalid addon URL")
         segments.forEachIndexed { i, seg ->
             builder.addPathSegment(if (i == segments.lastIndex) "$seg.json" else seg)
@@ -53,8 +78,14 @@ class StremioApi {
         return builder.build().toString()
     }
 
-    suspend fun fetchManifest(baseUrl: String): AddonManifest =
-        StremioParser.parseManifest(get("$baseUrl/manifest.json"))
+    suspend fun fetchManifest(baseUrl: String): AddonManifest {
+        // Build with HttpUrl so a query-string addon config stays in the query
+        // (plain string concatenation would append after the "?").
+        val url = normalizeBaseUrl(baseUrl).toHttpUrlOrNull()?.newBuilder()
+            ?.addPathSegment("manifest.json")?.build()?.toString()
+            ?: throw IllegalArgumentException("Invalid addon URL")
+        return StremioParser.parseManifest(get(url))
+    }
 
     suspend fun fetchCatalog(baseUrl: String, type: String, catalogId: String): List<MetaPreview> =
         StremioParser.parseCatalog(get(endpoint(baseUrl, "catalog", type, catalogId)), type)

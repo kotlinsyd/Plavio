@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -346,24 +347,33 @@ class StreamRepository(
         }
         val installed = enabledAddons().filter { it.hasCatalog }
         val rows = coroutineScope {
+            // OOM hotfix (v0.8.28-tv): cap concurrent TV catalog fetches.
+            // Unbounded nested async + HTTP/2 segment buffers exhausted the
+            // 48MB heap on low-RAM TVs (OutOfMemoryError in Http2Connection).
+            val fetchGate = Semaphore(2)
             installed.map { addon ->
                 async {
                     val manifest = cachedManifest(addon.baseUrl)
                     val tvCatalogs = (manifest?.catalogs ?: emptyList()).filter { it.type == "tv" }
                     tvCatalogs.map { catalog ->
                         async {
-                            val items = runCatching {
-                                api.fetchCatalog(addon.baseUrl, catalog.type, catalog.id)
-                            }.getOrDefault(emptyList())
-                            CatalogRow(
-                                addonId = addon.id,
-                                addonName = addon.name,
-                                baseUrl = addon.baseUrl,
-                                catalogName = catalog.name,
-                                type = catalog.type,
-                                catalogId = catalog.id,
-                                items = items
-                            )
+                            fetchGate.acquire()
+                            try {
+                                val items = runCatching {
+                                    api.fetchCatalog(addon.baseUrl, catalog.type, catalog.id)
+                                }.getOrDefault(emptyList())
+                                CatalogRow(
+                                    addonId = addon.id,
+                                    addonName = addon.name,
+                                    baseUrl = addon.baseUrl,
+                                    catalogName = catalog.name,
+                                    type = catalog.type,
+                                    catalogId = catalog.id,
+                                    items = items
+                                )
+                            } finally {
+                                fetchGate.release()
+                            }
                         }
                     }.awaitAll().filter { it.items.isNotEmpty() }
                 }

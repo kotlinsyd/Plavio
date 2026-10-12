@@ -8,9 +8,12 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -60,6 +63,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.pulsestream.app.ui.tv.tvFocusRing
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.GlassWhite
@@ -119,6 +123,7 @@ fun GlassCard(
     Box(
         modifier = modifier
             .then(clickableMod)
+            .tvFocusRing(RoundedCornerShape(20.dp))
             .clip(RoundedCornerShape(20.dp))
             .background(GlassWhite)
             .border(1.dp, GlassBorder, RoundedCornerShape(20.dp)),
@@ -126,18 +131,34 @@ fun GlassCard(
     )
 }
 
-/** Poster card with glow shadow for catalog rows / grids. */
+/**
+ * Poster card with glow shadow for catalog rows / grids.
+ *
+ * When [onLongClick] is provided, the card itself handles the combined
+ * tap/long-press gesture: a plain inner `clickable` would consume the press
+ * and a parent's long-press handler would never fire (this is what made
+ * "long-press to pin" unreachable on the Live tab).
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PosterCard(
     meta: MetaPreview,
     badge: String? = null,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val gestureModifier = if (onLongClick != null) {
+        Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    } else {
+        Modifier.clickable(onClick = onClick)
+    }
     Column(
         modifier = modifier
             .width(128.dp)
-            .clickable(onClick = onClick)
+            .then(gestureModifier)
+            .focusable()
+            .tvFocusRing(RoundedCornerShape(16.dp))
     ) {
         Box(
             modifier = Modifier
