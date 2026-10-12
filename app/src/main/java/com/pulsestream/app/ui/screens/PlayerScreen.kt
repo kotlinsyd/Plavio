@@ -18,6 +18,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,10 +32,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
@@ -52,6 +53,7 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -95,7 +97,16 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.viewinterop.AndroidView
+import com.pulsestream.app.ui.tv.rememberIsTv
+import com.pulsestream.app.ui.tv.tvFocusRing
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -105,6 +116,7 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -113,10 +125,13 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import com.pulsestream.app.data.ASPECT_MODES
 import com.pulsestream.app.data.IntroDbApi
 import com.pulsestream.app.data.PlaybackRequest
+import com.pulsestream.app.data.TvChannelRef
 import com.pulsestream.app.data.ResolvedSubtitle
 import com.pulsestream.app.data.SkipSegment
 import com.pulsestream.app.data.StreamItem
@@ -147,11 +162,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -168,6 +190,10 @@ private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
 
 private fun speedLabel(s: Float): String =
     if (s == s.toInt().toFloat()) "${s.toInt()}x" else "${s}x"
+
+/** Stable identity of a resolved subtitle list (cache files are reused across re-resolves). */
+private fun subtitleIdentity(list: List<ResolvedSubtitle>): String =
+    list.joinToString("|") { it.file.absolutePath + "#" + it.mimeType }
 
 private fun formatMs(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0)
@@ -271,7 +297,7 @@ fun PlayerScreen(
     val initialRequest = repository.pendingPlayback
     val settings = repository.settings
 
-    BackHandler(onBack = onBack)
+    // (Back handling is registered below, after the UI state it depends on.)
 
     if (initialRequest == null) {
         GlowBackground { ErrorState("Nothing to play.", onRetry = onBack) }
@@ -283,19 +309,81 @@ fun PlayerScreen(
     }
     val maxVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }
     val ioScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    /**
+     * Set in onDispose. Background work (zap, episode load, source switch)
+     * checks this before building a new ExoPlayer so no player is ever
+     * created on disposed state (#9).
+     */
+    val disposed = remember { AtomicBoolean(false) }
+    /** Non-null while the current stream is in a failed state (#4). */
+    var playerError by remember { mutableStateOf<String?>(null) }
+    /**
+     * Registered on every player instance we build (#4). ExoPlayer invokes
+     * listeners on the player's application thread (main here), so touching
+     * Compose state directly is safe.
+     */
+    val errorListener = remember {
+        object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                if (disposed.get()) return
+                playerError = error.message?.takeIf { it.isNotBlank() }
+                    ?: "Playback failed (code ${error.errorCode})"
+            }
+        }
+    }
 
     /**
-     * Builds the player for a request. Side-loaded subtitles are NOT attached
-     * here — they are resolved (downloaded + format-sniffed) in the background
-     * and attached via [attachResolvedSubtitles], because their URLs rarely
-     * carry a usable file extension.
+     * Builds subtitle configurations from already-resolved (downloaded +
+     * format-sniffed) subtitle files, with the same default-selection rules
+     * as [attachResolvedSubtitles].
      */
-    fun buildExo(req: PlaybackRequest): ExoPlayer {
+    fun subtitleConfigs(
+        resolved: List<ResolvedSubtitle>,
+        defaultUrl: String? = null
+    ): List<MediaItem.SubtitleConfiguration> {
+        if (resolved.isEmpty()) return emptyList()
         val prefs = settings.subtitleLanguages
+        val defaultIndex = when {
+            defaultUrl != null ->
+                resolved.indexOfFirst { it.sub.url == defaultUrl }.takeIf { it >= 0 } ?: -1
+            prefs.isEmpty() -> 0
+            else -> resolved.indexOfFirst { r ->
+                prefs.any { pref -> subtitleLangMatches(r.sub.lang, pref) }
+            }
+        }
+        return resolved.mapIndexed { index, r ->
+            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(r.file))
+                .setMimeType(r.mimeType)
+                .setLanguage(r.sub.lang)
+                .setId(r.sub.url)
+                .apply { if (index == defaultIndex) setSelectionFlags(C.SELECTION_FLAG_DEFAULT) }
+                .build()
+        }
+    }
+
+    /**
+     * Builds the player for a request. Already-resolved side-loaded subtitles
+     * can be passed in so the player carries them from its first prepare —
+     * attaching them later would force a setMediaItem+prepare() and a visible
+     * rebuffer (#29). Their URLs rarely carry a usable file extension, so
+     * still-unresolved subtitle lists are resolved in the background and
+     * attached via [attachResolvedSubtitles].
+     */
+    fun buildExo(req: PlaybackRequest, subs: List<ResolvedSubtitle> = emptyList()): ExoPlayer {
+        val prefs = settings.subtitleLanguages
+        val audioPref = settings.preferredAudioLanguage
         // Debrid/proxied addons can require extra headers on the stream URL
         // (parsed from behaviorHints.proxyHeaders.request) — send them here.
+        // Never forward the addon's User-Agent: a desktop Chrome UA from
+        // proxyHeaders triggers Cloudflare bot protection on mobile IPs
+        // (killed all live TV). ExoPlayer's native Android UA is fine;
+        // Referer/Origin are what the CDN actually checks.
         val dataSourceFactory = DefaultHttpDataSource.Factory().apply {
-            if (req.headers.isNotEmpty()) setDefaultRequestProperties(req.headers)
+            if (req.headers.isNotEmpty()) {
+                setDefaultRequestProperties(
+                    req.headers.filterKeys { !it.equals("User-Agent", ignoreCase = true) }
+                )
+            }
         }
         return ExoPlayer.Builder(context)
             .setRenderersFactory(
@@ -307,12 +395,17 @@ fun PlayerScreen(
             // flag is ever ignored.
             .setTrackSelector(
                 DefaultTrackSelector(context).apply {
+                    val params = buildUponParameters()
                     if (prefs.isNotEmpty()) {
-                        setParameters(
-                            buildUponParameters()
-                                .setPreferredTextLanguages(*prefs.toTypedArray())
-                        )
+                        params.setPreferredTextLanguages(*prefs.toTypedArray())
                     }
+                    // Preferred audio language (Settings > Playback): when the
+                    // title's audio tracks include it, ExoPlayer picks it
+                    // automatically at playback start.
+                    if (!audioPref.isNullOrBlank()) {
+                        params.setPreferredAudioLanguages(audioPref)
+                    }
+                    setParameters(params)
                 }
             )
             .build()
@@ -320,17 +413,67 @@ fun PlayerScreen(
                 setMediaItem(
                     MediaItem.Builder()
                         .setUri(req.streamUrl)
+                        .setSubtitleConfigurations(subtitleConfigs(subs))
                         .build()
                 )
             }
     }
 
 
+    /**
+     * Applies the user's subtitle styling (Settings > Playback) to the
+     * PlayerView's caption view: text color, size, background/shade and
+     * edge style. Called when the view is created and on every update.
+     *
+     * SYSTEM-CAPTIONS HOOK (fix #20): when the user picked "System
+     * default", skip setStyle() entirely so Android's
+     * Settings > Accessibility > Captions preferences apply.
+     */
+    fun applySubtitleStyle(pv: PlayerView) {
+        if (settings.useSystemCaptions) return
+        val sv = pv.subtitleView ?: return
+        val edge = when (settings.subtitleEdgeType) {
+            0 -> CaptionStyleCompat.EDGE_TYPE_NONE
+            1 -> CaptionStyleCompat.EDGE_TYPE_OUTLINE
+            3 -> CaptionStyleCompat.EDGE_TYPE_RAISED
+            4 -> CaptionStyleCompat.EDGE_TYPE_DEPRESSED
+            else -> CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW
+        }
+        sv.setStyle(
+            CaptionStyleCompat(
+                settings.subtitleTextColor,
+                settings.subtitleBackgroundColor,
+                android.graphics.Color.TRANSPARENT,
+                edge,
+                android.graphics.Color.BLACK,
+                null
+            )
+        )
+        sv.setFractionalTextSize(
+            SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * settings.subtitleTextSizeScale
+        )
+    }
+
+
     var currentRequest by remember { mutableStateOf(initialRequest) }
-    var player by remember { mutableStateOf(buildExo(initialRequest)) }
+    var player by remember {
+        mutableStateOf(buildExo(initialRequest).also { it.addListener(errorListener) })
+    }
     val latestPlayer = rememberUpdatedState(player)
     val latestRequest = rememberUpdatedState(currentRequest)
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
+    /**
+     * Side-loaded subtitles, resolved (downloaded + format-sniffed) in the
+     * background for the current request. Kept in state so a rebuilt player
+     * (source switch) can carry them from its first prepare instead of
+     * re-preparing the video to attach them (#29).
+     */
+    var resolvedSubs by remember { mutableStateOf(emptyList<ResolvedSubtitle>()) }
+    /**
+     * Which subtitle set is already attached to which player instance.
+     * Attaching the same set twice would re-prepare the video for nothing.
+     */
+    var subsAttached by remember { mutableStateOf<Pair<ExoPlayer, String>?>(null) }
 
     // Simkl sync: scrobbles playback progress when the account is linked.
     val simkl = remember { SimklManager(settings) }
@@ -370,43 +513,36 @@ fun PlayerScreen(
      * requested URL first, else the first track matching the preferred
      * languages, else the first subtitle (or none when a preference is set
      * but nothing matches).
+     *
+     * Skips silently when this exact set is already attached to this player
+     * instance — re-attaching would call setMediaItem+prepare() again and
+     * visibly rebuffer the video (#29). A fresh player built carrying the
+     * same subtitles (source switch) never reaches the re-prepare path below.
      */
     fun attachResolvedSubtitles(resolved: List<ResolvedSubtitle>, defaultUrl: String? = null) {
         if (resolved.isEmpty()) return
+        val key = subtitleIdentity(resolved)
+        val attached = subsAttached
+        if (attached != null && attached.first === player && attached.second == key) return
         val pos = player.currentPosition
         val wasPlaying = player.isPlaying
-        val prefs = settings.subtitleLanguages
-        val defaultIndex = when {
-            defaultUrl != null ->
-                resolved.indexOfFirst { it.sub.url == defaultUrl }.takeIf { it >= 0 } ?: -1
-            prefs.isEmpty() -> 0
-            else -> resolved.indexOfFirst { r ->
-                prefs.any { pref -> subtitleLangMatches(r.sub.lang, pref) }
-            }
-        }
-        val configs = resolved.mapIndexed { index, r ->
-            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(r.file))
-                .setMimeType(r.mimeType)
-                .setLanguage(r.sub.lang)
-                .setId(r.sub.url)
-                .apply { if (index == defaultIndex) setSelectionFlags(C.SELECTION_FLAG_DEFAULT) }
-                .build()
-        }
         player.setMediaItem(
             MediaItem.Builder()
                 .setUri(currentRequest.streamUrl)
-                .setSubtitleConfigurations(configs)
+                .setSubtitleConfigurations(subtitleConfigs(resolved, defaultUrl))
                 .build(),
             pos
         )
         player.prepare()
         player.playWhenReady = wasPlaying
+        subsAttached = player to key
         trackTick++
     }
 
     // Sources + episodes sheets
     var sourcesOpen by remember { mutableStateOf(false) }
     var episodesOpen by remember { mutableStateOf(false) }
+    var zapping by remember { mutableStateOf(false) }
     var availableStreams by remember { mutableStateOf(initialRequest.streams) }
     var streamsLoading by remember { mutableStateOf(false) }
     var streamsJob by remember { mutableStateOf<Job?>(null) }
@@ -425,12 +561,21 @@ fun PlayerScreen(
     var subSearchError by remember { mutableStateOf<String?>(null) }
     var addedSubs by remember { mutableStateOf(emptyList<Subtitle>()) }
 
-    // Back closes sheets/dialogs before leaving the player.
-    BackHandler(enabled = tracksOpen || subSearchOpen || sourcesOpen || episodesOpen) {
-        tracksOpen = false
-        subSearchOpen = false
-        sourcesOpen = false
-        episodesOpen = false
+    // Back hierarchy, in one handler so the order is explicit: sheets first,
+    // then hide visible controls, and only then leave the player (#27).
+    // (ModalBottomSheets register their own later-composed back handling, so
+    // they still dismiss themselves before this runs.)
+    BackHandler {
+        when {
+            tracksOpen || subSearchOpen || sourcesOpen || episodesOpen -> {
+                tracksOpen = false
+                subSearchOpen = false
+                sourcesOpen = false
+                episodesOpen = false
+            }
+            showControls && !locked -> showControls = false
+            else -> onBack()
+        }
     }
 
     val audioOpts = remember(trackTick, player) { trackOptions(player, C.TRACK_TYPE_AUDIO) }
@@ -566,20 +711,46 @@ fun PlayerScreen(
 
     // Resolve side-loaded subtitles in the background once per request (or
     // when the user adds one via search): download, sniff the real format,
-    // then attach. Files are cached so this is instant on repeat visits.
+    // then attach. Files are cached so this is instant on repeat visits. The
+    // resolved list goes into state; a separate effect attaches it, so a
+    // source switch can carry the subtitles into the fresh player instead of
+    // re-preparing the video (#29).
     LaunchedEffect(currentRequest, addedSubs) {
-        val all = currentRequest.subtitles + addedSubs
+        val reqAtStart = currentRequest
+        val all = reqAtStart.subtitles + addedSubs
         subLoadError = false
-        if (all.isEmpty()) return@LaunchedEffect
+        resolvedSubs = emptyList()
+        if (all.isEmpty() || disposed.get()) return@LaunchedEffect
         val resolved = resolveSubtitleFiles(all, context.cacheDir)
+        // Superseded while resolving (source/episode/zap switch) — the newer
+        // effect run owns the result.
+        if (currentRequest != reqAtStart || disposed.get()) return@LaunchedEffect
         subLoadError = resolved.isEmpty()
+        resolvedSubs = resolved
+    }
+
+    // Attach resolved subtitles to the player. Skips silently when the fresh
+    // player was already built carrying them (source switch) — no re-prepare.
+    LaunchedEffect(player, resolvedSubs) {
+        if (resolvedSubs.isEmpty() || disposed.get()) return@LaunchedEffect
         val wantDefault = pendingDefaultSubUrl
         pendingDefaultSubUrl = null
-        attachResolvedSubtitles(resolved, wantDefault)
+        attachResolvedSubtitles(resolvedSubs, wantDefault)
     }
+
+    /**
+     * Serializes player rebuilds (#5): rapid source switches/zaps used to
+     * orphan the first fresh player (still playWhenReady → double audio) and
+     * could complete out of order. Only the latest request wins; a superseded
+     * request releases nothing — the winner owns the old player.
+     */
+    val replaceMutex = remember { Mutex() }
+    val replaceGen = remember { AtomicInteger(0) }
 
     /** Rebuilds the ExoPlayer around a new stream, preserving position. */
     fun replaceStream(newReq: PlaybackRequest, startAtMs: Long, autoplay: Boolean) {
+        if (disposed.get()) return
+        val gen = replaceGen.incrementAndGet()
         val old = player
         val oldReq = currentRequest
         // Read the old player's position on THIS thread (the player's own
@@ -587,36 +758,53 @@ fun PlayerScreen(
         val posMs = old.currentPosition
         val durMs = old.duration.takeIf { it > 0 } ?: 0L
         ioScope.launch {
-            // Persist the old stream's position, then drop its entry so
-            // Continue Watching doesn't accumulate duplicates per source.
-            repository.savePlayback(
-                title = oldReq.title,
-                poster = oldReq.poster,
-                videoId = oldReq.videoId,
-                streamUrl = oldReq.streamUrl,
-                positionMs = posMs,
-                durationMs = durMs,
-                imdbId = oldReq.imdbId,
-                season = oldReq.season,
-                episode = oldReq.episode
-            )
-            repository.deleteSavedPosition(oldReq.streamUrl)
-            // Everything below touches the player or Compose state, so it must
-            // run on the main thread no matter which thread called us.
-            withContext(Dispatchers.Main) {
-                currentRequest = newReq
-                repository.pendingPlayback = newReq
-                resumeOfferMs = null
-                val fresh = buildExo(newReq)
-                // Detach the surface from the old player before releasing it.
-                playerView?.player = null
-                player = fresh
-                old.release()
-                fresh.seekTo(startAtMs)
-                fresh.prepare()
-                fresh.playWhenReady = autoplay
-                showControls = true
-                controlsTick++
+            replaceMutex.withLock {
+                if (gen != replaceGen.get() || disposed.get()) return@withLock
+                // #8: live TV never enters Continue Watching.
+                if (oldReq.type != "tv") {
+                    repository.savePlayback(
+                        title = oldReq.title,
+                        poster = oldReq.poster,
+                        videoId = oldReq.videoId,
+                        streamUrl = oldReq.streamUrl,
+                        positionMs = posMs,
+                        durationMs = durMs,
+                        imdbId = oldReq.imdbId,
+                        season = oldReq.season,
+                        episode = oldReq.episode
+                    )
+                }
+                // #17: positions are keyed by URL — the old source's entry is
+                // kept, not deleted, so its progress survives a switch-back.
+                // Everything below touches the player or Compose state, so it must
+                // run on the main thread no matter which thread called us.
+                withContext(Dispatchers.Main) {
+                    if (gen != replaceGen.get() || disposed.get()) return@withContext
+                    playerError = null
+                    currentRequest = newReq
+                    repository.pendingPlayback = newReq
+                    resumeOfferMs = null
+                    // #29: carry already-resolved subtitles (same title) into
+                    // the fresh player so the attach effect doesn't re-prepare
+                    // the video just to add them back.
+                    val carrySubs =
+                        newReq.subtitles == oldReq.subtitles && resolvedSubs.isNotEmpty()
+                    val carried = if (carrySubs) resolvedSubs else emptyList()
+                    val fresh = buildExo(newReq, carried).also { it.addListener(errorListener) }
+                    // #16: a fresh player defaults to 1x — re-apply the pill.
+                    fresh.setPlaybackSpeed(speed)
+                    subsAttached =
+                        if (carried.isNotEmpty()) fresh to subtitleIdentity(carried) else null
+                    // Detach the surface from the old player before releasing it.
+                    playerView?.player = null
+                    player = fresh
+                    old.release()
+                    fresh.seekTo(startAtMs)
+                    fresh.prepare()
+                    fresh.playWhenReady = autoplay
+                    showControls = true
+                    controlsTick++
+                }
             }
         }
     }
@@ -639,6 +827,78 @@ fun PlayerScreen(
         )
     }
 
+    /**
+     * Live TV channel zapping. The Live tab hands the visible channel list
+     * over via [StreamRepository.setTvZapList]; zap targets wrap around.
+     * M3U channels play directly (the URL is the stream); addon channels
+     * re-resolve their stream first.
+     */
+    val zapChannels: List<TvChannelRef> = repository.pendingTvChannels
+
+    fun canZap(): Boolean =
+        currentRequest.type == "tv" && zapChannels.size > 1
+
+    fun zapTo(index: Int) {
+        // #9: never start zap work on disposed state (ghost audio).
+        if (disposed.get()) return
+        val list = zapChannels
+        if (list.size < 2) return
+        val target = list[index.mod(list.size)]
+        // Same channel tapped twice — nothing to do. M3U ids are URLs and
+        // videoId holds the URL too, so this covers addon AND M3U channels:
+        // double-tap CH+ must not rebuild the player (#19).
+        if (target.metaId == currentRequest.videoId) return
+        zapping = true
+        ioScope.launch {
+            try {
+                val zapTarget: Pair<String, Map<String, String>> = if (target.addonId == "m3u") {
+                    Pair(target.metaId, emptyMap())
+                } else {
+                    val result = withTimeoutOrNull(20_000) {
+                        repository.streamResultsFlow("tv", target.metaId)
+                            .firstOrNull { it.streams.isNotEmpty() }
+                    }
+                    val stream = result?.streams?.firstOrNull()
+                    if (stream == null) {
+                        withContext(Dispatchers.Main) {
+                            pokeIndicator(PlayerIndicator.Message("No stream for ${target.name}"))
+                        }
+                        return@launch
+                    }
+                    Pair(stream.url, stream.headers)
+                }
+                val url = zapTarget.first
+                val headers = zapTarget.second
+                repository.pendingTvIndex = list.indexOf(target)
+                withContext(Dispatchers.Main) {
+                    pokeIndicator(PlayerIndicator.Message(target.name))
+                    replaceStream(
+                        currentRequest.copy(
+                            streamUrl = url,
+                            headers = headers,
+                            title = target.name,
+                            poster = target.poster,
+                            videoId = target.metaId,
+                            streamLabel = "LIVE",
+                            sourceName = null,
+                            streams = emptyList()
+                        ),
+                        startAtMs = 0L,
+                        autoplay = true
+                    )
+                }
+            } finally {
+                withContext(Dispatchers.Main) { zapping = false }
+            }
+        }
+    }
+
+    fun zapDelta(delta: Int) {
+        val list = zapChannels
+        if (list.size < 2) return
+        zapTo(repository.pendingTvIndex + delta)
+    }
+
     /** Quietly (re)fills the Sources list in the background, progressively. */
     fun refreshStreamsBackground(type: String, videoId: String) {
         streamsJob?.cancel()
@@ -657,7 +917,36 @@ fun PlayerScreen(
         }
     }
 
+    /** Re-prepares the current stream after a fatal error (#4). */
+    fun retryCurrentStream() {
+        if (disposed.get()) return
+        playerError = null
+        replaceStream(
+            currentRequest,
+            startAtMs = player.currentPosition.coerceAtLeast(0L),
+            autoplay = true
+        )
+    }
+
+    /**
+     * Advances to the next available stream for this title (#4). When there is
+     * nothing to advance to, says so and quietly refreshes the Sources list.
+     */
+    fun nextSource() {
+        val streams = availableStreams
+        val cur = streams.indexOfFirst { it.url == currentRequest.streamUrl }
+        val next = if (streams.size < 2) null else streams[(cur + 1).mod(streams.size)]
+        if (next == null) {
+            pokeIndicator(PlayerIndicator.Message("No other sources available"))
+            refreshStreamsBackground(currentRequest.type, currentRequest.videoId)
+            return
+        }
+        switchSource(next)
+    }
+
     fun playEpisode(video: Video) {
+        // #9: never start episode work on disposed state (ghost audio).
+        if (disposed.get()) return
         episodesOpen = false
         switchingMedia = true
         ioScope.launch {
@@ -829,9 +1118,13 @@ fun PlayerScreen(
     fun savePosition() {
         val pl = latestPlayer.value
         val req = latestRequest.value
+        // #8: live TV never enters Continue Watching.
+        if (req.type == "tv") return
         val pos = pl.currentPosition
         val dur = pl.duration.takeIf { it > 0 } ?: C.TIME_UNSET
-        ioScope.launch {
+        // NonCancellable: onDispose cancels ioScope's children (#9) and must
+        // not kill this final save.
+        ioScope.launch(NonCancellable) {
             repository.savePlayback(
                 title = req.title,
                 poster = req.poster,
@@ -895,22 +1188,65 @@ fun PlayerScreen(
     // One-time init: resume prompt / autoplay, then prepare.
     LaunchedEffect(Unit) {
         val saved = repository.getSavedPosition(initialRequest.streamUrl)
-        if (saved > 0) player.seekTo(saved)
-        player.prepare()
-        if (saved > 0) {
-            player.playWhenReady = false
+        var req: PlaybackRequest = initialRequest
+        var offerResume = saved > 0
+        if (saved > 0 && req.streams.isEmpty() && req.type != "tv" && !disposed.get()) {
+            // #15: Continue Watching resume — re-resolve the title's streams
+            // first so signed/expiring URLs are fresh, and resume at the saved
+            // position on the fresh URL. Falls back to the stored URL when
+            // re-resolution fails.
+            val fresh = withTimeoutOrNull(20_000) {
+                repository.streamResultsFlow(req.type, req.videoId)
+                    .firstOrNull { it.streams.isNotEmpty() }
+            }
+            val stream = fresh?.streams?.firstOrNull()
+            if (fresh != null && stream != null && !disposed.get()) {
+                availableStreams = fresh.streams
+                req = req.copy(
+                    streamUrl = stream.url,
+                    headers = stream.headers,
+                    streamLabel = streamQualityLabel(stream),
+                    sourceName = stream.sourceName,
+                    subtitles = fresh.subtitles,
+                    streams = fresh.streams
+                )
+                repository.pendingPlayback = req
+                // Fresh URL: go straight in at the saved position, no prompt.
+                offerResume = false
+            } else {
+                // Stored URL stays; quietly fill Sources for a manual re-pick.
+                refreshStreamsBackground(req.type, req.videoId)
+            }
+        }
+        if (disposed.get()) return@LaunchedEffect
+        if (req !== initialRequest) {
+            // Rebuild the player around the refreshed request so the first
+            // prepare already uses the fresh URL (#15; guarded by #9 above).
+            val oldPlayer = player
+            playerView?.player = null
+            oldPlayer.release()
+            val rebuilt = buildExo(req).also { it.addListener(errorListener) }
+            rebuilt.setPlaybackSpeed(speed)
+            player = rebuilt
+            currentRequest = req
+        }
+        val p = player
+        p.seekTo(saved)
+        p.prepare()
+        if (offerResume) {
+            p.playWhenReady = false
             resumeOfferMs = saved
             showControls = true
         } else if (settings.autoplay) {
-            player.playWhenReady = true
+            p.playWhenReady = true
         } else {
-            player.playWhenReady = false
+            p.playWhenReady = false
             showControls = true
         }
         // Sources sheet fallback: if we arrived without a stream list
         // (e.g. from Continue Watching), fill it quietly in the background.
         if (availableStreams.isEmpty()) {
-            refreshStreamsBackground(initialRequest.type, initialRequest.videoId)
+            refreshStreamsBackground(req.type, req.videoId)
         }
     }
 
@@ -931,7 +1267,11 @@ fun PlayerScreen(
     // Save on background so progress is never lost.
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) savePosition()
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                savePosition()
+                // #10: pause on background — release stays in onDispose.
+                latestPlayer.value.pause()
+            }
         }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
@@ -950,10 +1290,23 @@ fun PlayerScreen(
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
         onDispose {
+            // #9: from here on, no late work may build a player (ghost audio).
+            disposed.set(true)
             savePosition()
             simklScrobbler.shutdown()
             traktScrobbler.shutdown()
+            // #9: kill late zap/episode/source-switch work. The scope itself
+            // stays valid (the scrobblers above hold it); only its children
+            // are cancelled. savePosition()'s save runs NonCancellable so it
+            // survives this; the scrobblers' final stop-events are best-effort.
+            ioScope.coroutineContext.cancelChildren()
             latestPlayer.value.release()
+            // #18: swipe-brightness must not leak into the rest of the app.
+            window?.let { w ->
+                val lp = w.attributes
+                lp.screenBrightness = -1f
+                w.attributes = lp
+            }
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             controller?.show(WindowInsetsCompat.Type.systemBars())
         }
@@ -967,7 +1320,62 @@ fun PlayerScreen(
     val sourceLine = listOfNotNull(req.streamLabel, req.sourceName)
         .joinToString(" • ").takeIf { it.isNotBlank() }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    // ---- Android TV D-pad: works when the touch gestures can't. ----
+    val isTv = rememberIsTv()
+    val playPauseFocus = remember { FocusRequester() }
+    // TV: land D-pad focus on the error overlay's Retry button when it shows.
+    val errorRetryFocus = remember { FocusRequester() }
+    LaunchedEffect(playerError, isTv) {
+        if (isTv && playerError != null) {
+            delay(300)
+            runCatching { errorRetryFocus.requestFocus() }
+        }
+    }
+    LaunchedEffect(showControls, isTv, locked) {
+        if (isTv && showControls && !locked) {
+            delay(350) // let the controls fade in first
+            runCatching { playPauseFocus.requestFocus() }
+        }
+    }
+    val tvKeys = if (isTv) {
+        // A settings sheet/dialog is up: the D-pad must drive the dialog's
+        // own focus ( Up/Down through rows, OK to pick ), not the player.
+        // Media keys and the channel rocker keep working regardless.
+        val dialogOpen = tracksOpen || subSearchOpen || sourcesOpen || episodesOpen ||
+            speedMenuOpen || resumeOfferMs != null || playerError != null
+        Modifier.onPreviewKeyEvent { event ->
+            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            // Remote channel rocker zaps while watching live TV.
+            when (event.nativeKeyEvent.keyCode) {
+                android.view.KeyEvent.KEYCODE_CHANNEL_UP -> {
+                    if (canZap()) { zapDelta(1); true } else false
+                }
+                android.view.KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                    if (canZap()) { zapDelta(-1); true } else false
+                }
+                else -> when (event.key) {
+                // Media keys always act directly.
+                Key.MediaPlayPause -> { togglePlay(); true }
+                Key.MediaPlay -> { player.play(); true }
+                Key.MediaPause -> { player.pause(); true }
+                Key.MediaFastForward -> { seekByWithFeedback(10_000); true }
+                Key.MediaRewind -> { seekByWithFeedback(-10_000); true }
+                // D-pad: with a dialog open, hand off to the dialog's focus;
+                // when controls are up, let focused buttons handle OK;
+                // arrows still seek so users don't get stuck.
+                Key.DirectionLeft -> if (dialogOpen) false else { seekByWithFeedback(-10_000); true }
+                Key.DirectionRight -> if (dialogOpen) false else { seekByWithFeedback(10_000); true }
+                Key.DirectionCenter, Key.Enter, Key.NumPadEnter ->
+                    if (dialogOpen || showControls) false else { toggleControls(); true }
+                Key.DirectionUp, Key.DirectionDown ->
+                    if (dialogOpen || showControls) false else { toggleControls(); true }
+                else -> false
+                }
+            }
+        }
+    } else Modifier
+
+    Box(tvKeys.fillMaxSize().background(Color.Black)) {
         // Video surface with the full gesture set.
         Box(Modifier.fillMaxSize().videoGestures()) {
             AndroidView(
@@ -981,18 +1389,78 @@ fun PlayerScreen(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
+                        applySubtitleStyle(pv)
                         playerView = pv
                     }
                 },
-                update = { pv -> pv.player = player },
+                update = { pv ->
+                    pv.player = player
+                    applySubtitleStyle(pv)
+                },
                 modifier = Modifier.fillMaxSize()
             )
         }
 
         // Pulse-branded loading line while the stream connects / buffers.
-        if (isBuffering || switchingMedia) {
+        // Suppressed on a fatal error — the error overlay takes its place (#4).
+        if ((isBuffering || switchingMedia) && playerError == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 DotsLoadingIndicator(if (switchingMedia) "Loading episode…" else "Finding source…")
+            }
+        }
+
+        // Fatal stream error (#4): Retry re-prepares this stream, Next source
+        // advances to the next available stream, and the floating Sources
+        // switcher stays openable underneath via "Browse all sources".
+        playerError?.let { err ->
+            Box(
+                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.78f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(horizontal = 32.dp)
+                ) {
+                    Text(
+                        "Couldn't play this source",
+                        color = TextPrimary,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        err,
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(
+                            onClick = { retryCurrentStream() },
+                            modifier = Modifier
+                                .focusRequester(errorRetryFocus)
+                                .tvFocusRing(RoundedCornerShape(20.dp))
+                        ) {
+                            Text("Retry")
+                        }
+                        Button(
+                            onClick = { nextSource() },
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(20.dp))
+                        ) {
+                            Text("Next source")
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = { sourcesOpen = true }) {
+                        Text(
+                            "Browse all sources",
+                            color = LocalPalette.current.accent,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
             }
         }
 
@@ -1167,13 +1635,27 @@ fun PlayerScreen(
                     horizontalArrangement = Arrangement.spacedBy(36.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    if (canZap()) {
+                        IconButton(
+                            onClick = { zapDelta(-1) },
+                            enabled = !zapping
+                        ) {
+                            Icon(
+                                Icons.Filled.SkipPrevious, "Previous channel",
+                                tint = TextPrimary, modifier = Modifier.size(48.dp)
+                            )
+                        }
+                    }
                     IconButton(onClick = { seekByWithFeedback(-10_000) }) {
                         Icon(
                             Icons.Filled.Replay10, "Back 10 seconds",
                             tint = TextPrimary, modifier = Modifier.size(56.dp)
                         )
                     }
-                    IconButton(onClick = { togglePlay() }) {
+                    IconButton(
+                        onClick = { togglePlay() },
+                        modifier = Modifier.focusRequester(playPauseFocus)
+                    ) {
                         Icon(
                             if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                             if (isPlaying) "Pause" else "Play",
@@ -1185,6 +1667,17 @@ fun PlayerScreen(
                             Icons.Filled.Forward10, "Forward 10 seconds",
                             tint = TextPrimary, modifier = Modifier.size(56.dp)
                         )
+                    }
+                    if (canZap()) {
+                        IconButton(
+                            onClick = { zapDelta(1) },
+                            enabled = !zapping
+                        ) {
+                            Icon(
+                                Icons.Filled.SkipNext, "Next channel",
+                                tint = TextPrimary, modifier = Modifier.size(48.dp)
+                            )
+                        }
                     }
                 }
 
@@ -1342,47 +1835,70 @@ fun PlayerScreen(
         }
 
         // Track switching: Subs button opens subtitles only, Audio button opens audio only.
+        // Bottom sheet (not AlertDialog) so the root media/channel-key handler
+        // keeps working while it's open (#28).
         if (tracksOpen) {
             val isAudio = tracksMode == "audio"
-            AlertDialog(
+            // TV: land D-pad focus on the first row when the picker opens.
+            val firstRowFocus = remember { FocusRequester() }
+            LaunchedEffect(isTv, tracksMode) {
+                if (isTv) {
+                    delay(300)
+                    runCatching { firstRowFocus.requestFocus() }
+                }
+            }
+            ModalBottomSheet(
                 onDismissRequest = { tracksOpen = false },
-                containerColor = Color(0xFF14141F),
-                title = {
-                    Text(
-                        if (isAudio) "Audio" else "Subtitles",
-                        color = TextPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                text = {
-                    Column(Modifier.verticalScroll(rememberScrollState())) {
-                        if (isAudio) {
+                sheetState = rememberModalBottomSheetState(),
+                containerColor = Color(0xFF14141F)
+            ) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp)
+                ) {
+                    item {
+                        Text(
+                            if (isAudio) "Audio" else "Subtitles",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+                        )
+                    }
+                    if (isAudio) {
+                        item {
                             TrackRow(
                                 label = "Auto",
                                 selected = audioOpts.none { it.selected },
-                                onClick = { applyAudioSelection(null) }
+                                onClick = { applyAudioSelection(null) },
+                                modifier = Modifier.focusRequester(firstRowFocus)
                             )
-                            audioOpts.forEach { opt ->
-                                TrackRow(
-                                    label = opt.label,
-                                    selected = opt.selected,
-                                    onClick = { applyAudioSelection(opt) }
-                                )
-                            }
-                        } else {
+                        }
+                        items(audioOpts) { opt ->
+                            TrackRow(
+                                label = opt.label,
+                                selected = opt.selected,
+                                onClick = { applyAudioSelection(opt) }
+                            )
+                        }
+                    } else {
+                        item {
                             TrackRow(
                                 label = "Off",
                                 selected = subtitlesOff,
-                                onClick = { applySubtitleSelection(null) }
+                                onClick = { applySubtitleSelection(null) },
+                                modifier = Modifier.focusRequester(firstRowFocus)
                             )
-                            subOpts.forEach { opt ->
-                                TrackRow(
-                                    label = opt.label,
-                                    selected = opt.selected,
-                                    onClick = { applySubtitleSelection(opt) }
-                                )
-                            }
-                            if (subLoadError && subOpts.isEmpty()) {
+                        }
+                        items(subOpts) { opt ->
+                            TrackRow(
+                                label = opt.label,
+                                selected = opt.selected,
+                                onClick = { applySubtitleSelection(opt) }
+                            )
+                        }
+                        if (subLoadError && subOpts.isEmpty()) {
+                            item {
                                 Text(
                                     "Couldn't load subtitles — check your connection and try again.",
                                     color = Color(0xFFEF4444),
@@ -1390,7 +1906,8 @@ fun PlayerScreen(
                                     modifier = Modifier.padding(vertical = 8.dp)
                                 )
                             }
-                            Spacer(Modifier.size(8.dp))
+                        }
+                        item {
                             TextButton(onClick = { openSubtitleSearch() }) {
                                 Text(
                                     "Search subtitles online",
@@ -1400,76 +1917,90 @@ fun PlayerScreen(
                             }
                         }
                     }
-                },
-                confirmButton = {
-                    TextButton(onClick = { tracksOpen = false }) {
-                        Text("Done", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
-                    }
                 }
-            )
+            }
         }
 
         // In-player subtitle search results.
+        // Bottom sheet (not AlertDialog) so the root media/channel-key handler
+        // keeps working while it's open (#28).
         if (subSearchOpen) {
-            AlertDialog(
+            // TV: land D-pad focus on the first result row when results land.
+            val firstResultFocus = remember { FocusRequester() }
+            LaunchedEffect(isTv, subSearchResults) {
+                if (isTv && subSearchResults.isNotEmpty()) {
+                    delay(300)
+                    runCatching { firstResultFocus.requestFocus() }
+                }
+            }
+            ModalBottomSheet(
                 onDismissRequest = { subSearchOpen = false },
-                containerColor = Color(0xFF14141F),
-                title = {
-                    Text(
-                        "Find subtitles",
-                        color = TextPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                text = {
-                    when {
-                        subSearchLoading -> Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(
-                                color = LocalPalette.current.accent,
-                                modifier = Modifier.size(28.dp)
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Text("Searching subtitle addons…", color = TextSecondary)
-                        }
-                        subSearchError != null -> Text(
-                            subSearchError!!,
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.bodyMedium
+                sheetState = rememberModalBottomSheetState(),
+                containerColor = Color(0xFF14141F)
+            ) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp)
+                ) {
+                    item {
+                        Text(
+                            "Find subtitles",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            modifier = Modifier.padding(bottom = 12.dp)
                         )
-                        else -> Column(Modifier.verticalScroll(rememberScrollState())) {
-                            subSearchResults.forEach { sub ->
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clickable { addExternalSubtitle(sub) }
-                                        .padding(vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            displayLanguage(sub.lang) ?: sub.lang.uppercase(),
-                                            color = TextPrimary,
-                                            fontWeight = FontWeight.Medium
-                                        )
-                                        Text(
-                                            sub.url.substringAfter("://").take(52),
-                                            color = TextSecondary,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
+                    }
+                    when {
+                        subSearchLoading -> item {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(
+                                    color = LocalPalette.current.accent,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Text("Searching subtitle addons…", color = TextSecondary)
+                            }
+                        }
+                        subSearchError != null -> item {
+                            Text(
+                                subSearchError!!,
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        else -> itemsIndexed(subSearchResults) { index, sub ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (index == 0) Modifier.focusRequester(firstResultFocus)
+                                        else Modifier
+                                    )
+                                    .clickable { addExternalSubtitle(sub) }
+                                    .tvFocusRing(RoundedCornerShape(10.dp))
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        displayLanguage(sub.lang) ?: sub.lang.uppercase(),
+                                        color = TextPrimary,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        sub.url.substringAfter("://").take(52),
+                                        color = TextSecondary,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
                             }
                         }
                     }
-                },
-                confirmButton = {
-                    TextButton(onClick = { subSearchOpen = false }) {
-                        Text("Close", color = TextSecondary)
-                    }
                 }
-            )
+            }
         }
 
         // Sources switcher: pick another stream without leaving the player.
@@ -1667,9 +2198,18 @@ fun PlayerScreen(
 }
 
 @Composable
-private fun TrackRow(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun TrackRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 8.dp),
+        modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .tvFocusRing(RoundedCornerShape(10.dp))
+            .padding(vertical = 8.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RadioButton(
@@ -1772,7 +2312,10 @@ private fun TimeChip(text: String) {
 @Composable
 private fun PillBarButton(icon: ImageVector, label: String, onClick: () -> Unit) {
     Column(
-        Modifier.clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 6.dp),
+        Modifier
+            .clickable(onClick = onClick)
+            .tvFocusRing(RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(icon, label, tint = TextPrimary, modifier = Modifier.size(21.dp))
