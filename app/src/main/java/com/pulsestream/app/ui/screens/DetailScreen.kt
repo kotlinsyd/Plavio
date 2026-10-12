@@ -224,6 +224,24 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
                     }
                     // Empty intermediate emissions: stay on Loading, don't flash an error.
                 }
+                // v0.8.29 fix: transient failures (cold-start timeouts, dispatcher
+                // contention) could empty the first pass while a manual retry
+                // succeeded. Do one automatic retry before showing "no sources"
+                // so users never see a false empty state.
+                if (!gotAny) {
+                    kotlinx.coroutines.delay(1500)
+                    repo.streamResultsFlow(type, videoId).collect { result ->
+                        if (result.streams.isNotEmpty()) {
+                            gotAny = true
+                            streamsState = StreamsUiState.Content(result.streams, result.subtitles)
+                            maybeProbePick(result.streams)
+                            if (pendingAutoPlay) {
+                                pendingAutoPlay = false
+                                playBestOrFirst()
+                            }
+                        }
+                    }
+                }
                 if (!gotAny) {
                     streamsState = StreamsUiState.Error("No playable sources found in any installed addon.")
                 }
@@ -438,6 +456,17 @@ private fun DetailContent(
     // instead of scrolling to the sources section).
     var sourcePickerOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    // On TV, land D-pad focus on the Play button when the detail screen opens.
+    val isTvDetail = rememberIsTv()
+    val playButtonFocus = remember { FocusRequester() }
+    var playFocusLanded by remember { mutableStateOf(false) }
+    LaunchedEffect(isTvDetail, playFocusLanded) {
+        if (isTvDetail && !playFocusLanded) {
+            playFocusLanded = true
+            delay(400)
+            runCatching { playButtonFocus.requestFocus() }
+        }
+    }
 
     LazyColumn(
         state = listState,
@@ -529,7 +558,7 @@ private fun DetailContent(
                     onClick = { vm.onPlayPressed() },
                     enabled = canPlay,
                     text = if (vm.streamsState is StreamsUiState.Loading) "Loading…" else "Play",
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f).focusRequester(playButtonFocus)
                 )
                 Spacer(Modifier.width(10.dp))
                 IconButton(
@@ -537,6 +566,7 @@ private fun DetailContent(
                     modifier = Modifier
                         .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(50))
                         .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                        .tvFocusRing(RoundedCornerShape(50))
                 ) {
                     Icon(
                         Icons.Filled.FormatListBulleted,
@@ -554,6 +584,7 @@ private fun DetailContent(
                     modifier = Modifier
                         .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(50))
                         .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                        .tvFocusRing(RoundedCornerShape(50))
                 ) {
                     Icon(
                         if (watchItem != null) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,

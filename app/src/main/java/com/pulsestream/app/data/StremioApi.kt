@@ -13,14 +13,29 @@ import java.util.concurrent.TimeUnit
 /** HTTP client for the Stremio addon protocol. */
 class StremioApi {
 
-    // OOM hotfix (v0.8.28-tv): cap concurrent requests and pin HTTP/1.1.
-    // HTTP/2 multiplexes every stream through okio segment buffers; with many
-    // parallel catalog fetches on a 48MB-heap TV this exhausts memory and
-    // crashes (see crash report: OutOfMemoryError in Http2Connection).
+    // OOM hotfix (v0.8.28-tv): cap concurrent requests and pin HTTP/1.1 on
+    // low-memory devices. HTTP/2 multiplexes every stream through okio segment
+    // buffers; with many parallel catalog fetches on a 48MB-heap TV this
+    // exhausts memory and crashes (see crash report: OutOfMemoryError in
+    // Http2Connection).
+    //
+    // v0.8.29 fix: the caps must be heap-aware. The aggressive 8/4 limits
+    // caused "No playable sources" on phones: streamResultsFlow fires one
+    // request per addon concurrently, each wrapped in withTimeoutOrNull(20s)
+    // which counts dispatcher QUEUE time too. On cold start the queue backs
+    // up, requests time out before even starting, and the first attempt shows
+    // empty while a manual retry (warm, less contention) succeeds.
+    // Phones have ample heap — give them room; keep TVs constrained.
     private val client = OkHttpClient.Builder()
         .callTimeout(25, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS)
-        .dispatcher(Dispatcher().apply { maxRequests = 8; maxRequestsPerHost = 4 })
+        .dispatcher(Dispatcher().apply {
+            // Runtime.maxMemory is in bytes; 128MB threshold separates
+            // constrained TVs from phones.
+            val lowMem = Runtime.getRuntime().maxMemory() < 128L * 1024 * 1024
+            maxRequests = if (lowMem) 8 else 32
+            maxRequestsPerHost = if (lowMem) 4 else 16
+        })
         .protocols(listOf(Protocol.HTTP_1_1))
         .build()
 
