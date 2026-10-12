@@ -26,6 +26,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,6 +41,7 @@ import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
+import com.pulsestream.app.ui.tv.tvFocusRing
 
 // ---------------------------------------------------------------------------
 // Stream metadata parsing
@@ -122,7 +124,9 @@ class StreamBrowserState(
 
 @Composable
 fun rememberStreamBrowserState(streams: List<StreamItem>): StreamBrowserState {
-    var selectedTab by remember { mutableStateOf(STREAM_TAB_ALL) }
+    // Saveable: the addon tab the user picked survives rotation. A stale
+    // key (tab gone after the stream list changed) falls back to "All".
+    var selectedTab by rememberSaveable { mutableStateOf(STREAM_TAB_ALL) }
     val tabs = remember(streams) {
         val groups = streams.groupBy { it.addonKey() }
         buildList {
@@ -166,6 +170,7 @@ fun AddonTabs(state: StreamBrowserState, modifier: Modifier = Modifier) {
                         RoundedCornerShape(50)
                     )
                     .clickable { state.onSelectTab(tab.key) }
+                    .tvFocusRing(RoundedCornerShape(50))
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
                 Text(
