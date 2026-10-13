@@ -659,52 +659,6 @@ private fun DetailContent(
                     }
                 }
                 Spacer(Modifier.width(10.dp))
-                // Source button: server icon with a thin circular loading ring.
-                // Ring circles in white while streams load; turns full + theme
-                // accent once loading completes.
-                run {
-                    val palette = LocalPalette.current
-                    val isLoading = vm.streamsState is StreamsUiState.Loading
-                    val isLoaded = vm.streamsState is StreamsUiState.Content
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier.size(52.dp)
-                    ) {
-                        if (isLoading) {
-                            androidx.compose.material3.CircularProgressIndicator(
-                                color = Color.White.copy(alpha = 0.7f),
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(52.dp)
-                            )
-                        } else if (isLoaded) {
-                            androidx.compose.material3.CircularProgressIndicator(
-                                progress = { 1f },
-                                color = palette.accent,
-                                strokeWidth = 2.dp,
-                                trackColor = Color.Transparent,
-                                modifier = Modifier.size(52.dp)
-                            )
-                        }
-                        IconButton(
-                            onClick = { sourcePickerOpen = true },
-                            modifier = Modifier
-                                .size(44.dp)
-                                .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(50))
-                                .border(1.dp, GlassBorder, RoundedCornerShape(50))
-                                .tvFocusRing(RoundedCornerShape(50))
-                        ) {
-                            Icon(
-                                painter = androidx.compose.ui.res.painterResource(
-                                    id = R.drawable.ic_source_server
-                                ),
-                                contentDescription = "Choose source manually",
-                                tint = TextPrimary,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.width(10.dp))
                 IconButton(
                     onClick = {
                         scope.launch {
@@ -841,52 +795,68 @@ private fun DetailContent(
                 }
             }
         }
+        // "Available Streams" capsule button — opens the source picker.
+        // Replaces the old inline stream list.
         item {
             Spacer(Modifier.height(8.dp))
-            Column(Modifier) {
-                Text(
-                    if (isSeries) "Sources for selected episode" else "Sources",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-                AddonTabs(browserState)
+            val palette = LocalPalette.current
+            val streamCount = when (val s = vm.streamsState) {
+                is StreamsUiState.Content -> s.streams.size
+                else -> null
             }
-        }
-        when (val s = vm.streamsState) {
-            is StreamsUiState.Idle, StreamsUiState.Loading -> item {
-                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = LocalPalette.current.accent, modifier = Modifier.size(32.dp))
+            val isLoading = vm.streamsState is StreamsUiState.Loading
+            Button(
+                onClick = { sourcePickerOpen = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .height(56.dp)
+                    .tvFocusRing(RoundedCornerShape(28.dp)),
+                shape = RoundedCornerShape(28.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.White.copy(alpha = 0.08f)
+                ),
+                border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
+                contentPadding = PaddingValues(horizontal = 20.dp)
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_bolt),
+                    contentDescription = null,
+                    tint = TextPrimary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "Available Streams",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = TextPrimary,
+                    modifier = Modifier.weight(1f)
+                )
+                if (isLoading) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        color = TextPrimary,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(20.dp)
+                    )
+                } else {
+                    Text(
+                        text = streamCount?.toString() ?: "—",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = palette.accent
+                    )
                 }
             }
-            is StreamsUiState.Error -> item {
+            if (vm.streamsState is StreamsUiState.Error) {
                 Text(
-                    s.message,
+                    (vm.streamsState as StreamsUiState.Error).message,
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
-            is StreamsUiState.Content -> {
-                if (browserState.filtered.isEmpty()) {
-                    item {
-                        Text(
-                            "No sources in this addon yet — they appear here as each addon answers.",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                        )
-                    }
-                } else {
-                    streamListItems(
-                        streams = browserState.filtered,
-                        onPick = { stream ->
-                            startPlayback(vm, repository, stream, s.subtitles, s.streams, onPlay)
-                        }
-                    )
-                }
-            }
+            Spacer(Modifier.height(8.dp))
         }
         // "More like this" + "More from <actor>" rows from PlavioMeta.
         // Quietly absent when the endpoint has nothing (e.g. keyless mode).
