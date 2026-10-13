@@ -4,6 +4,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -67,7 +69,7 @@ import com.pulsestream.app.ui.components.PlayButton
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.data.MetaDetail
 import com.pulsestream.app.data.PlaybackRequest
-import com.pulsestream.app.data.RelatedContent
+import com.pulsestream.app.data.TrailerResolver
 import com.pulsestream.app.data.RelatedSection
 import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.data.StreamProber
@@ -80,9 +82,11 @@ import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.LoadingState
 import com.pulsestream.app.ui.components.AddonTabs
+import com.pulsestream.app.ui.components.pickAutoplayStream
+import com.pulsestream.app.ui.components.rememberStreamBrowserState
 import com.pulsestream.app.ui.components.StreamCard
-import com.pulsestream.app.ui.components.StreamCardStyle
 import com.pulsestream.app.ui.components.StreamList
+import com.pulsestream.app.ui.components.LocalBadgeStyleKey
 import com.pulsestream.app.ui.components.streamListItems
 import com.pulsestream.app.ui.components.StreamTab
 import com.pulsestream.app.ui.components.addonKey
@@ -292,6 +296,15 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
 
     private fun playBestOrFirst() {
         val s = streamsState as? StreamsUiState.Content ?: return
+        // Settings > Streams autoplay: pick by the user's quality/size rule
+        // instead of the probed fastest stream.
+        if (repo.settings.streamAutoplay) {
+            val ruled = pickAutoplayStream(s.streams, repo.settings)
+            if (ruled != null) {
+                autoPlayEvent = AutoPlay(ruled, s.subtitles)
+                return
+            }
+        }
         val pick = pickState as? PickState.Found
         if (pick != null) {
             autoPlayEvent = AutoPlay(pick.stream, s.subtitles)
@@ -322,7 +335,9 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
      */
     fun loadRelated(type: String, metaId: String) {
         viewModelScope.launch {
-            relatedState = RelatedContent.fetch(type, metaId.substringBefore(":"))
+            // Uses the user's configured PlavioMeta (TMDB key when set);
+            // the old hardcoded keyless URL always returned empty sections.
+            relatedState = repo.getRelated(type, metaId.substringBefore(":"))
         }
     }
 }
@@ -335,6 +350,8 @@ fun DetailScreen(
     metaId: String,
     onBack: () -> Unit,
     onPlay: () -> Unit,
+    onPlayTrailer: (PlaybackRequest) -> Unit = {},
+    onOpenActor: (Int) -> Unit = {},
     onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit = { _, _, _ -> }
 ) {
     val vm: DetailViewModel = viewModel(factory = vmFactory { DetailViewModel(repository) })
@@ -381,6 +398,8 @@ fun DetailScreen(
                 repository = repository,
                 onBack = onBack,
                 onPlay = onPlay,
+                onPlayTrailer = onPlayTrailer,
+                onOpenActor = onOpenActor,
                 onOpenDetail = onOpenDetail
             )
         }
@@ -447,6 +466,8 @@ private fun DetailContent(
     repository: StreamRepository,
     onBack: () -> Unit,
     onPlay: () -> Unit,
+    onPlayTrailer: (PlaybackRequest) -> Unit = {},
+    onOpenActor: (Int) -> Unit = {},
     onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit
 ) {
     val isSeries = meta.type == "series" && meta.videos.isNotEmpty()
@@ -454,7 +475,7 @@ private fun DetailContent(
     // Shared stream-browser state: addon tabs + filtered list stay in sync as
     // sources stream in progressively.
     val allStreams = (vm.streamsState as? StreamsUiState.Content)?.streams ?: emptyList()
-    val browserState = rememberStreamBrowserState(allStreams)
+    val browserState = rememberStreamBrowserState(allStreams, repository.settings)
     // Mini floating source-picker card (the button next to Play opens this
     // instead of scrolling to the sources section).
     var sourcePickerOpen by remember { mutableStateOf(false) }
@@ -471,6 +492,10 @@ private fun DetailContent(
         }
     }
 
+    // Badge pack for stream rows comes from the Appearance setting.
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalBadgeStyleKey provides repository.settings.streamCardStyle
+    ) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
@@ -563,6 +588,74 @@ private fun DetailContent(
                     text = if (vm.streamsState is StreamsUiState.Loading) "Loading…" else "Play",
                     modifier = Modifier.weight(1f).focusRequester(playButtonFocus)
                 )
+                // Trailer button: plays this title's trailer through the
+                // trailer flow (full portrait floating player). Hidden when
+                // the addon provides no trailer — never a dead button.
+                if (meta.trailerStreams.isNotEmpty()) {
+                    var resolvingTrailer by remember { mutableStateOf(false) }
+                    Spacer(Modifier.width(10.dp))
+                    Button(
+                        onClick = {
+                            if (resolvingTrailer) return@Button
+                            val ytId = meta.trailerStreams.firstOrNull()?.ytId ?: return@Button
+                            resolvingTrailer = true
+                            scope.launch {
+                                try {
+                                    val url = withTimeoutOrNull(30_000) {
+                                        TrailerResolver.resolveUrl(ytId)
+                                    }
+                                    if (url != null) {
+                                        onPlayTrailer(
+                                            PlaybackRequest(
+                                                streamUrl = url,
+                                                title = "${meta.name} — Trailer",
+                                                poster = meta.background ?: meta.poster,
+                                                videoId = "trailer_$ytId",
+                                                isMovie = meta.type == "movie",
+                                                type = meta.type,
+                                                streamLabel = "TRAILER",
+                                                metaId = meta.id,
+                                                isTrailer = true
+                                            )
+                                        )
+                                    }
+                                } finally {
+                                    resolvingTrailer = false
+                                }
+                            }
+                        },
+                        enabled = !resolvingTrailer,
+                        modifier = Modifier.height(52.dp).tvFocusRing(RoundedCornerShape(28.dp)),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White.copy(alpha = 0.08f),
+                            disabledContainerColor = Color.White.copy(alpha = 0.04f)
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
+                        contentPadding = PaddingValues(horizontal = 18.dp)
+                    ) {
+                        if (resolvingTrailer) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                color = TextPrimary,
+                                modifier = Modifier.size(22.dp),
+                                strokeWidth = 2.5.dp
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.Movie,
+                                contentDescription = null,
+                                tint = TextPrimary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Trailer",
+                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = TextPrimary
+                            )
+                        }
+                    }
+                }
                 Spacer(Modifier.width(10.dp))
                 IconButton(
                     onClick = { sourcePickerOpen = true },
@@ -595,6 +688,55 @@ private fun DetailContent(
                         tint = LocalPalette.current.accent
                     )
                 }
+            }
+        }
+        // Cast row: each actor is tappable and opens their filmography.
+        // Only actors with a TMDB person id navigate (keyless mode has names only).
+        if (meta.cast.isNotEmpty()) {
+            item(key = "cast") {
+                Text(
+                    "Cast",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(meta.cast, key = { it.id.toString() + "_" + it.name }) { actor ->
+                        val clickable = actor.id > 0
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .width(72.dp)
+                                .then(
+                                    if (clickable) Modifier.clickable { onOpenActor(actor.id) }
+                                    else Modifier
+                                )
+                                .tvFocusRing(RoundedCornerShape(12.dp))
+                        ) {
+                            SafePosterImage(
+                                model = actor.photo,
+                                contentDescription = actor.name,
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(CircleShape)
+                                    .border(1.dp, GlassBorder, CircleShape)
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = actor.name,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (clickable) TextPrimary else TextSecondary,
+                                maxLines = 2,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
             }
         }
         if (isSeries) {
@@ -705,7 +847,6 @@ private fun DetailContent(
                 } else {
                     streamListItems(
                         streams = browserState.filtered,
-                        style = StreamCardStyle.fromKey(repository.settings.streamCardStyle),
                         onPick = { stream ->
                             startPlayback(vm, repository, stream, s.subtitles, s.streams, onPlay)
                         }
@@ -748,7 +889,6 @@ private fun DetailContent(
     val streamsContent = vm.streamsState as? StreamsUiState.Content
     SourcePickerPopup(
         visible = sourcePickerOpen,
-        cardStyle = StreamCardStyle.fromKey(repository.settings.streamCardStyle),
         streams = allStreams,
         loading = vm.streamsState is StreamsUiState.Loading,
         errorMessage = (vm.streamsState as? StreamsUiState.Error)?.message,
@@ -761,6 +901,7 @@ private fun DetailContent(
             }
         }
     )
+    } // CompositionLocalProvider (badge style)
 }
 
 @Composable
@@ -844,8 +985,7 @@ private fun SourcePickerPopup(
     errorMessage: String?,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
-    onPick: (StreamItem) -> Unit,
-    cardStyle: StreamCardStyle = StreamCardStyle.FUSION
+    onPick: (StreamItem) -> Unit
 ) {
     val springy = androidx.compose.animation.core.spring<Float>(
         dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
@@ -908,8 +1048,7 @@ private fun SourcePickerPopup(
                         errorMessage = errorMessage,
                         onDismiss = onDismiss,
                         onRetry = onRetry,
-                        onPick = onPick,
-                        cardStyle = cardStyle
+                        onPick = onPick
                     )
                 }
             }
@@ -928,8 +1067,7 @@ private fun PickerCardBody(
     errorMessage: String?,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
-    onPick: (StreamItem) -> Unit,
-    cardStyle: StreamCardStyle = StreamCardStyle.FUSION
+    onPick: (StreamItem) -> Unit
 ) {
     val palette = LocalPalette.current
     val tabState = rememberPickerTabState(streams)
@@ -1041,14 +1179,11 @@ private fun PickerCardBody(
                 )
             }
             else -> {
-                val isGrid = cardStyle == StreamCardStyle.TILE_GRID
                 StreamList(
                     streams = tabState.filtered,
-                    style = cardStyle,
                     onPick = onPick,
                     modifier = Modifier.heightIn(max = 400.dp),
-                    contentPadding = if (isGrid) PaddingValues(16.dp)
-                    else PaddingValues(bottom = 12.dp)
+                    contentPadding = PaddingValues(bottom = 12.dp)
                 )
             }
         }
