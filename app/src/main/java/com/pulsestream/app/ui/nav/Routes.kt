@@ -19,6 +19,7 @@ object Routes {
     const val APPEARANCE_SETTINGS = "appearance_settings"
     const val STREAMS_SETTINGS = "streams_settings"
     const val ABOUT = "about"
+    const val FEEDBACK = "feedback"
     const val LICENSES = "licenses"
     const val SETTINGS = "settings"
     const val PLAYER = "player"
