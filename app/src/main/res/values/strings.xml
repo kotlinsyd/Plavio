@@ -1,5 +1,53 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Plavio</string>
-    <string name="app_full_name">Plavio</string>
+    <string name="app_name" translatable="false">Plavio</string>
+    <string name="app_full_name" translatable="false">Plavio</string>
+
+    <!-- Bottom navigation -->
+    <string name="nav_home">Home</string>
+    <string name="nav_live">Live</string>
+    <string name="nav_search">Search</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Settings screen -->
+    <string name="settings_title">Settings</string>
+
+    <string name="settings_section_playback">Playback</string>
+    <string name="settings_playback_title">Playback</string>
+    <string name="settings_playback_sub">Autoplay, next episode, screen, skip intro, audio</string>
+    <string name="settings_streams_title">Streams</string>
+    <string name="settings_streams_sub">Source limits, quality order, autoplay rule</string>
+    <string name="settings_subtitles_title">Subtitles</string>
+    <string name="settings_subtitles_sub">Preferred languages and appearance</string>
+
+    <string name="settings_section_content">Content</string>
+    <string name="settings_addons_title">Manage addons</string>
+    <string name="settings_addons_sub">%1$d installed • %2$d enabled</string>
+    <string name="settings_home_catalogs_title">Home catalogs</string>
+    <string name="settings_home_catalogs_sub">Choose and arrange catalogs on the Home screen</string>
+
+    <string name="settings_section_appearance">Appearance</string>
+    <string name="settings_appearance_title">Appearance</string>
+    <string name="settings_appearance_sub">Accent color and AMOLED black</string>
+    <string name="settings_badges_title">Stream Badges</string>
+
+    <string name="settings_section_account">Account</string>
+    <string name="settings_account_title">Account</string>
+    <string name="settings_account_sub">Trakt and Simkl sync</string>
+
+    <string name="settings_section_about">About</string>
+    <string name="settings_about_title">About</string>
+    <string name="settings_about_sub">Version, website and app updates</string>
+    <string name="settings_feedback_title">Send Feedback</string>
+    <string name="settings_feedback_sub">Report a bug or request a feature</string>
+
+    <string name="settings_credit">Made with ❤️ by Najam</string>
+    <string name="settings_installs_one">%1$s install</string>
+    <string name="settings_installs_many">%1$s installs</string>
+
+    <!-- Common actions -->
+    <string name="action_cancel">Cancel</string>
+    <string name="action_done">Done</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_back">Back</string>
 </resources>
