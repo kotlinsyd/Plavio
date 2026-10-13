@@ -244,10 +244,19 @@ fun AddonsScreen(
     // the app (MainActivity stashed the link on the repository).
     var importPrefill by remember { mutableStateOf<String?>(null) }
     val pendingBundle by repository.pendingAddonBundle.collectAsState()
+    val pendingManifestUrl by repository.pendingManifestUrl.collectAsState()
     LaunchedEffect(pendingBundle) {
         if (pendingBundle != null) {
             repository.clearPendingAddonBundle()
             importPrefill = pendingBundle
+            showImportDialog = true
+        }
+    }
+    // stremio:// deep link: pre-fill the manifest URL in the import dialog.
+    LaunchedEffect(pendingManifestUrl) {
+        if (pendingManifestUrl != null) {
+            repository.clearPendingManifestUrl()
+            importPrefill = pendingManifestUrl
             showImportDialog = true
         }
     }
