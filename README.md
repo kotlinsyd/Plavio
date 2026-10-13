@@ -2,9 +2,11 @@
 
 # Plavio
 
+🌐 **Website:** https://plaviomedia.vercel.app
+
 A beautiful open-source streaming app for Android with a built-in player. Install addons to browse movies, series, and live TV — no account, no tracking.
 
-> 📺 **Plavio for Android TV is in the works — coming soon.**
+> 📺 **Plavio for Android TV is under development — something big is coming soon.**
 
 ## Preview
 
