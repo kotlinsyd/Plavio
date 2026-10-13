@@ -1,5 +1,10 @@
 package com.pulsestream.app.ui.screens
 
+import com.pulsestream.app.data.BadgePacks
+import androidx.compose.material3.OutlinedButton
+import android.provider.OpenableColumns
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.Image
@@ -30,6 +35,8 @@ import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.GridView
@@ -41,6 +48,7 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
@@ -78,6 +86,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pulsestream.app.BuildConfig
 import com.pulsestream.app.R
+import com.pulsestream.app.data.BadgeStyle
 import com.pulsestream.app.data.InstallCounter
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.simkl.SimklApi
@@ -85,9 +94,8 @@ import com.pulsestream.app.data.update.UpdateChecker
 import com.pulsestream.app.data.update.UpdateInfo
 import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.UpdatePrompt
+import com.pulsestream.app.ui.components.BadgePackPreview
 import com.pulsestream.app.ui.components.GlowBackground
-import com.pulsestream.app.ui.components.StreamCardPreview
-import com.pulsestream.app.ui.components.StreamCardStyle
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.AccentTheme
 import com.pulsestream.app.ui.theme.GlassBorder
@@ -106,21 +114,23 @@ fun SettingsScreen(
     onGoToPlayback: () -> Unit = {},
     onGoToSubtitles: () -> Unit = {},
     onGoToAppearance: () -> Unit = {},
+    onGoToStreams: () -> Unit = {},
     onGoToAbout: () -> Unit = {},
     onGoToAccount: () -> Unit = {}
 ) {
     val settings = repository.settings
-    var cardStyleKey by remember { mutableStateOf(settings.streamCardStyle) }
-    var showCardStyleDialog by remember { mutableStateOf(false) }
+    var badgeStyleKey by remember { mutableStateOf(settings.streamCardStyle) }
+    val badgeStyleLabel = BadgePacks.labelForKey(LocalContext.current, badgeStyleKey)
+    var showBadgeStyleDialog by remember { mutableStateOf(false) }
 
-    if (showCardStyleDialog) {
-        StreamCardStyleDialog(
-            initial = cardStyleKey,
-            onDismiss = { showCardStyleDialog = false },
+    if (showBadgeStyleDialog) {
+        BadgeStyleDialog(
+            initial = badgeStyleKey,
+            onDismiss = { showBadgeStyleDialog = false },
             onSelect = { key ->
-                cardStyleKey = key
+                badgeStyleKey = key
                 settings.streamCardStyle = key
-                showCardStyleDialog = false
+                showBadgeStyleDialog = false
             }
         )
     }
@@ -150,6 +160,14 @@ fun SettingsScreen(
                     onClick = onGoToPlayback
                 )
             }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.VideoLibrary,
+                    title = "Streams",
+                    subtitle = "Source limits, quality order, autoplay rule",
+                    onClick = onGoToStreams
+                )
+            }
 
             // ---- Subtitles ----
             item { SettingsSectionHeader("Subtitles") }
@@ -172,12 +190,12 @@ fun SettingsScreen(
                     onClick = onGoToAppearance
                 )
             }
-            item(key = "cardstyle") {
+            item(key = "badgestyle") {
                 SettingsNavRow(
                     icon = Icons.Filled.Style,
-                    title = "Stream card style",
-                    subtitle = StreamCardStyle.fromKey(cardStyleKey).label,
-                    onClick = { showCardStyleDialog = true }
+                    title = "Stream Badges",
+                    subtitle = badgeStyleLabel,
+                    onClick = { showBadgeStyleDialog = true }
                 )
             }
 
@@ -796,62 +814,114 @@ private fun SocialIconRow() {
         }
     }
 }
-/** Single-select dialog for the stream card visual style, with live previews. */
+/** Single-select dialog for the stream badge pack, with live previews + custom import. */
 @Composable
-private fun StreamCardStyleDialog(
+private fun BadgeStyleDialog(
     initial: String,
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit
 ) {
+    val context = LocalContext.current
     var selected by remember { mutableStateOf(initial) }
+    var customPacks by remember { mutableStateOf(BadgePacks.listCustomPacks(context)) }
+    var importError by remember { mutableStateOf<String?>(null) }
     val accent = LocalPalette.current.accent
+
+    // System file picker for a badge-pack JSON.
+    val pickJson = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val text = runCatching {
+            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+        }.getOrNull()
+        if (text.isNullOrBlank()) {
+            importError = "Couldn't read that file."
+            return@rememberLauncherForActivityResult
+        }
+        val name = runCatching {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (c.moveToFirst() && idx >= 0) c.getString(idx) else null
+            }
+        }.getOrNull() ?: "custom.json"
+        val err = BadgePacks.importCustomPack(context, name, text)
+        if (err != null) {
+            importError = err
+        } else {
+            importError = null
+            customPacks = BadgePacks.listCustomPacks(context)
+        }
+    }
+
+    // If the selected pack was deleted, fall back to Black.
+    LaunchedEffect(customPacks) {
+        if (selected.startsWith(BadgePacks.CUSTOM_PREFIX) &&
+            customPacks.none { it.key == selected }) {
+            selected = BadgeStyle.BLACK.key
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Stream card style", color = TextPrimary) },
+        title = { Text("Stream Badges", color = TextPrimary) },
         text = {
             Column {
                 Text(
-                    "How stream cards look in the sources list.",
+                    "Badge pack used for stream info badges.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
+                if (importError != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        importError!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFEF4444)
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 LazyColumn(
-                    modifier = Modifier.heightIn(max = 420.dp),
+                    modifier = Modifier.heightIn(max = 380.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(vertical = 4.dp)
                 ) {
-                    items(StreamCardStyle.values(), key = { it.key }) { style ->
-                        val isSelected = style.key == selected
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .border(
-                                    if (isSelected) 1.5.dp else 1.dp,
-                                    if (isSelected) accent else GlassBorder,
-                                    RoundedCornerShape(12.dp)
-                                )
-                                .clickable { selected = style.key }
-                                .tvFocusRing(RoundedCornerShape(12.dp))
-                                .padding(10.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                RadioButton(
-                                    selected = isSelected,
-                                    onClick = { selected = style.key },
-                                    colors = RadioButtonDefaults.colors(selectedColor = accent)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    style.label,
-                                    color = TextPrimary,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                )
+                    items(BadgeStyle.values(), key = { it.key }) { style ->
+                        BadgePackRow(
+                            packKey = style.key,
+                            label = style.label,
+                            sublabel = null,
+                            isSelected = style.key == selected,
+                            onSelect = { selected = style.key },
+                            onDelete = null
+                        )
+                    }
+                    items(customPacks, key = { it.key }) { pack ->
+                        BadgePackRow(
+                            packKey = pack.key,
+                            label = pack.name,
+                            sublabel = "${pack.filterCount} badges · imported",
+                            isSelected = pack.key == selected,
+                            onSelect = { selected = pack.key },
+                            onDelete = {
+                                BadgePacks.deleteCustomPack(context, pack.key)
+                                customPacks = BadgePacks.listCustomPacks(context)
                             }
-                            Spacer(Modifier.height(6.dp))
-                            // Live miniature of the real card — non-interactive.
-                            StreamCardPreview(style = style, modifier = Modifier.fillMaxWidth())
+                        )
+                    }
+                    item(key = "import") {
+                        OutlinedButton(
+                            onClick = { pickJson.launch("application/json") },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Filled.Upload,
+                                contentDescription = null,
+                                tint = accent,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Import custom badges", color = TextPrimary)
                         }
                     }
                 }
@@ -868,4 +938,65 @@ private fun StreamCardStyleDialog(
             }
         }
     )
+}
+
+@Composable
+private fun BadgePackRow(
+    packKey: String,
+    label: String,
+    sublabel: String?,
+    isSelected: Boolean,
+    onSelect: () -> Unit,
+    onDelete: (() -> Unit)?
+) {
+    val accent = LocalPalette.current.accent
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .border(
+                if (isSelected) 1.5.dp else 1.dp,
+                if (isSelected) accent else GlassBorder,
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(onClick = onSelect)
+            .tvFocusRing(RoundedCornerShape(12.dp))
+            .padding(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RadioButton(
+                selected = isSelected,
+                onClick = onSelect,
+                colors = RadioButtonDefaults.colors(selectedColor = accent)
+            )
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    label,
+                    color = TextPrimary,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                )
+                if (sublabel != null) {
+                    Text(
+                        sublabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+            if (onDelete != null) {
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Remove badge pack",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        // Sample badges from the pack — non-interactive.
+        BadgePackPreview(packKey = packKey, label = "", modifier = Modifier.fillMaxWidth())
+    }
 }
