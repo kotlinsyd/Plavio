@@ -163,7 +163,7 @@ import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.DotsLoadingIndicator
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.ui.components.StreamCard
-import com.pulsestream.app.ui.components.StreamCardStyle
+import com.pulsestream.app.ui.components.LocalBadgeStyleKey
 import com.pulsestream.app.ui.components.StreamList
 import com.pulsestream.app.ui.components.rememberStreamBrowserState
 import com.pulsestream.app.ui.theme.LocalPalette
@@ -2265,7 +2265,7 @@ fun PlayerScreen(
 
         // Sources switcher: pick another stream without leaving the player.
         if (sourcesOpen) {
-            val browserState = rememberStreamBrowserState(availableStreams)
+            val browserState = rememberStreamBrowserState(availableStreams, repository.settings)
             ModalBottomSheet(
                 onDismissRequest = { sourcesOpen = false },
                 sheetState = rememberModalBottomSheetState(),
@@ -2324,19 +2324,19 @@ fun PlayerScreen(
                         }
                     }
                     else -> {
-                        val switchStyle = StreamCardStyle.fromKey(repository.settings.streamCardStyle)
-                        val switchIsGrid = switchStyle == StreamCardStyle.TILE_GRID
-                        StreamList(
-                            streams = browserState.filtered,
-                            style = switchStyle,
-                            onPick = { switchSource(it) },
-                            modifier = Modifier.fillMaxWidth(),
-                            contentPadding = if (switchIsGrid) PaddingValues(16.dp)
-                            else PaddingValues(
-                                start = 4.dp, end = 4.dp, bottom = 32.dp
-                            ),
-                            selectedUrl = currentRequest.streamUrl
-                        )
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalBadgeStyleKey provides repository.settings.streamCardStyle
+                        ) {
+                            StreamList(
+                                streams = browserState.filtered,
+                                onPick = { switchSource(it) },
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(
+                                    start = 4.dp, end = 4.dp, bottom = 32.dp
+                                ),
+                                selectedUrl = currentRequest.streamUrl
+                            )
+                        }
                     }
                 }
             }
