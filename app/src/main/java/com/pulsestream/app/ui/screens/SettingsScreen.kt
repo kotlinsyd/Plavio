@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.Feedback
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Language
@@ -116,6 +117,7 @@ fun SettingsScreen(
     onGoToAppearance: () -> Unit = {},
     onGoToStreams: () -> Unit = {},
     onGoToAbout: () -> Unit = {},
+    onGoToFeedback: () -> Unit = {},
     onGoToAccount: () -> Unit = {}
 ) {
     val settings = repository.settings
@@ -246,6 +248,14 @@ fun SettingsScreen(
                     title = "About",
                     subtitle = "Version, website and app updates",
                     onClick = onGoToAbout
+                )
+            }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Feedback,
+                    title = "Send Feedback",
+                    subtitle = "Report a bug or request a feature",
+                    onClick = onGoToFeedback
                 )
             }
 

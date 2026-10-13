@@ -85,6 +85,7 @@ import com.pulsestream.app.ui.screens.AccountScreen
 import com.pulsestream.app.ui.screens.AddonsScreen
 import com.pulsestream.app.ui.screens.CatalogScreen
 import com.pulsestream.app.ui.screens.DetailScreen
+import com.pulsestream.app.ui.screens.FeedbackScreen
 import com.pulsestream.app.ui.screens.HomeCatalogsScreen
 import com.pulsestream.app.ui.screens.PlaybackSettingsScreen
 import com.pulsestream.app.ui.screens.ActorScreen
@@ -563,6 +564,7 @@ private fun PulseNavGraph(
                 onGoToAppearance = { navController.navigate(Routes.APPEARANCE_SETTINGS) },
                 onGoToStreams = { navController.navigate(Routes.STREAMS_SETTINGS) },
                 onGoToAbout = { navController.navigate(Routes.ABOUT) },
+                onGoToFeedback = { navController.navigate(Routes.FEEDBACK) },
                 onGoToAccount = { navController.navigate(Routes.ACCOUNT) }
             )
         }
@@ -601,6 +603,12 @@ private fun PulseNavGraph(
             AboutScreen(
                 onBack = { navController.popBackStack() },
                 onGoToLicenses = { navController.navigate(Routes.LICENSES) }
+            )
+        }
+        composable(Routes.FEEDBACK) {
+            FeedbackScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
             )
         }
         composable(Routes.LICENSES) {
