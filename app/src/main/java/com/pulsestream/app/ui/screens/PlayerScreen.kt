@@ -108,6 +108,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.res.stringResource
+import com.pulsestream.app.R
 import com.pulsestream.app.ui.tv.rememberIsTv
 import com.pulsestream.app.ui.tv.tvFocusRing
 import androidx.core.view.WindowCompat
@@ -765,8 +767,9 @@ fun PlayerScreen(
     }
 
     fun seekBy(deltaMs: Long) {
-        val dur = player.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
-        player.seekTo((player.currentPosition + deltaMs).coerceIn(0L, dur))
+        val c = player
+        val dur = c.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
+        c.seekTo((c.currentPosition + deltaMs).coerceIn(0L, dur))
     }
 
     fun seekByWithFeedback(deltaMs: Long) {
@@ -781,7 +784,8 @@ fun PlayerScreen(
     }
 
     fun togglePlay() {
-        if (player.isPlaying) player.pause() else player.play()
+        val c = player
+        if (c.isPlaying) c.pause() else c.play()
     }
 
     fun cycleAspect() {
@@ -1281,7 +1285,7 @@ fun PlayerScreen(
     }
 
     fun savePosition() {
-        val pl = latestPlayer.value
+        val pl: Player = latestPlayer.value
         val req = latestRequest.value
         // #8: live TV never enters Continue Watching.
         if (req.type == "tv") return
@@ -1311,11 +1315,12 @@ fun PlayerScreen(
     var endedHandledFor by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(player) {
         while (true) {
-            positionMs = player.currentPosition
-            durationMs = player.duration.takeIf { it > 0 } ?: 0L
-            isPlaying = player.isPlaying
-            isBuffering = player.playbackState == Player.STATE_BUFFERING ||
-                player.playbackState == Player.STATE_IDLE
+            val c = player
+            positionMs = c.currentPosition
+            durationMs = c.duration.takeIf { it > 0 } ?: 0L
+            isPlaying = c.isPlaying
+            isBuffering = c.playbackState == Player.STATE_BUFFERING ||
+                c.playbackState == Player.STATE_IDLE
             volumePercent = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) *
                 100 / maxVolume.coerceAtLeast(1)
             activeSegment = if (settings.showSkipButton) {
@@ -1323,7 +1328,7 @@ fun PlayerScreen(
             } else null
             // Auto-play next episode: when a series episode ends and the
             // setting is on, advance to the next episode automatically.
-            if (player.playbackState == Player.STATE_ENDED &&
+            if (c.playbackState == Player.STATE_ENDED &&
                 settings.autoPlayNext &&
                 !currentRequest.isMovie &&
                 !currentRequest.isTrailer &&
@@ -1347,14 +1352,14 @@ fun PlayerScreen(
                     positionMs,
                     durationMs,
                     isPlaying,
-                    player.playbackState == Player.STATE_ENDED
+                    c.playbackState == Player.STATE_ENDED
                 )
                 traktScrobbler.tick(
                     currentRequest,
                     positionMs,
                     durationMs,
                     isPlaying,
-                    player.playbackState == Player.STATE_ENDED
+                    c.playbackState == Player.STATE_ENDED
                 )
             }
             delay(500)
@@ -1980,6 +1985,7 @@ fun PlayerScreen(
                                 Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                // Speed control.
                                 PillBarButton(
                                     icon = Icons.Filled.AspectRatio,
                                     label = aspectLabel,
