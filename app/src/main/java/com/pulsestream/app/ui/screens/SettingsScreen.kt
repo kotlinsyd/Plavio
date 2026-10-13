@@ -1,7 +1,8 @@
 package com.pulsestream.app.ui.screens
 
-import com.pulsestream.app.data.BadgePacks
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import android.provider.OpenableColumns
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -9,6 +10,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -87,7 +89,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pulsestream.app.BuildConfig
 import com.pulsestream.app.R
-import com.pulsestream.app.data.BadgeStyle
+import com.pulsestream.app.data.BadgePacks
 import com.pulsestream.app.data.InstallCounter
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.simkl.SimklApi
@@ -797,7 +799,7 @@ private fun SocialIconRow() {
         Triple(R.drawable.ic_reddit, "Reddit", "https://www.reddit.com/r/Plavio/"),
     )
     Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -812,13 +814,19 @@ private fun SocialIconRow() {
                         )
                     }
                 },
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(
+                        color = palette.panel.copy(alpha = 0.7f),
+                        shape = CircleShape
+                    )
             ) {
                 Icon(
                     painter = painterResource(iconRes),
                     contentDescription = label,
-                    tint = palette.accent,
-                    modifier = Modifier.size(24.dp)
+                    // No tint — show icons in their native white for clean look
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp)
                 )
             }
         }
@@ -864,13 +872,18 @@ private fun BadgeStyleDialog(
         }
     }
 
-    // If the selected pack was deleted, fall back to Black.
+    // If the selected pack was deleted, clear the selection.
     LaunchedEffect(customPacks) {
         if (selected.startsWith(BadgePacks.CUSTOM_PREFIX) &&
             customPacks.none { it.key == selected }) {
-            selected = BadgeStyle.BLACK.key
+            selected = ""
         }
     }
+
+    // URL import state
+    var urlInput by remember { mutableStateOf("") }
+    var isDownloading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -896,15 +909,15 @@ private fun BadgeStyleDialog(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(vertical = 4.dp)
                 ) {
-                    items(BadgeStyle.values(), key = { it.key }) { style ->
-                        BadgePackRow(
-                            packKey = style.key,
-                            label = style.label,
-                            sublabel = null,
-                            isSelected = style.key == selected,
-                            onSelect = { selected = style.key },
-                            onDelete = null
-                        )
+                    if (customPacks.isEmpty()) {
+                        item(key = "empty") {
+                            Text(
+                                "No badge packs yet. Import one via file or link below.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary,
+                                modifier = Modifier.padding(vertical = 8.dp)
+                            )
+                        }
                     }
                     items(customPacks, key = { it.key }) { pack ->
                         BadgePackRow(
@@ -919,7 +932,7 @@ private fun BadgeStyleDialog(
                             }
                         )
                     }
-                    item(key = "import") {
+                    item(key = "import-file") {
                         OutlinedButton(
                             onClick = { pickJson.launch("application/json") },
                             modifier = Modifier.fillMaxWidth()
@@ -931,7 +944,65 @@ private fun BadgeStyleDialog(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text("Import custom badges", color = TextPrimary)
+                            Text("Upload badge JSON file", color = TextPrimary)
+                        }
+                    }
+                    item(key = "import-url") {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                value = urlInput,
+                                onValueChange = { urlInput = it },
+                                label = { Text("Paste badge JSON link") },
+                                placeholder = { Text("https://example.com/badges.json") },
+                                singleLine = true,
+                                enabled = !isDownloading,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = accent,
+                                    focusedLabelColor = accent
+                                )
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Button(
+                                onClick = {
+                                    val url = urlInput.trim()
+                                    if (url.isBlank()) {
+                                        importError = "Paste a link first."
+                                        return@Button
+                                    }
+                                    isDownloading = true
+                                    importError = null
+                                    scope.launch {
+                                        val err = BadgePacks.importCustomPackFromUrl(context, url)
+                                        isDownloading = false
+                                        if (err != null) {
+                                            importError = err
+                                        } else {
+                                            importError = null
+                                            urlInput = ""
+                                            customPacks = BadgePacks.listCustomPacks(context)
+                                        }
+                                    }
+                                },
+                                enabled = !isDownloading,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                if (isDownloading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        color = Color.White,
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Filled.Link,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                Text(if (isDownloading) "Downloading..." else "Import from link")
+                            }
                         }
                     }
                 }
