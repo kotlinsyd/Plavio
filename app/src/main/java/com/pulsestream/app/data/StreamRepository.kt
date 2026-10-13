@@ -66,6 +66,17 @@ class StreamRepository(
     fun setPendingAddonBundle(link: String) { _pendingAddonBundle.value = link }
     fun clearPendingAddonBundle() { _pendingAddonBundle.value = null }
 
+    /**
+     * Pending manifest URL from a stremio:// deep link. MainActivity stashes
+     * the https:// manifest URL here; AddonsScreen picks it up and offers
+     * to add it as an addon, then clears it.
+     */
+    private val _pendingManifestUrl = MutableStateFlow<String?>(null)
+    val pendingManifestUrl: StateFlow<String?> = _pendingManifestUrl.asStateFlow()
+
+    fun setPendingManifestUrl(url: String) { _pendingManifestUrl.value = url }
+    fun clearPendingManifestUrl() { _pendingManifestUrl.value = null }
+
     /** In-memory handoff for the catalog "view all" screen. */
     @Volatile
     var pendingCatalog: CatalogRow? = null
