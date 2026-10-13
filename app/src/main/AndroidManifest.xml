@@ -6,6 +6,7 @@
 
     <application
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -15,10 +16,29 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:configChanges="orientation|screenSize|keyboardHidden|density|smallestScreenSize|screenLayout|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Addon share bundles: tapping a plavio-addons:// link (e.g. in
+                 WhatsApp/Discord) opens the app so it can offer the import.
+                 MainActivity routes the VIEW intent into the bundle import
+                 flow (see AddonShare.bundleFromIntent). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="plavio-addons" />
+            </intent-filter>
+            <!-- Handle stremio:// addon install links so Android suggests Plavio
+                 alongside Stremio/Nuvio when users tap "Install" on addon pages.
+                 MainActivity should route these to the addon import flow. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="stremio" />
             </intent-filter>
         </activity>
         <provider

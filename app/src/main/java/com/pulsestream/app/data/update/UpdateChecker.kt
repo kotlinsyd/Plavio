@@ -5,23 +5,48 @@ import android.content.SharedPreferences
 import com.pulsestream.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
+import org.json.JSONObject
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.UnknownHostException
 
-/** Info about a newer release found on GitLab. */
-data class UpdateInfo(val version: String, val notes: String, val apkUrl: String)
+/** Info about a newer release found via the stable pointer. */
+data class UpdateInfo(
+    val version: String,
+    val notes: String,
+    val apkUrl: String,
+    /** True when Najam marked this as a "major update" — auto-popup shows. False = silent, only visible on manual check. */
+    val isMajor: Boolean = false
+)
 
 /**
- * Checks the GitLab releases feed for a version newer than the installed one.
- * Silent on any failure (no update popup then).
+ * Checks the stable pointer (stable.json in the repo) for a version newer
+ * than the installed one. Only versions Najam marks "stable" notify users —
+ * dev releases pushed to GitLab stay silent. Silent on any failure.
  */
 object UpdateChecker {
-    private const val RELEASES_URL = "https://gitlab.com/api/v4/projects/87396069/releases"
+    private const val STABLE_URL = "https://gitlab.com/KotlinJS5/plavio/-/raw/main/stable.json"
+    private const val STABLE_TV_URL = "https://gitlab.com/KotlinJS5/plavio/-/raw/main/stable-tv.json"
     private const val PREFS = "pulse_update"
     private const val KEY_LAST_CHECK = "last_check_ms"
     private const val KEY_SKIPPED = "skipped_version"
     private const val KEY_AUTO_CHECK = "auto_check"
+    /** Automatic launch checks are throttled — at most one per day. */
+    private const val CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
+
+    /** Outcome of a manual update check, so the UI can tell "offline" from "up to date". */
+    sealed interface UpdateCheckResult {
+        data class Update(val info: UpdateInfo) : UpdateCheckResult
+        data object UpToDate : UpdateCheckResult
+        data object Offline : UpdateCheckResult
+        data class Error(val message: String) : UpdateCheckResult
+    }
+
+    /** A check that failed for a classifiable reason (vs. "no update"). */
+    private class UpdateCheckFailure(message: String, val offline: Boolean) : Exception(message)
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -35,15 +60,25 @@ object UpdateChecker {
     }
 
     /**
-     * Automatic check used on app launch: runs every launch (the check is a
-     * single tiny JSON fetch, a few KB). Respects the user toggle and skips
-     * versions the user dismissed. Silent when there is nothing new.
+     * Automatic check used on app launch: throttled to once a day (the
+     * pointer fetch is a few KB, but there's no reason to hit it on every
+     * launch). Respects the user toggle and skips versions the user
+     * dismissed. Silent when there is nothing new.
+     *
+     * MAJOR-ONLY: Only pops up for updates marked "major" in stable.json.
+     * Regular updates are silent — users see them only via manual check.
      */
     suspend fun check(context: Context): UpdateInfo? = withContext(Dispatchers.IO) {
         val p = prefs(context)
         if (!p.getBoolean(KEY_AUTO_CHECK, true)) return@withContext null
+        val last = p.getLong(KEY_LAST_CHECK, 0L)
+        if (last > 0 && System.currentTimeMillis() - last < CHECK_INTERVAL_MS) {
+            return@withContext null
+        }
         p.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
-        fetchLatest(p, respectSkip = true)
+        val info = runCatching { fetchLatestOrThrow(p, respectSkip = true) }.getOrNull()
+        // Only auto-notify for major updates
+        if (info?.isMajor == true) info else null
     }
 
     /**
@@ -51,44 +86,123 @@ object UpdateChecker {
      * ignores the throttle, the auto-check toggle and dismissed versions.
      */
     suspend fun checkNow(context: Context): UpdateInfo? = withContext(Dispatchers.IO) {
-        val info = fetchLatest(prefs(context), respectSkip = false)
-        prefs(context).edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
-        info
+        (checkNowDetailed(context) as? UpdateCheckResult.Update)?.info
     }
 
-    private fun fetchLatest(p: SharedPreferences, respectSkip: Boolean): UpdateInfo? {
-        return try {
-            val conn = (URL(RELEASES_URL).openConnection() as HttpURLConnection).apply {
+    /**
+     * Manual check with the outcome classified: Update / UpToDate / Offline /
+     * Error. A null from [checkNow] used to mean all of "up to date",
+     * "offline" and "server hiccup" at once.
+     */
+    suspend fun checkNowDetailed(context: Context): UpdateCheckResult =
+        withContext(Dispatchers.IO) {
+            val p = prefs(context)
+            try {
+                val info = fetchLatestOrThrow(p, respectSkip = false)
+                p.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
+                if (info != null) UpdateCheckResult.Update(info)
+                else UpdateCheckResult.UpToDate
+            } catch (e: UpdateCheckFailure) {
+                if (e.offline) UpdateCheckResult.Offline
+                else UpdateCheckResult.Error(e.message ?: "Couldn't check for updates")
+            } catch (e: Exception) {
+                UpdateCheckResult.Error(e.message ?: "Couldn't check for updates")
+            }
+        }
+
+    private fun fetchLatestOrThrow(
+        p: SharedPreferences,
+        respectSkip: Boolean
+    ): UpdateInfo? {
+        // UPDATER LOCK (v0.8.23-tv): the flavor is decided at COMPILE time
+        // (BuildConfig.FLAVOR), never by a runtime UiMode check that a TV
+        // box can misreport. The tv flavor ONLY reads the TV pointer and
+        // ONLY accepts -tv tags/URLs; mobile ONLY reads the mobile pointer
+        // and only accepts non-tv tags/URLs. (The old code compared
+        // "0.8.20" as newer than "0.8.20-tv" — the "-tv" suffix parsed as
+        // 0 — and served the mobile APK to TVs.)
+        val isTv = BuildConfig.FLAVOR == "tv"
+        val url = if (isTv) STABLE_TV_URL else STABLE_URL
+        val stable: JSONObject
+        try {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 15000
                 readTimeout = 15000
                 setRequestProperty("User-Agent", "PulseStream/${BuildConfig.VERSION_NAME}")
             }
-            if (conn.responseCode != 200) return null
-            val arr = JSONArray(conn.inputStream.bufferedReader().readText())
-            if (arr.length() == 0) return null
-            val latest = arr.getJSONObject(0)
-            val version = latest.optString("tag_name", "").removePrefix("v")
-            if (version.isBlank() || !isNewer(version, BuildConfig.VERSION_NAME)) return null
-            if (respectSkip && p.getString(KEY_SKIPPED, null) == version) return null
-            val apkUrl = latest.optJSONObject("assets")
-                ?.optJSONArray("links")
-                ?.let { links ->
-                    (0 until links.length())
-                        .map { links.getJSONObject(it) }
-                        .firstOrNull { it.optString("url").endsWith(".apk", ignoreCase = true) }
-                        ?.optString("url")
-                }
-                ?.takeIf { it.isNotBlank() }
-                ?: "https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/$version/Plavio-v$version.apk"
-            UpdateInfo(
-                version = version,
-                notes = latest.optString("description", "").trim(),
-                apkUrl = apkUrl
-            )
-        } catch (_: Exception) {
-            null
+            if (conn.responseCode != 200) {
+                throw UpdateCheckFailure(
+                    "The update server answered ${conn.responseCode}", offline = false
+                )
+            }
+            stable = try {
+                JSONObject(conn.inputStream.bufferedReader().readText())
+            } catch (_: Exception) {
+                throw UpdateCheckFailure("Couldn't read the update info", offline = false)
+            }
+        } catch (e: UpdateCheckFailure) {
+            throw e
+        } catch (e: Exception) {
+            throw UpdateCheckFailure("Couldn't reach the update server", offline = isOffline(e))
         }
+        val tag = stable.optString("version", "").trim().trimStart { it == 'v' || it == 'V' }
+        // Tag lock: a TV build only ever accepts an "x.y.z-tv" tag, a
+        // mobile build only "x.y.z". A mismatched pointer can never slip
+        // through, whatever the release ordering or host state.
+        val tagMatchesFlavor = if (isTv) tag.endsWith("-tv", ignoreCase = true)
+        else !tag.endsWith("-tv", ignoreCase = true)
+        if (tag.isBlank() || !tagMatchesFlavor) return null
+        val version = tag.removeSuffix("-tv").removeSuffix("-TV")
+        // Local compare on the dotted part only ("0.8.23-tv" == "0.8.23").
+        val local = BuildConfig.VERSION_NAME.removeSuffix("-tv").removeSuffix("-TV")
+        if (version.isBlank() || !isNewer(version, local)) return null
+        if (respectSkip && p.getString(KEY_SKIPPED, null) == tag) return null
+        // Well-formed fallback per flavor (verified against the live
+        // pointers): the package path segment carries the full tag, the
+        // FILE name carries the dotted version only —
+        //   TV:     …/plavio-tv/0.8.23-tv/Plavio-TV-v0.8.23.apk
+        //   mobile: …/plavio/0.8.20/Plavio-v0.8.20.apk
+        val fallback = if (isTv)
+            "https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio-tv/$tag/Plavio-TV-v$version.apk"
+        else
+            "https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/$tag/Plavio-v$version.apk"
+        // URL lock: the TV package lives under /plavio-tv/ and its file
+        // name carries "-tv"; the mobile package under /plavio/ never
+        // does. The pointer URL must be https on gitlab.com and match this
+        // flavor — a blank, mismatched or non-https pointer falls back to
+        // the well-formed flavor URL instead of NPE-ing (mobile used to
+        // hit apkUrl!! on a blank pointer and silently offer no update).
+        val pointerUrl = stable.optString("apkUrl", "")
+            .takeIf { it.isNotBlank() }
+            ?.let { validateApkUrl(it) }
+        val urlMatchesFlavor = if (isTv) pointerUrl?.contains("plavio-tv") == true
+        else pointerUrl?.contains("-tv") != true
+        val apkUrl = if (pointerUrl != null && urlMatchesFlavor) pointerUrl else fallback
+        return UpdateInfo(
+            version = tag,
+            notes = stable.optString("notes", "").trim(),
+            apkUrl = apkUrl,
+            isMajor = stable.optBoolean("major", false)
+        )
     }
+
+    /**
+     * The pointer's apkUrl must be an https URL on gitlab.com — cleartext
+     * http (or any other host) is rejected so a tampered pointer can't
+     * redirect the updater at an arbitrary APK.
+     */
+    private fun validateApkUrl(url: String): String? = runCatching {
+        val u = URL(url)
+        if (!u.protocol.equals("https", ignoreCase = true)) return null
+        if (!u.host.equals("gitlab.com", ignoreCase = true)) return null
+        url
+    }.getOrNull()
+
+    private fun isOffline(e: Throwable): Boolean =
+        e is UnknownHostException ||
+            e is ConnectException ||
+            e is NoRouteToHostException ||
+            e is SocketTimeoutException
 
     /** Remember that the user dismissed this version ("Later"). */
     fun skip(context: Context, version: String) {
@@ -96,8 +210,13 @@ object UpdateChecker {
     }
 
     internal fun isNewer(remote: String, local: String): Boolean {
-        val r = remote.split(".").map { it.toIntOrNull() ?: 0 }
-        val l = local.split(".").map { it.toIntOrNull() ?: 0 }
+        // Leading-digit compare per component: "0.8.22-beta" compares as
+        // 0.8.22 (the old toIntOrNull ?: 0 read "22-beta" as 0), and a
+        // stray "V" prefix is stripped.
+        fun parts(v: String) = v.trim().trimStart { it == 'v' || it == 'V' }
+            .split(".").map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+        val r = parts(remote)
+        val l = parts(local)
         for (i in 0 until maxOf(r.size, l.size)) {
             val a = r.getOrElse(i) { 0 }
             val b = l.getOrElse(i) { 0 }
