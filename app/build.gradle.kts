@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 59
-        versionName = "0.8.29"
+        versionCode = 62
+        versionName = "0.8.31"
     }
 
     buildTypes {

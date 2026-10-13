@@ -9,7 +9,6 @@ object Routes {
     const val ONBOARDING = "onboarding"
     const val HOME = "home"
     const val LIVE = "live"
-    const val TRAILERS = "trailers"
     const val SEARCH = "search"
     const val WATCHLIST = "watchlist"
     const val ADDONS = "addons"
@@ -18,6 +17,7 @@ object Routes {
     const val PLAYBACK_SETTINGS = "playback_settings"
     const val SUBTITLE_SETTINGS = "subtitle_settings"
     const val APPEARANCE_SETTINGS = "appearance_settings"
+    const val STREAMS_SETTINGS = "streams_settings"
     const val ABOUT = "about"
     const val LICENSES = "licenses"
     const val SETTINGS = "settings"
@@ -26,6 +26,7 @@ object Routes {
     const val TV_ADDON_SETUP = "tv_addon_setup"
     const val DETAIL = "detail/{addonId}/{type}/{metaId}"
     const val CATALOG = "catalog/{addonId}/{type}/{catalogId}"
+    const val ACTOR = "actor/{personId}"
 
     fun detail(addonId: String, type: String, metaId: String): String =
         "detail/${enc(addonId)}/${enc(type)}/${enc(metaId)}"

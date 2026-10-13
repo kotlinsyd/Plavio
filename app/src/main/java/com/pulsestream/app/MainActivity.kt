@@ -5,6 +5,16 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -26,7 +36,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
-import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -77,6 +87,8 @@ import com.pulsestream.app.ui.screens.CatalogScreen
 import com.pulsestream.app.ui.screens.DetailScreen
 import com.pulsestream.app.ui.screens.HomeCatalogsScreen
 import com.pulsestream.app.ui.screens.PlaybackSettingsScreen
+import com.pulsestream.app.ui.screens.ActorScreen
+import com.pulsestream.app.ui.screens.StreamsSettingsScreen
 import com.pulsestream.app.ui.screens.SubtitleSettingsScreen
 import com.pulsestream.app.ui.screens.AppearanceSettingsScreen
 import com.pulsestream.app.ui.screens.AboutScreen
@@ -84,9 +96,9 @@ import com.pulsestream.app.ui.screens.LicensesScreen
 import com.pulsestream.app.ui.screens.HomeScreen
 import com.pulsestream.app.ui.screens.PlayerScreen
 import com.pulsestream.app.ui.screens.SearchScreen
-import com.pulsestream.app.ui.screens.TrailersScreen
 import com.pulsestream.app.ui.components.MiniTrailerOverlay
 import com.pulsestream.app.ui.components.TrailerMiniController
+import com.pulsestream.app.ui.components.TrailerPlayerState
 import com.pulsestream.app.ui.screens.TrailerPlayerScreen
 import com.pulsestream.app.ui.screens.WatchlistScreen
 import com.pulsestream.app.ui.theme.AccentTheme
@@ -204,7 +216,6 @@ private fun DockItem(
 private val tabs = listOf(
     Tab(Routes.HOME, "Home", Icons.Filled.Home),
     Tab(Routes.LIVE, "Live", Icons.Filled.LiveTv),
-    Tab(Routes.TRAILERS, "Trailers", Icons.Filled.Movie),
     Tab(Routes.SEARCH, "Search", Icons.Filled.Search),
     Tab(Routes.SETTINGS, "Settings", Icons.Filled.Settings)
 )
@@ -370,14 +381,51 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
             PulseNavGraph(navController, repository, onThemeChanged, trailerMini)
         }
     }
-        // Mini floating trailer player, above content and dock.
-        MiniTrailerOverlay(
-            controller = trailerMini,
-            onExpand = {
-                trailerMini.expand()
-                navController.navigate(Routes.TRAILER_PLAYER)
+        // Full portrait trailer layer — floats above the current tab (which
+        // stays mounted behind it). Slides/fades up on open, collapses down
+        // into the mini player on swipe-down/back.
+        AnimatedVisibility(
+            visible = trailerMini.playerState == TrailerPlayerState.Full,
+            enter = slideInVertically(
+                initialOffsetY = { it },
+                animationSpec = spring(dampingRatio = 0.88f, stiffness = 450f)
+            ) + fadeIn(tween(280)),
+            exit = slideOutVertically(
+                targetOffsetY = { it },
+                animationSpec = tween(380, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(300))
+        ) {
+            val req = trailerMini.request
+            val player = trailerMini.player
+            if (req != null && player != null) {
+                TrailerPlayerScreen(
+                    repository = repository,
+                    request = req,
+                    externalPlayer = player,
+                    onBack = { trailerMini.minimize() },
+                    onSwipeDown = { trailerMini.minimize() }
+                )
             }
-        )
+        }
+        // Mini floating trailer player, above content and dock.
+        AnimatedVisibility(
+            visible = trailerMini.playerState == TrailerPlayerState.Mini,
+            enter = fadeIn(tween(220, delayMillis = 120)) + scaleIn(
+                initialScale = 0.6f,
+                transformOrigin = TransformOrigin(1f, 1f),
+                animationSpec = tween(300, delayMillis = 120, easing = FastOutSlowInEasing)
+            ),
+            exit = fadeOut(tween(200)) + scaleOut(
+                targetScale = 0.6f,
+                transformOrigin = TransformOrigin(1f, 1f),
+                animationSpec = tween(200, easing = FastOutSlowInEasing)
+            )
+        ) {
+            MiniTrailerOverlay(
+                controller = trailerMini,
+                onExpand = { trailerMini.expand() }
+            )
+        }
         } // end Box wrapping mobile Scaffold
     } // end else (mobile bottom dock)
 
@@ -458,23 +506,6 @@ private fun PulseNavGraph(
                 onGoToAddons = { navController.navigate(Routes.ADDONS) }
             )
         }
-        composable(Routes.TRAILERS) {
-            val ctx = androidx.compose.ui.platform.LocalContext.current.applicationContext
-            TrailersScreen(
-                repository = repository,
-                onPlay = { req ->
-                    repository.pendingPlayback = req
-                    // Mini floating player (mobile); TV falls back to the full player.
-                    val mini = trailerMini
-                    if (mini != null) {
-                        mini.play(ctx, req)
-                    } else {
-                        navController.navigate(Routes.TRAILER_PLAYER)
-                    }
-                },
-                onGoToAddons = { navController.navigate(Routes.ADDONS) }
-            )
-        }
         composable(Routes.TRAILER_PLAYER) {
             TrailerPlayerScreen(
                 repository = repository,
@@ -530,6 +561,7 @@ private fun PulseNavGraph(
                 onGoToPlayback = { navController.navigate(Routes.PLAYBACK_SETTINGS) },
                 onGoToSubtitles = { navController.navigate(Routes.SUBTITLE_SETTINGS) },
                 onGoToAppearance = { navController.navigate(Routes.APPEARANCE_SETTINGS) },
+                onGoToStreams = { navController.navigate(Routes.STREAMS_SETTINGS) },
                 onGoToAbout = { navController.navigate(Routes.ABOUT) },
                 onGoToAccount = { navController.navigate(Routes.ACCOUNT) }
             )
@@ -559,6 +591,12 @@ private fun PulseNavGraph(
                 onBack = { navController.popBackStack() }
             )
         }
+        composable(Routes.STREAMS_SETTINGS) {
+            StreamsSettingsScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
         composable(Routes.ABOUT) {
             AboutScreen(
                 onBack = { navController.popBackStack() },
@@ -578,6 +616,7 @@ private fun PulseNavGraph(
                 navArgument("metaId") { type = NavType.StringType }
             )
         ) { entry ->
+            val trailerCtx = androidx.compose.ui.platform.LocalContext.current.applicationContext
             DetailScreen(
                 repository = repository,
                 addonId = Routes.dec(entry.arguments!!.getString("addonId")!!),
@@ -585,8 +624,40 @@ private fun PulseNavGraph(
                 metaId = Routes.dec(entry.arguments!!.getString("metaId")!!),
                 onBack = { navController.popBackStack() },
                 onPlay = { navController.navigate(Routes.PLAYER) },
+                onPlayTrailer = { req ->
+                    repository.pendingPlayback = req
+                    // Mini floating player (mobile); TV falls back to the full player.
+                    val mini = trailerMini
+                    if (mini != null) {
+                        mini.play(trailerCtx, req)
+                    } else {
+                        navController.navigate(Routes.TRAILER_PLAYER)
+                    }
+                },
                 onOpenDetail = { relatedAddonId, relatedType, relatedMetaId ->
                     navController.navigate(Routes.detail(relatedAddonId, relatedType, relatedMetaId))
+                },
+                onOpenActor = { personId ->
+                    navController.navigate("actor/$personId")
+                }
+            )
+        }
+        composable(
+            Routes.ACTOR,
+            arguments = listOf(
+                androidx.navigation.navArgument("personId") {
+                    type = androidx.navigation.NavType.IntType
+                }
+            )
+        ) { entry ->
+            ActorScreen(
+                repository = repository,
+                personId = entry.arguments!!.getInt("personId"),
+                onBack = { navController.popBackStack() },
+                onOpenDetail = { type, metaId ->
+                    // PlavioMeta addon id — detail resolves meta/streams from
+                    // any capable addon via the base-URL hint chain.
+                    navController.navigate(Routes.detail("community.plaviometa", type, metaId))
                 }
             )
         }
