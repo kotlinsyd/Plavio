@@ -4,8 +4,12 @@ import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -41,13 +46,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
@@ -64,7 +72,9 @@ import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 /**
  * YouTube-style trailer player: portrait layout with the 16:9 video on top
@@ -73,14 +83,21 @@ import java.util.concurrent.TimeUnit
  *
  * When [externalPlayer] is supplied (mini floating player), it is reused and
  * never released here — the [TrailerMiniController] owns it.
+ *
+ * [request] overrides `repository.pendingPlayback` (used by the app-level
+ * floating overlay). [onSwipeDown], when supplied, is invoked on a downward
+ * swipe over the video — the overlay uses it to collapse into the mini
+ * player.
  */
 @Composable
 fun TrailerPlayerScreen(
     repository: StreamRepository,
     onBack: () -> Unit,
-    externalPlayer: ExoPlayer? = null
+    externalPlayer: ExoPlayer? = null,
+    request: PlaybackRequest? = null,
+    onSwipeDown: (() -> Unit)? = null
 ) {
-    val req = repository.pendingPlayback
+    val req = request ?: repository.pendingPlayback
     if (req == null || !req.isTrailer) {
         // Nothing to play — bail out rather than showing a dead screen.
         LaunchedEffect(Unit) { onBack() }
@@ -91,13 +108,6 @@ fun TrailerPlayerScreen(
     val activity = context as? Activity
     val palette = LocalPalette.current
 
-    var isFullscreen by remember { mutableStateOf(false) }
-    var showControls by remember { mutableStateOf(true) }
-    var isPlaying by remember { mutableStateOf(true) }
-    var isBuffering by remember { mutableStateOf(true) }
-    var positionMs by remember { mutableLongStateOf(0L) }
-    var durationMs by remember { mutableLongStateOf(0L) }
-
     val player = externalPlayer ?: remember(req.streamUrl) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(req.streamUrl))
@@ -106,6 +116,24 @@ fun TrailerPlayerScreen(
         }
     }
     val ownsPlayer = externalPlayer == null
+
+    var isFullscreen by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }
+    var isPlaying by remember { mutableStateOf(true) }
+    // Initialize from the player's ACTUAL state: with the shared mini-player
+    // the player may already be READY/playing when this listener attaches, in
+    // which case no state transition ever fires and a hardcoded `true` would
+    // leave the spinner running forever over a playing video.
+    var isBuffering by remember {
+        mutableStateOf(player.playbackState == Player.STATE_BUFFERING)
+    }
+    var positionMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+
+    // Swipe-down-to-minimize: drag offset applied to the video box only.
+    val swipeScope = rememberCoroutineScope()
+    val swipeOffsetY = remember { Animatable(0f) }
+    val swipeEnabled = onSwipeDown != null
 
     // System back minimizes to the floating player (YouTube behavior).
     BackHandler(onBack = onBack)
@@ -216,6 +244,40 @@ fun TrailerPlayerScreen(
                         .fillMaxWidth()
                         .aspectRatio(16f / 9f)
                         .background(Color.Black)
+                        .offset { IntOffset(0, swipeOffsetY.value.roundToInt()) }
+                        .then(
+                            if (swipeEnabled && !isFullscreen) {
+                                Modifier.pointerInput(onSwipeDown) {
+                                    detectVerticalDragGestures(
+                                        onDragEnd = {
+                                            swipeScope.launch {
+                                                if (swipeOffsetY.value > 200f) {
+                                                    // Past the threshold: collapse into the mini
+                                                    // player. The offset is left as-is — the
+                                                    // overlay's exit animation continues the
+                                                    // downward motion, and state resets on
+                                                    // the next open.
+                                                    onSwipeDown?.invoke()
+                                                } else {
+                                                    swipeOffsetY.animateTo(
+                                                        0f,
+                                                        tween(250, easing = FastOutSlowInEasing)
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onVerticalDrag = { _, dragAmount ->
+                                            swipeScope.launch {
+                                                swipeOffsetY.snapTo(
+                                                    (swipeOffsetY.value + dragAmount)
+                                                        .coerceIn(0f, 700f)
+                                                )
+                                            }
+                                        }
+                                    )
+                                }
+                            } else Modifier
+                        )
                         .clickable { showControls = !showControls }
                 ) {
                     TrailerVideoView(player, Modifier.fillMaxSize())
@@ -263,6 +325,15 @@ fun TrailerPlayerScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                    // Full title details (TMDB via PlavioMeta) under the player.
+                    if (req.metaId.isNotBlank()) {
+                        Spacer(Modifier.height(16.dp))
+                        TrailerMetaDetails(
+                            repository = repository,
+                            type = req.type,
+                            metaId = req.metaId
+                        )
+                    }
                 }
             }
         }
@@ -286,6 +357,101 @@ private fun TrailerVideoView(player: ExoPlayer, modifier: Modifier = Modifier) {
         update = { pv -> pv.player = player },
         modifier = modifier
     )
+}
+
+/**
+ * Full title details under the portrait trailer player, fetched from
+ * PlavioMeta (same pipeline as the detail screens). Shows poster, title,
+ * year/rating/type, genres and overview. Note: the meta model carries no
+ * cast list, so cast is omitted.
+ */
+@Composable
+private fun TrailerMetaDetails(
+    repository: StreamRepository,
+    type: String,
+    metaId: String
+) {
+    var meta by remember(metaId) { mutableStateOf<com.pulsestream.app.data.MetaDetail?>(null) }
+    var loading by remember(metaId) { mutableStateOf(true) }
+    LaunchedEffect(metaId) {
+        loading = true
+        meta = runCatching {
+            repository.getMetaFromAny(null, type, metaId)
+        }.getOrNull()
+        loading = false
+    }
+    if (loading) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator(
+                color = LocalPalette.current.accent,
+                modifier = Modifier.size(28.dp),
+                strokeWidth = 3.dp
+            )
+        }
+        return
+    }
+    val m = meta ?: return
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.04f))
+            .padding(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            com.pulsestream.app.ui.components.SafePosterImage(
+                model = m.poster,
+                contentDescription = m.name,
+                modifier = Modifier
+                    .width(72.dp)
+                    .height(108.dp)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = m.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Spacer(Modifier.height(4.dp))
+                val info = listOfNotNull(
+                    m.releaseInfo?.take(4),
+                    m.imdbRating?.let { "★ $it" },
+                    m.type.replaceFirstChar { it.uppercase() }
+                ).joinToString(" · ")
+                if (info.isNotBlank()) {
+                    Text(
+                        text = info,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+                if (m.genres.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = m.genres.take(4).joinToString(", "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+        }
+        if (!m.description.isNullOrBlank()) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = m.description!!,
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextPrimary.copy(alpha = 0.85f)
+            )
+        }
+    }
 }
 
 @Composable

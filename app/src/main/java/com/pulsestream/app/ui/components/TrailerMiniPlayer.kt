@@ -5,9 +5,11 @@ import android.view.ViewGroup
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,7 +24,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -30,6 +34,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
@@ -39,16 +45,25 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.pulsestream.app.data.PlaybackRequest
 import com.pulsestream.app.ui.theme.GlassBorder
+import kotlinx.coroutines.delay
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
- * App-level mini trailer player (YouTube-style): one trailer at a time,
- * floats above all tabs. The ExoPlayer instance is shared with the full
- * [TrailerPlayerScreen] so expanding never restarts playback.
+ * App-level trailer player (YouTube-style): one trailer at a time,
+ * floats above all tabs. The ExoPlayer instance is shared between the
+ * full portrait layer and the mini player so expanding/minimizing never
+ * restarts playback.
+ *
+ * Flow: tap card -> [Full] (slides up) -> swipe down/back -> [Mini]
+ * (corner, grid still usable) -> tap mini -> [Full] again -> X -> [Hidden].
  */
+enum class TrailerPlayerState { Hidden, Mini, Full }
+
 class TrailerMiniController {
     var request by mutableStateOf<PlaybackRequest?>(null)
         private set
-    var minimized by mutableStateOf(false)
+    var playerState by mutableStateOf(TrailerPlayerState.Hidden)
         private set
     var player: ExoPlayer? = null
         private set
@@ -63,22 +78,23 @@ class TrailerMiniController {
             playWhenReady = true
             prepare()
         }
-        minimized = true
+        // Opens straight into the full portrait layer (not the corner mini).
+        playerState = TrailerPlayerState.Full
     }
 
     fun expand() {
-        if (request != null) minimized = false
+        if (request != null) playerState = TrailerPlayerState.Full
     }
 
     fun minimize() {
-        if (request != null) minimized = true
+        if (request != null) playerState = TrailerPlayerState.Mini
     }
 
     fun stop() {
         player?.release()
         player = null
         request = null
-        minimized = false
+        playerState = TrailerPlayerState.Hidden
     }
 }
 
@@ -91,10 +107,23 @@ fun MiniTrailerOverlay(
 ) {
     val req = controller.request
     val player = controller.player
-    if (!controller.minimized || req == null || player == null) return
+    if (controller.playerState != TrailerPlayerState.Mini || req == null || player == null) return
 
     var isPlaying by remember(player) { mutableStateOf(player.isPlaying) }
-    var isBuffering by remember(player) { mutableStateOf(true) }
+    // Same shared-player caveat as the full screen: initialize from the real
+    // playback state, or the spinner never clears on minimize.
+    var isBuffering by remember(player) {
+        mutableStateOf(player.playbackState == Player.STATE_BUFFERING)
+    }
+
+    // Delay attaching the player so the collapsing full layer keeps its
+    // video during the transition — the handoff then looks seamless.
+    var attachPlayer by remember(player) { mutableStateOf(false) }
+    LaunchedEffect(player) {
+        delay(180)
+        attachPlayer = true
+    }
+
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing }
@@ -110,6 +139,9 @@ fun MiniTrailerOverlay(
         onDispose { player.removeListener(listener) }
     }
 
+    // Swipe-away to close (X button also works).
+    var dismissX by remember { mutableFloatStateOf(0f) }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -120,6 +152,18 @@ fun MiniTrailerOverlay(
             modifier = Modifier
                 .width(200.dp)
                 .aspectRatio(16f / 9f)
+                .offset { IntOffset(dismissX.roundToInt(), 0) }
+                .pointerInput(player) {
+                    detectHorizontalDragGestures(
+                        onHorizontalDrag = { _, dragAmount ->
+                            dismissX = (dismissX + dragAmount).coerceIn(-400f, 400f)
+                        },
+                        onDragEnd = {
+                            if (abs(dismissX) > 120f) controller.stop()
+                            dismissX = 0f
+                        }
+                    )
+                }
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color.Black)
                 .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
@@ -128,7 +172,7 @@ fun MiniTrailerOverlay(
             AndroidView(
                 factory = { ctx ->
                     PlayerView(ctx).also { pv ->
-                        pv.player = player
+                        pv.player = if (attachPlayer) player else null
                         pv.useController = false
                         pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         pv.layoutParams = ViewGroup.LayoutParams(
@@ -137,7 +181,7 @@ fun MiniTrailerOverlay(
                         )
                     }
                 },
-                update = { pv -> pv.player = player },
+                update = { pv -> pv.player = if (attachPlayer) player else null },
                 modifier = Modifier.fillMaxSize()
             )
             // Close (top-end).
