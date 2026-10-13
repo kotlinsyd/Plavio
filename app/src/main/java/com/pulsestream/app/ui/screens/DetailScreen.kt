@@ -3,6 +3,8 @@ package com.pulsestream.app.ui.screens
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.ui.res.painterResource
+import com.pulsestream.app.R
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
@@ -657,18 +659,50 @@ private fun DetailContent(
                     }
                 }
                 Spacer(Modifier.width(10.dp))
-                IconButton(
-                    onClick = { sourcePickerOpen = true },
-                    modifier = Modifier
-                        .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(50))
-                        .border(1.dp, GlassBorder, RoundedCornerShape(50))
-                        .tvFocusRing(RoundedCornerShape(50))
-                ) {
-                    Icon(
-                        Icons.Filled.FormatListBulleted,
-                        contentDescription = "Choose source manually",
-                        tint = TextPrimary
-                    )
+                // Source button: server icon with a thin circular loading ring.
+                // Ring circles in white while streams load; turns full + theme
+                // accent once loading completes.
+                run {
+                    val palette = LocalPalette.current
+                    val isLoading = vm.streamsState is StreamsUiState.Loading
+                    val isLoaded = vm.streamsState is StreamsUiState.Content
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier.size(52.dp)
+                    ) {
+                        if (isLoading) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                color = Color.White.copy(alpha = 0.7f),
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(52.dp)
+                            )
+                        } else if (isLoaded) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                progress = { 1f },
+                                color = palette.accent,
+                                strokeWidth = 2.dp,
+                                trackColor = Color.Transparent,
+                                modifier = Modifier.size(52.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = { sourcePickerOpen = true },
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(50))
+                                .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                                .tvFocusRing(RoundedCornerShape(50))
+                        ) {
+                            Icon(
+                                painter = androidx.compose.ui.res.painterResource(
+                                    id = R.drawable.ic_source_server
+                                ),
+                                contentDescription = "Choose source manually",
+                                tint = TextPrimary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
                 }
                 Spacer(Modifier.width(10.dp))
                 IconButton(
