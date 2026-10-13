@@ -129,4 +129,15 @@ class StremioApi {
     /** Dedicated subtitles endpoint, e.g. {base}/subtitles/movie/tt1234567.json. */
     suspend fun fetchSubtitles(baseUrl: String, type: String, imdbId: String): List<Subtitle> =
         StremioParser.parseSubtitles(get(endpoint(baseUrl, "subtitles", type, imdbId)))
+
+    /**
+     * PlavioMeta related sections, e.g. {base}/related/movie/tt1234567.json.
+     * Keyless mode returns no sections — the caller shows nothing then.
+     */
+    suspend fun fetchRelated(baseUrl: String, type: String, id: String): List<RelatedSection> =
+        StremioParser.parseRelated(get(endpoint(baseUrl, "related", type, id)), type)
+
+    /** PlavioMeta person filmography, e.g. {base}/person/123.json. */
+    suspend fun fetchPerson(baseUrl: String, personId: Int): PersonDetail? =
+        StremioParser.parsePerson(get(endpoint(baseUrl, "person", personId.toString())))
 }

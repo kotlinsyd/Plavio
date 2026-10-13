@@ -59,6 +59,22 @@ data class Video(
     val released: String? = null
 )
 
+/** A cast member: TMDB person id (0 when unknown, e.g. keyless Cinemeta), name and photo. */
+data class CastMember(
+    val id: Int = 0,
+    val name: String,
+    val photo: String? = null
+)
+
+/** Actor filmography from PlavioMeta /person. */
+data class PersonDetail(
+    val id: Int,
+    val name: String,
+    val photo: String?,
+    val movies: List<MetaPreview>,
+    val series: List<MetaPreview>
+)
+
 /** A YouTube trailer reference from an addon's meta (PlavioMeta `trailerStreams`). */
 data class TrailerStream(
     val title: String,
@@ -78,7 +94,9 @@ data class MetaDetail(
     val genres: List<String> = emptyList(),
     val videos: List<Video> = emptyList(),
     /** YouTube trailers (PlavioMeta `trailerStreams`); empty when the addon provides none. */
-    val trailerStreams: List<TrailerStream> = emptyList()
+    val trailerStreams: List<TrailerStream> = emptyList(),
+    /** Top-billed cast (PlavioMeta; names only in keyless/Cinemeta mode). */
+    val cast: List<CastMember> = emptyList()
 )
 
 data class StreamItem(

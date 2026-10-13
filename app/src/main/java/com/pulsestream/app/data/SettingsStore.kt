@@ -199,6 +199,24 @@ fun subtitleLangMatches(tag: String?, preferredCode: String): Boolean {
     return startsSubtag(normT, normP) || startsSubtag(normP, normT)
 }
 
+/** Quality buckets offered in Settings > Streams (canonical sort keys). */
+val QUALITY_ORDER_OPTIONS: List<String> = listOf("2160p", "1080p", "720p", "480p")
+
+/** Autoplay quality choices: "Auto" follows the quality order above. */
+val AUTOPLAY_QUALITY_OPTIONS: List<String> = listOf("Auto") + QUALITY_ORDER_OPTIONS
+
+/** Autoplay max-size choices (GB; 0 = no limit). */
+val AUTOPLAY_SIZE_OPTIONS: List<Pair<Int, String>> = listOf(
+    0 to "No limit",
+    2 to "Under 2 GB",
+    5 to "Under 5 GB",
+    10 to "Under 10 GB",
+    20 to "Under 20 GB"
+)
+
+fun autoplaySizeName(gb: Int): String =
+    AUTOPLAY_SIZE_OPTIONS.find { it.first == gb }?.second ?: if (gb <= 0) "No limit" else "Under $gb GB"
+
 /** Tiny SharedPreferences-backed store for user settings (no extra dependency). */
 class SettingsStore(context: Context) {
 
@@ -318,9 +336,9 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_AMOLED, false)
         set(value) = prefs.edit().putBoolean(KEY_AMOLED, value).apply()
 
-    /** Stream card visual style key (see StreamCardStyle in ui.components). Default: fusion. */
+    /** Stream badge pack key (see BadgeStyle in data). Default: black. */
     var streamCardStyle: String
-        get() = prefs.getString(KEY_CARD_STYLE, "fusion") ?: "fusion"
+        get() = prefs.getString(KEY_CARD_STYLE, "black") ?: "black"
         set(value) = prefs.edit().putString(KEY_CARD_STYLE, value).apply()
 
     /**
@@ -417,6 +435,52 @@ class SettingsStore(context: Context) {
         get() = prefs.getLong(KEY_HOME_REFRESHED_AT, 0L)
         set(value) = prefs.edit().putLong(KEY_HOME_REFRESHED_AT, value).apply()
 
+    // ------------------------------------------------------------------
+    // Streams section (v0.8.31+): per-source caps, quality order, autoplay.
+    // ------------------------------------------------------------------
+
+    /** Max streams shown per source addon in the stream picker (1–10). */
+    var streamsPerSource: Int
+        get() = prefs.getInt(KEY_STREAMS_PER_SOURCE, 5).coerceIn(1, 10)
+        set(value) = prefs.edit().putInt(KEY_STREAMS_PER_SOURCE, value.coerceIn(1, 10)).apply()
+
+    /**
+     * Quality sort priority for the stream picker, top = highest priority.
+     * Canonical buckets: "2160p", "1080p", "720p", "480p".
+     */
+    var qualityOrder: List<String>
+        get() {
+            val saved = prefs.getString(KEY_QUALITY_ORDER, null)
+                ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
+                ?: emptyList()
+            val valid = saved.filter { it in QUALITY_ORDER_OPTIONS }
+            return if (valid.isEmpty()) QUALITY_ORDER_OPTIONS else valid
+        }
+        set(value) = prefs.edit()
+            .putString(KEY_QUALITY_ORDER, value.filter { it in QUALITY_ORDER_OPTIONS }.joinToString(","))
+            .apply()
+
+    /**
+     * Stream autoplay: when ON, pressing Play auto-picks the first stream
+     * matching the quality priority + size rule instead of the probed best.
+     */
+    var streamAutoplay: Boolean
+        get() = prefs.getBoolean(KEY_STREAM_AUTOPLAY, false)
+        set(value) = prefs.edit().putBoolean(KEY_STREAM_AUTOPLAY, value).apply()
+
+    /** Preferred autoplay quality ("Auto" = follow qualityOrder, else a bucket). */
+    var autoplayQuality: String
+        get() = (prefs.getString(KEY_AUTOPLAY_QUALITY, "Auto") ?: "Auto")
+            .takeIf { it == "Auto" || it in QUALITY_ORDER_OPTIONS } ?: "Auto"
+        set(value) = prefs.edit()
+            .putString(KEY_AUTOPLAY_QUALITY, if (value == "Auto" || value in QUALITY_ORDER_OPTIONS) value else "Auto")
+            .apply()
+
+    /** Autoplay max file size in GB (0 = no limit). */
+    var autoplayMaxSizeGb: Int
+        get() = prefs.getInt(KEY_AUTOPLAY_MAX_SIZE, 0).coerceAtLeast(0)
+        set(value) = prefs.edit().putInt(KEY_AUTOPLAY_MAX_SIZE, value.coerceAtLeast(0)).apply()
+
     companion object {
         private const val KEY_AUTOPLAY = "autoplay"
         private const val KEY_AUTOPLAY_NEXT = "autoplay_next_episode"
@@ -444,5 +508,10 @@ class SettingsStore(context: Context) {
         private const val KEY_TRAKT_REFRESH = "trakt_refresh_token"
         private const val KEY_TRAKT_EXPIRY = "trakt_token_expiry"
         private const val KEY_TRAKT_USERNAME = "trakt_username"
+        private const val KEY_STREAMS_PER_SOURCE = "streams_per_source"
+        private const val KEY_QUALITY_ORDER = "quality_order"
+        private const val KEY_STREAM_AUTOPLAY = "stream_autoplay"
+        private const val KEY_AUTOPLAY_QUALITY = "autoplay_quality"
+        private const val KEY_AUTOPLAY_MAX_SIZE = "autoplay_max_size_gb"
     }
 }
