@@ -131,8 +131,33 @@ object StremioParser {
             poster = preview.poster, background = preview.background, logo = preview.logo,
             description = preview.description, releaseInfo = preview.releaseInfo,
             imdbRating = preview.imdbRating, genres = preview.genres, videos = videos,
-            trailerStreams = parseTrailers(meta)
+            trailerStreams = parseTrailers(meta), cast = parseCast(meta)
         )
+    }
+
+    /**
+     * Cast list. PlavioMeta (TMDB mode) serves objects [{id,name,photo}];
+     * keyless/Cinemeta mode serves plain name strings. Both are accepted;
+     * string entries get id=0 (filmography unavailable).
+     */
+    private fun parseCast(meta: JsonObject): List<CastMember> {
+        val arr = meta["cast"] as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { el ->
+            when (el) {
+                is JsonObject -> {
+                    val name = el.str("name") ?: return@mapNotNull null
+                    CastMember(
+                        id = (el["id"] as? JsonPrimitive)?.intOrNull ?: 0,
+                        name = name,
+                        photo = el.str("photo")
+                    )
+                }
+                is JsonPrimitive -> el.contentOrNull?.takeIf { it.isNotBlank() }?.let {
+                    CastMember(name = it)
+                }
+                else -> null
+            }
+        }.take(12)
     }
 
     /**
@@ -185,5 +210,43 @@ object StremioParser {
             val url = s.str("url") ?: return@mapNotNull null
             Subtitle(url = url, lang = s.str("lang") ?: "und")
         } ?: emptyList()
+    }
+
+    /** Parses PlavioMeta /related/{type}/{id}.json: { sections: [{id,title,metas}] }. */
+    fun parseRelated(text: String, fallbackType: String): List<RelatedSection> {
+        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
+            ?: return emptyList()
+        return ((obj["sections"] as? JsonArray) ?: return emptyList()).mapNotNull { el ->
+            val s = el as? JsonObject ?: return@mapNotNull null
+            val title = s.str("title") ?: return@mapNotNull null
+            val metas = ((s["metas"] as? JsonArray) ?: JsonArray(emptyList())).mapNotNull { m ->
+                (m as? JsonObject)?.let { parseMetaPreview(it, fallbackType) }
+            }
+            if (metas.isEmpty()) return@mapNotNull null
+            RelatedSection(
+                id = s.str("id") ?: title,
+                title = title,
+                metas = metas
+            )
+        }
+    }
+
+    /** Parses PlavioMeta /person/{id}.json: { person, movies, series }. */
+    fun parsePerson(text: String): PersonDetail? {
+        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
+            ?: return null
+        val p = obj["person"] as? JsonObject ?: return null
+        val name = p.str("name") ?: return null
+        fun metas(key: String, type: String): List<MetaPreview> =
+            ((obj[key] as? JsonArray) ?: JsonArray(emptyList())).mapNotNull { m ->
+                (m as? JsonObject)?.let { parseMetaPreview(it, type) }
+            }
+        return PersonDetail(
+            id = (p["id"] as? JsonPrimitive)?.intOrNull ?: 0,
+            name = name,
+            photo = p.str("photo"),
+            movies = metas("movies", "movie"),
+            series = metas("series", "series")
+        )
     }
 }

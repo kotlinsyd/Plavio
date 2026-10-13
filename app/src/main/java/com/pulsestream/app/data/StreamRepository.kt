@@ -716,6 +716,31 @@ class StreamRepository(
     }
 
     /**
+     * PlavioMeta base URL (the user's configured URL when they set a TMDB
+     * key). Powers /related and /person, which need TMDB server-side.
+     */
+    suspend fun plavioMetaBaseUrl(): String? = withContext(Dispatchers.IO) {
+        enabledAddons().firstOrNull { isPlavioMeta(it) }?.baseUrl
+    }
+
+    /** "More like this" sections for a title; empty when unavailable/keyless. */
+    suspend fun getRelated(type: String, id: String): List<RelatedSection> =
+        withContext(Dispatchers.IO) {
+            val base = plavioMetaBaseUrl() ?: return@withContext emptyList()
+            withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
+                runCatching { api.fetchRelated(base, type, id) }.getOrNull()
+            } ?: emptyList()
+        }
+
+    /** Actor filmography; null when unavailable/keyless. */
+    suspend fun getPerson(personId: Int): PersonDetail? = withContext(Dispatchers.IO) {
+        val base = plavioMetaBaseUrl() ?: return@withContext null
+        withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
+            runCatching { api.fetchPerson(base, personId) }.getOrNull()
+        }
+    }
+
+    /**
      * Real Stremio behavior: metadata may live in a different addon than the
      * catalog the title was found in. Try every meta-capable addon in turn
      * until one returns details.
