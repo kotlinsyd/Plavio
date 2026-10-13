@@ -202,7 +202,7 @@ object BadgePacks {
      * Matches badge filters against the stream's title/name text.
      * Badges are ordered by group, then by pack order; capped at [max].
      */
-    fun match(pack: BadgePack, stream: StreamItem, max: Int = 8): List<BadgeFilter> {
+    fun match(pack: BadgePack, stream: StreamItem, max: Int = 5): List<BadgeFilter> {
         val haystack = listOfNotNull(stream.title, stream.name).joinToString("\n")
         if (haystack.isBlank()) return emptyList()
         return pack.filters

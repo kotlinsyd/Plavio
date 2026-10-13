@@ -101,12 +101,12 @@ class HomeViewModel(private val repo: StreamRepository) : ViewModel() {
     fun load(forceRefresh: Boolean = false) {
         viewModelScope.launch {
             if (!forceRefresh) {
-                val cached = repo.loadCatalogRowsCached()
+                val cached = repo.loadCatalogRowsCached().filter { it.type != "tv" }
                 if (cached.isNotEmpty()) {
                     val stale = !repo.isCatalogCacheFresh()
                     uiState = HomeUiState.Content(cached, refreshing = stale)
                     if (stale) {
-                        runCatching { repo.refreshCatalogRows() }
+                        runCatching { repo.refreshCatalogRows().filter { it.type != "tv" } }
                             .onSuccess { uiState = HomeUiState.Content(it) }
                             .onFailure { uiState = HomeUiState.Content(cached) }
                     }
@@ -115,7 +115,9 @@ class HomeViewModel(private val repo: StreamRepository) : ViewModel() {
             }
             uiState = HomeUiState.Loading
             try {
-                val rows = repo.refreshCatalogRows()
+                // Live TV has its own tab — never show tv-type rows on Home
+                // (hero or cards).
+                val rows = repo.refreshCatalogRows().filter { it.type != "tv" }
                 uiState = if (rows.isEmpty()) HomeUiState.Empty else HomeUiState.Content(rows)
             } catch (e: Exception) {
                 uiState = HomeUiState.Error(e.message ?: "Couldn't load catalogs")
@@ -137,7 +139,7 @@ class HomeViewModel(private val repo: StreamRepository) : ViewModel() {
         if ((uiState as? HomeUiState.Content)?.refreshing == true) return
         viewModelScope.launch {
             uiState = HomeUiState.Content(current, refreshing = true)
-            runCatching { repo.refreshCatalogRows() }
+            runCatching { repo.refreshCatalogRows().filter { it.type != "tv" } }
                 .onSuccess { uiState = HomeUiState.Content(it) }
                 .onFailure { uiState = HomeUiState.Content(current) }
         }

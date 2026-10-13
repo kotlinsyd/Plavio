@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 62
-        versionName = "0.8.31"
+        versionCode = 63
+        versionName = "0.8.32"
     }
 
     buildTypes {
@@ -41,7 +41,7 @@ android {
             versionNameSuffix = "-tv"
             // TV's own version sequence (com.pulsestream.app.tv).
             versionCode = 61
-            versionName = "0.8.31"
+            versionName = "0.8.32"
             resValue("string", "app_name", "Plavio TV")
         }
     }

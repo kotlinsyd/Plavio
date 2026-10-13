@@ -373,7 +373,7 @@ fun StreamCard(
                     AsyncImage(
                         model = badge.imageUrl,
                         contentDescription = badge.name,
-                        modifier = Modifier.height(22.dp),
+                        modifier = Modifier.height(15.dp),
                         contentScale = ContentScale.FillHeight
                     )
                 }
