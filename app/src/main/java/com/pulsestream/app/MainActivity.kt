@@ -168,6 +168,28 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleAddonDeepLink(intent: Intent?) {
         if (intent == null) return
+        val dataString = intent.dataString ?: return
+        // stremio:// links (e.g. from "Install" buttons on addon pages):
+        // convert to https:// manifest URL and add directly.
+        if (dataString.startsWith("stremio://", ignoreCase = true)) {
+            val manifestUrl = "https://" + dataString.removePrefix("stremio://").removePrefix("stremio://")
+            // Handle encoded URLs: stremio://addon/<encoded-url>
+            val cleanUrl = if (manifestUrl.contains("/addon/")) {
+                try {
+                    java.net.URLDecoder.decode(manifestUrl.substringAfter("/addon/"), "UTF-8")
+                } catch (_: Exception) {
+                    manifestUrl.substringAfter("/addon/")
+                }
+            } else {
+                manifestUrl
+            }
+            if (cleanUrl.startsWith("https://")) {
+                val app = applicationContext as PulseApp
+                // Store as pending manifest URL for AddonsScreen to pick up
+                app.repository.setPendingManifestUrl(cleanUrl)
+                return
+            }
+        }
         // Validates the link actually carries a decodable bundle.
         if (AddonShare.bundleFromIntent(intent).isNullOrEmpty()) return
         val link = intent.dataString ?: return
@@ -249,9 +271,10 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
     // flow isn't hijacked — the effect refires once the real destination
     // lands. Same nav options as the dock (single top, state kept).
     val pendingBundle by repository.pendingAddonBundle.collectAsState()
-    LaunchedEffect(pendingBundle, currentDestination) {
+    val pendingManifestUrl by repository.pendingManifestUrl.collectAsState()
+    LaunchedEffect(pendingBundle, pendingManifestUrl, currentDestination) {
         val route = currentDestination?.route
-        if (pendingBundle != null && route != null &&
+        if ((pendingBundle != null || pendingManifestUrl != null) && route != null &&
             route != Routes.SPLASH && route != Routes.ONBOARDING
         ) {
             navController.navigate(Routes.ADDONS) {

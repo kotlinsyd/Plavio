@@ -55,7 +55,6 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.pulsestream.app.data.BadgePack
 import com.pulsestream.app.data.BadgePacks
-import com.pulsestream.app.data.BadgeStyle
 import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.ui.theme.AppPalette
 import com.pulsestream.app.ui.theme.GlassBorder
