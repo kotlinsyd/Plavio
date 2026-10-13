@@ -727,6 +727,68 @@ private fun DetailContent(
                 Spacer(Modifier.height(8.dp))
             }
         }
+        // "Available Streams" capsule button — directly below Play, before episodes.
+        item {
+            Spacer(Modifier.height(8.dp))
+            val palette = LocalPalette.current
+            val streamCount = when (val s = vm.streamsState) {
+                is StreamsUiState.Content -> s.streams.size
+                else -> null
+            }
+            val isLoading = vm.streamsState is StreamsUiState.Loading
+            Button(
+                onClick = { sourcePickerOpen = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .height(56.dp)
+                    .tvFocusRing(RoundedCornerShape(28.dp)),
+                shape = RoundedCornerShape(28.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.White.copy(alpha = 0.08f)
+                ),
+                border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
+                contentPadding = PaddingValues(horizontal = 20.dp)
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_bolt),
+                    contentDescription = null,
+                    tint = TextPrimary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "Available Streams",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = TextPrimary,
+                    modifier = Modifier.weight(1f)
+                )
+                if (isLoading) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        color = TextPrimary,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(20.dp)
+                    )
+                } else {
+                    Text(
+                        text = streamCount?.toString() ?: "—",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = palette.accent
+                    )
+                }
+            }
+            if (vm.streamsState is StreamsUiState.Error) {
+                Text(
+                    (vm.streamsState as StreamsUiState.Error).message,
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+        }
         if (isSeries) {
             item {
                 Text("Seasons", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = TextPrimary, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
@@ -794,69 +856,6 @@ private fun DetailContent(
                     }
                 }
             }
-        }
-        // "Available Streams" capsule button — opens the source picker.
-        // Replaces the old inline stream list.
-        item {
-            Spacer(Modifier.height(8.dp))
-            val palette = LocalPalette.current
-            val streamCount = when (val s = vm.streamsState) {
-                is StreamsUiState.Content -> s.streams.size
-                else -> null
-            }
-            val isLoading = vm.streamsState is StreamsUiState.Loading
-            Button(
-                onClick = { sourcePickerOpen = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .height(56.dp)
-                    .tvFocusRing(RoundedCornerShape(28.dp)),
-                shape = RoundedCornerShape(28.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White.copy(alpha = 0.08f)
-                ),
-                border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
-                contentPadding = PaddingValues(horizontal = 20.dp)
-            ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.ic_bolt),
-                    contentDescription = null,
-                    tint = TextPrimary,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    text = "Available Streams",
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = TextPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-                if (isLoading) {
-                    androidx.compose.material3.CircularProgressIndicator(
-                        color = TextPrimary,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(20.dp)
-                    )
-                } else {
-                    Text(
-                        text = streamCount?.toString() ?: "—",
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = palette.accent
-                    )
-                }
-            }
-            if (vm.streamsState is StreamsUiState.Error) {
-                Text(
-                    (vm.streamsState as StreamsUiState.Error).message,
-                    color = TextSecondary,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-            }
-            Spacer(Modifier.height(8.dp))
         }
         // "More like this" + "More from <actor>" rows from PlavioMeta.
         // Quietly absent when the endpoint has nothing (e.g. keyless mode).
