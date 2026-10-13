@@ -83,6 +83,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -123,8 +124,9 @@ fun SettingsScreen(
     onGoToAccount: () -> Unit = {}
 ) {
     val settings = repository.settings
+    val context = LocalContext.current
     var badgeStyleKey by remember { mutableStateOf(settings.streamCardStyle) }
-    val badgeStyleLabel = BadgePacks.labelForKey(LocalContext.current, badgeStyleKey)
+    val badgeStyleLabel = BadgePacks.labelForKey(context, badgeStyleKey)
     var showBadgeStyleDialog by remember { mutableStateOf(false) }
 
     if (showBadgeStyleDialog) {
@@ -146,7 +148,7 @@ fun SettingsScreen(
         ) {
             item {
                 Text(
-                    text = "Settings",
+                    text = stringResource(R.string.settings_title),
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary,
@@ -154,64 +156,46 @@ fun SettingsScreen(
                 )
             }
 
-            // ---- Playback ----
-            item { SettingsSectionHeader("Playback") }
+            // ---- Playback: everything that affects how video plays ----
+            item { SettingsSectionHeader(stringResource(R.string.settings_section_playback)) }
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.PlayArrow,
-                    title = "Playback",
-                    subtitle = "Autoplay, next episode, screen, skip intro, audio",
+                    title = stringResource(R.string.settings_playback_title),
+                    subtitle = stringResource(R.string.settings_playback_sub),
                     onClick = onGoToPlayback
                 )
             }
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.VideoLibrary,
-                    title = "Streams",
-                    subtitle = "Source limits, quality order, autoplay rule",
+                    title = stringResource(R.string.settings_streams_title),
+                    subtitle = stringResource(R.string.settings_streams_sub),
                     onClick = onGoToStreams
                 )
             }
-
-            // ---- Subtitles ----
-            item { SettingsSectionHeader("Subtitles") }
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.ClosedCaption,
-                    title = "Subtitles",
-                    subtitle = "Preferred languages and appearance",
+                    title = stringResource(R.string.settings_subtitles_title),
+                    subtitle = stringResource(R.string.settings_subtitles_sub),
                     onClick = onGoToSubtitles
                 )
             }
 
-            // ---- Appearance ----
-            item { SettingsSectionHeader("Appearance") }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Contrast,
-                    title = "Appearance",
-                    subtitle = "Accent color and AMOLED black",
-                    onClick = onGoToAppearance
-                )
-            }
-            item(key = "badgestyle") {
-                SettingsNavRow(
-                    icon = Icons.Filled.Style,
-                    title = "Stream Badges",
-                    subtitle = badgeStyleLabel,
-                    onClick = { showBadgeStyleDialog = true }
-                )
-            }
-
-            // ---- Content & Language ----
-            item { SettingsSectionHeader("Content & Language") }
+            // ---- Content: addons and home catalogs ----
+            item { SettingsSectionHeader(stringResource(R.string.settings_section_content)) }
             item {
                 val installedAddons by repository.addons.collectAsState(initial = emptyList())
                 val enabledAddons = remember(installedAddons) { installedAddons.count { it.enabled } }
                 SettingsStaticRow(
                     icon = Icons.Filled.Extension,
-                    title = "Manage addons",
-                    subtitle = "${installedAddons.size} installed • $enabledAddons enabled",
+                    title = stringResource(R.string.settings_addons_title),
+                    subtitle = stringResource(
+                        R.string.settings_addons_sub,
+                        installedAddons.size,
+                        enabledAddons
+                    ),
                     trailing = {
                         Icon(
                             Icons.Filled.ChevronRight,
@@ -225,38 +209,56 @@ fun SettingsScreen(
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.GridView,
-                    title = "Home catalogs",
-                    subtitle = "Choose and arrange catalogs on the Home screen",
+                    title = stringResource(R.string.settings_home_catalogs_title),
+                    subtitle = stringResource(R.string.settings_home_catalogs_sub),
                     onClick = onGoToHomeCatalogs
                 )
             }
 
+            // ---- Appearance ----
+            item { SettingsSectionHeader(stringResource(R.string.settings_section_appearance)) }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Contrast,
+                    title = stringResource(R.string.settings_appearance_title),
+                    subtitle = stringResource(R.string.settings_appearance_sub),
+                    onClick = onGoToAppearance
+                )
+            }
+            item(key = "badgestyle") {
+                SettingsNavRow(
+                    icon = Icons.Filled.Style,
+                    title = stringResource(R.string.settings_badges_title),
+                    subtitle = badgeStyleLabel,
+                    onClick = { showBadgeStyleDialog = true }
+                )
+            }
             // ---- Account ----
-            item { SettingsSectionHeader("Account") }
+            item { SettingsSectionHeader(stringResource(R.string.settings_section_account)) }
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.Person,
-                    title = "Account",
-                    subtitle = "Trakt and Simkl sync",
+                    title = stringResource(R.string.settings_account_title),
+                    subtitle = stringResource(R.string.settings_account_sub),
                     onClick = onGoToAccount
                 )
             }
 
             // ---- About ----
-            item { SettingsSectionHeader("About") }
+            item { SettingsSectionHeader(stringResource(R.string.settings_section_about)) }
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.Info,
-                    title = "About",
-                    subtitle = "Version, website and app updates",
+                    title = stringResource(R.string.settings_about_title),
+                    subtitle = stringResource(R.string.settings_about_sub),
                     onClick = onGoToAbout
                 )
             }
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.Feedback,
-                    title = "Send Feedback",
-                    subtitle = "Report a bug or request a feature",
+                    title = stringResource(R.string.settings_feedback_title),
+                    subtitle = stringResource(R.string.settings_feedback_sub),
                     onClick = onGoToFeedback
                 )
             }
@@ -274,7 +276,7 @@ fun SettingsScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "Made with ❤️ by Najam",
+                        text = stringResource(R.string.settings_credit),
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.SemiBold
                         ),
@@ -296,7 +298,11 @@ fun SettingsScreen(
                             Spacer(Modifier.width(6.dp))
                             val n = installCount!!
                             Text(
-                                text = "${"%,d".format(n)} ${if (n == 1) "install" else "installs"}",
+                                text = stringResource(
+                                    if (n == 1) R.string.settings_installs_one
+                                    else R.string.settings_installs_many,
+                                    "%,d".format(n)
+                                ),
                                 style = MaterialTheme.typography.labelLarge.copy(
                                     fontWeight = FontWeight.SemiBold
                                 ),
