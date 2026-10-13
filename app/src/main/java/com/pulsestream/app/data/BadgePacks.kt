@@ -9,24 +9,11 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 
 /**
- * Stream badge packs (v0.8.31+): image badges matched against a stream's
- * title via regex, in the style of modern streaming clients. Pack JSONs live
- * in app/src/main/assets/badges/.
+ * Stream badge packs: image badges matched against a stream's
+ * title via regex, in the style of modern streaming clients.
+ * Users provide their own packs via JSON file upload or URL import.
+ * Packs are stored in app-private storage.
  */
-enum class BadgeStyle(val key: String, val label: String, val assetFile: String) {
-    BLACK("black", "Black", "badges/black.json"),
-    MONO_WHITE("mono_white", "Mono White", "badges/mono_white.json"),
-    WHITE("white", "White", "badges/white.json"),
-    SOLID("solid", "Solid", "badges/solid.json"),
-    COLORED_OUTLINE("colored_outline", "Colored Outline", "badges/colored_outline.json"),
-    TINTED("tinted", "Tinted", "badges/tinted.json"),
-    CLASSIC("classic", "Classic", "badges/classic.json");
-
-    companion object {
-        fun fromKey(key: String?): BadgeStyle =
-            values().firstOrNull { it.key == key } ?: BLACK
-    }
-}
 
 /** One badge filter: regex-tested against the stream title. */
 data class BadgeFilter(
@@ -63,22 +50,14 @@ object BadgePacks {
     private fun JsonObject.str(key: String): String? =
         (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
 
-    /** Loads (and caches) a built-in pack from assets. Null when unreadable. */
-    fun load(context: Context, style: BadgeStyle): BadgePack? =
-        loadByKey(context, style.key)
-
-    /** Loads any pack by setting key (built-in key or "custom:<name>"). */
+    /** Loads a pack by key (custom pack key format: "custom:<name>"). */
     fun loadByKey(context: Context, key: String): BadgePack? {
         synchronized(cache) {
             if (cache.containsKey(key)) return cache[key]
         }
         val pack = runCatching {
             if (key.startsWith(CUSTOM_PREFIX)) loadCustom(context, key.removePrefix(CUSTOM_PREFIX))
-            else {
-                val style = BadgeStyle.fromKey(key)
-                val text = context.assets.open(style.assetFile).bufferedReader().use { it.readText() }
-                parsePack(text, style.key, style.label)
-            }
+            else null
         }.getOrNull()
         synchronized(cache) { cache[key] = pack }
         return pack
@@ -86,11 +65,8 @@ object BadgePacks {
 
     /** Display label for any pack key. */
     fun labelForKey(context: Context, key: String): String {
-        if (key.startsWith(CUSTOM_PREFIX)) {
-            return listCustomPacks(context).firstOrNull { it.key == key }?.name
-                ?: key.removePrefix(CUSTOM_PREFIX).replace('_', ' ')
-        }
-        return BadgeStyle.fromKey(key).label
+        return listCustomPacks(context).firstOrNull { it.key == key }?.name
+            ?: key.removePrefix(CUSTOM_PREFIX).replace('_', ' ')
     }
 
     // ---- Custom packs (app-private storage) ----
@@ -114,6 +90,26 @@ object BadgePacks {
         }
         if (usable == 0) return "No usable badges (each needs a pattern and an imageURL)."
         return null
+    }
+
+    /**
+     * Imports a custom pack from a URL.
+     * Returns null on success, else a user-facing error message.
+     * This is a suspend function — call from a coroutine.
+     */
+    suspend fun importCustomPackFromUrl(context: Context, url: String): String? {
+        val text = try {
+            val connection = java.net.URL(url).openConnection().apply {
+                connectTimeout = 15000
+                readTimeout = 15000
+                setRequestProperty("User-Agent", "Plavio/1.0")
+            }
+            connection.getInputStream().bufferedReader().use { it.readText() }
+        } catch (_: Exception) {
+            return "Couldn't download from that link. Check the URL and try again."
+        }
+        val fileName = url.substringAfterLast('/').substringBefore('?').ifBlank { "badge-pack.json" }
+        return importCustomPack(context, fileName, text)
     }
 
     /**

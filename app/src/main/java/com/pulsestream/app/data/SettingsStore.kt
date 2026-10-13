@@ -336,9 +336,9 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_AMOLED, false)
         set(value) = prefs.edit().putBoolean(KEY_AMOLED, value).apply()
 
-    /** Stream badge pack key (see BadgeStyle in data). Default: black. */
+    /** Stream badge pack key (custom pack "custom:<name>"). Empty = no badges. */
     var streamCardStyle: String
-        get() = prefs.getString(KEY_CARD_STYLE, "black") ?: "black"
+        get() = prefs.getString(KEY_CARD_STYLE, "") ?: ""
         set(value) = prefs.edit().putString(KEY_CARD_STYLE, value).apply()
 
     /**
