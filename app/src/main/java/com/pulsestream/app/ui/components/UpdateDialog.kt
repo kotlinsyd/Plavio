@@ -42,17 +42,31 @@ fun UpdatePrompt(
     onDismiss: () -> Unit
 ) {
     var downloading by remember(info) { mutableStateOf(false) }
+    // A failed download keeps the dialog open with the real error instead
+    // of dismissing silently (or launching the installer on garbage).
+    var downloadError by remember(info) { mutableStateOf<String?>(null) }
     val appContext = LocalContext.current.applicationContext
     if (info != null) {
         UpdateDialog(
             info = info,
             downloading = downloading,
+            error = downloadError,
             onUpdate = {
                 downloading = true
-                ApkInstaller.download(appContext, info.apkUrl, info.version) {
-                    downloading = false
-                    onDismiss()
-                }
+                downloadError = null
+                ApkInstaller.download(
+                    appContext,
+                    info.apkUrl,
+                    info.version,
+                    onDone = {
+                        downloading = false
+                        onDismiss()
+                    },
+                    onError = { message ->
+                        downloading = false
+                        downloadError = message
+                    }
+                )
             },
             onLater = {
                 UpdateChecker.skip(appContext, info.version)
@@ -67,6 +81,7 @@ fun UpdatePrompt(
 fun UpdateDialog(
     info: UpdateInfo,
     downloading: Boolean,
+    error: String? = null,
     onUpdate: () -> Unit,
     onLater: () -> Unit
 ) {
@@ -106,6 +121,15 @@ fun UpdateDialog(
                 Spacer(Modifier.height(8.dp))
                 if (downloading) {
                     CircularProgressIndicator(color = LocalPalette.current.accent)
+                    Spacer(Modifier.height(8.dp))
+                }
+                if (error != null) {
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFFF6B6B),
+                        textAlign = TextAlign.Center
+                    )
                     Spacer(Modifier.height(8.dp))
                 }
                 Text(
