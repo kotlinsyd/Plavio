@@ -331,7 +331,7 @@ fun LiveScreen(
                     allRows.flatMap { row ->
                         row.items.filter { channelKey(row, it) in keys }
                             .map { row to it }
-                    }
+                    }.distinctBy { (row, meta) -> channelKey(row, meta) }
                 }
                 val recents = remember(allRows, favVersion) {
                     val keys = repository.settings.liveRecent
@@ -340,7 +340,7 @@ fun LiveScreen(
                             row.items.firstOrNull { channelKey(row, it) == key }
                                 ?.let { row to it }
                         }
-                    }
+                    }.distinctBy { (row, meta) -> channelKey(row, meta) }
                 }
                 // Flat visible list for the player zapping handoff.
                 val flatList = remember(visibleRows, favorites, recents) {
