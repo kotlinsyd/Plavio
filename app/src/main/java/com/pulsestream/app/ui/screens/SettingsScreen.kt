@@ -31,7 +31,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrightnessHigh
+import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Contrast
@@ -121,7 +124,11 @@ fun SettingsScreen(
     onGoToStreams: () -> Unit = {},
     onGoToAbout: () -> Unit = {},
     onGoToFeedback: () -> Unit = {},
-    onGoToAccount: () -> Unit = {}
+    onGoToFeaturesGuide: () -> Unit = {},
+    onGoToDownloads: () -> Unit = {},
+    onGoToAccount: () -> Unit = {},
+    onGoToBackup: () -> Unit = {},
+    onGoToIntegrations: () -> Unit = {}
 ) {
     val settings = repository.settings
     val context = LocalContext.current
@@ -243,6 +250,22 @@ fun SettingsScreen(
                     onClick = onGoToAccount
                 )
             }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Backup,
+                    title = stringResource(R.string.settings_backup_title),
+                    subtitle = stringResource(R.string.settings_backup_sub),
+                    onClick = onGoToBackup
+                )
+            }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Link,
+                    title = "Integrations",
+                    subtitle = "TorBox debrid and more",
+                    onClick = onGoToIntegrations
+                )
+            }
 
             // ---- About ----
             item { SettingsSectionHeader(stringResource(R.string.settings_section_about)) }
@@ -260,6 +283,22 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_feedback_title),
                     subtitle = stringResource(R.string.settings_feedback_sub),
                     onClick = onGoToFeedback
+                )
+            }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Book,
+                    title = "Features Guide",
+                    subtitle = "Learn what Plavio can do",
+                    onClick = onGoToFeaturesGuide
+                )
+            }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.CloudDownload,
+                    title = "Downloads",
+                    subtitle = "Watch your downloaded videos offline",
+                    onClick = onGoToDownloads
                 )
             }
 
@@ -659,6 +698,13 @@ fun AboutCard() {
                     textAlign = TextAlign.Center
                 )
             }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "Made With ❤️ By KotlinSyyd",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                color = TextPrimary,
+                textAlign = TextAlign.Center
+            )
             Spacer(Modifier.height(20.dp))
         }
     }
