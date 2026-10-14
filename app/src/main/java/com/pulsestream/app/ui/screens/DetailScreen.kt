@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -90,6 +91,7 @@ import com.pulsestream.app.ui.components.StreamCard
 import com.pulsestream.app.ui.components.StreamList
 import com.pulsestream.app.ui.components.LocalBadgeStyleKey
 import com.pulsestream.app.ui.components.streamListItems
+import com.pulsestream.app.ui.components.DownloadConfirmDialog
 import com.pulsestream.app.ui.components.StreamTab
 import com.pulsestream.app.ui.components.addonKey
 import com.pulsestream.app.ui.components.rememberStreamBrowserState
@@ -138,6 +140,9 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
     var selectedSeason by mutableStateOf<Int?>(null)
         private set
     var selectedVideo by mutableStateOf<Video?>(null)
+        private set
+    /** Shuffle episodes (v0.9.0+): random pick instead of sequential. Backed by SettingsStore. */
+    var shuffleEpisodes by mutableStateOf(repo.settings.shuffleEpisodes)
         private set
     var autoPlayEvent by mutableStateOf<AutoPlay?>(null)
         private set
@@ -190,8 +195,23 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
         selectedSeason = season
         val episodes = meta.videos.filter { it.season == season }
             .sortedWith(compareBy({ it.episode }, { it.title }))
-        val first = episodes.firstOrNull()
-        if (first != null) selectEpisode(first)
+        val pick = if (shuffleEpisodes) episodes.randomOrNull() else episodes.firstOrNull()
+        if (pick != null) selectEpisode(pick)
+    }
+
+    /** Toggle shuffle mode; enabling it immediately jumps to a random episode. */
+    fun updateShuffle(enabled: Boolean) {
+        shuffleEpisodes = enabled
+        repo.settings.shuffleEpisodes = enabled
+        if (enabled) selectRandomEpisode()
+    }
+
+    /** Picks a random episode from the current season and selects it. */
+    fun selectRandomEpisode() {
+        val meta = (metaState as? MetaUiState.Content)?.meta ?: return
+        val episodes = meta.videos.filter { it.season == selectedSeason }
+        val pick = episodes.randomOrNull() ?: return
+        selectEpisode(pick)
     }
 
     fun selectEpisode(video: Video) {
@@ -235,10 +255,12 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
                 }
                 // v0.8.29 fix: transient failures (cold-start timeouts, dispatcher
                 // contention) could empty the first pass while a manual retry
-                // succeeded. Do one automatic retry before showing "no sources"
-                // so users never see a false empty state.
-                if (!gotAny) {
-                    kotlinx.coroutines.delay(1500)
+                // succeeded. Do automatic retries with backoff before showing
+                // "no sources" so users never see a false empty state.
+                var attempt = 0
+                while (!gotAny && attempt < 3) {
+                    attempt++
+                    kotlinx.coroutines.delay(1500L * attempt)
                     repo.streamResultsFlow(type, videoId).collect { result ->
                         if (result.streams.isNotEmpty()) {
                             gotAny = true
@@ -813,6 +835,27 @@ private fun DetailContent(
             }
             val episodes = meta.videos.filter { it.season == vm.selectedSeason }
                 .sortedWith(compareBy({ it.episode }, { it.title }))
+            item(key = "episodes_header") {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        "Episodes",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { vm.updateShuffle(!vm.shuffleEpisodes) }) {
+                        Icon(
+                            Icons.Filled.Shuffle,
+                            contentDescription = if (vm.shuffleEpisodes) "Shuffle on" else "Shuffle off",
+                            tint = if (vm.shuffleEpisodes) LocalPalette.current.accent else TextSecondary
+                        )
+                    }
+                }
+            }
             itemsIndexed(episodes, key = { index, video -> "${video.id}_$index" }) { _, video ->
                 val selected = vm.selectedVideo?.id == video.id
                 GlassCard(
@@ -890,6 +933,8 @@ private fun DetailContent(
     // The popup gets the full stream list and runs its own per-addon tabs
     // (the inline section below keeps the shared "All" browser state).
     val streamsContent = vm.streamsState as? StreamsUiState.Content
+    // Download confirmation dialog state
+    var downloadStream by remember { mutableStateOf<StreamItem?>(null) }
     SourcePickerPopup(
         visible = sourcePickerOpen,
         streams = allStreams,
@@ -902,8 +947,18 @@ private fun DetailContent(
             if (streamsContent != null) {
                 startPlayback(vm, repository, stream, streamsContent.subtitles, streamsContent.streams, onPlay)
             }
-        }
+        },
+        onDownload = { stream -> downloadStream = stream }
     )
+
+    // Download confirmation dialog
+    downloadStream?.let { stream ->
+        DownloadConfirmDialog(
+            stream = stream,
+            title = meta.name ?: "Video",
+            onDismiss = { downloadStream = null }
+        )
+    }
     } // CompositionLocalProvider (badge style)
 }
 
@@ -988,7 +1043,8 @@ private fun SourcePickerPopup(
     errorMessage: String?,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
-    onPick: (StreamItem) -> Unit
+    onPick: (StreamItem) -> Unit,
+    onDownload: ((StreamItem) -> Unit)? = null
 ) {
     val springy = androidx.compose.animation.core.spring<Float>(
         dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
@@ -1051,7 +1107,8 @@ private fun SourcePickerPopup(
                         errorMessage = errorMessage,
                         onDismiss = onDismiss,
                         onRetry = onRetry,
-                        onPick = onPick
+                        onPick = onPick,
+                        onDownload = onDownload
                     )
                 }
             }
@@ -1070,7 +1127,8 @@ private fun PickerCardBody(
     errorMessage: String?,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
-    onPick: (StreamItem) -> Unit
+    onPick: (StreamItem) -> Unit,
+    onDownload: ((StreamItem) -> Unit)? = null
 ) {
     val palette = LocalPalette.current
     val tabState = rememberPickerTabState(streams)
@@ -1186,7 +1244,8 @@ private fun PickerCardBody(
                     streams = tabState.filtered,
                     onPick = onPick,
                     modifier = Modifier.heightIn(max = 400.dp),
-                    contentPadding = PaddingValues(bottom = 12.dp)
+                    contentPadding = PaddingValues(bottom = 12.dp),
+                    onDownload = onDownload
                 )
             }
         }

@@ -1,7 +1,17 @@
 package com.pulsestream.app
 
+import android.app.PictureInPictureParams
+import android.app.PendingIntent
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
+import android.graphics.drawable.Icon
+import android.os.Build
 import android.os.Bundle
+import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -36,6 +46,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,10 +55,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.res.stringResource
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,6 +100,8 @@ import com.pulsestream.app.ui.screens.AddonsScreen
 import com.pulsestream.app.ui.screens.CatalogScreen
 import com.pulsestream.app.ui.screens.DetailScreen
 import com.pulsestream.app.ui.screens.FeedbackScreen
+import com.pulsestream.app.ui.screens.FeaturesGuideScreen
+import com.pulsestream.app.ui.screens.DownloadsScreen
 import com.pulsestream.app.ui.screens.HomeCatalogsScreen
 import com.pulsestream.app.ui.screens.PlaybackSettingsScreen
 import com.pulsestream.app.ui.screens.ActorScreen
@@ -102,6 +118,8 @@ import com.pulsestream.app.ui.components.TrailerMiniController
 import com.pulsestream.app.ui.components.TrailerPlayerState
 import com.pulsestream.app.ui.screens.TrailerPlayerScreen
 import com.pulsestream.app.ui.screens.WatchlistScreen
+import com.pulsestream.app.ui.screens.BackupScreen
+import com.pulsestream.app.ui.screens.IntegrationsScreen
 import com.pulsestream.app.ui.theme.AccentTheme
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.LocalPalette
@@ -117,10 +135,122 @@ import com.pulsestream.app.ui.tv.tvFocusRing
 import com.pulsestream.app.data.AnalyticsPing
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        /**
+         * True while the player screen is in the composition (set by
+         * PlayerScreen's DisposableEffect). Used by onUserLeaveHint to
+         * auto-enter PiP only when video is actually playing.
+         */
+        @Volatile
+        var isPlayerActive: Boolean = false
+
+        /**
+         * Current PiP mode, updated in onPictureInPictureModeChanged.
+         * PlayerScreen collects this to hide its overlay UI while floating.
+         */
+        val pipMode = MutableStateFlow(false)
+
+        /** Broadcast action for the PiP window's play/pause RemoteAction. */
+        const val ACTION_PIP_TOGGLE = "com.pulsestream.app.ACTION_PIP_TOGGLE"
+
+        /**
+         * Last known video dimensions, kept current by PlayerScreen's
+         * player listener. Used for the PiP aspect ratio when the user
+         * presses Home (onUserLeaveHint has no player access).
+         */
+        @Volatile
+        var pipVideoW: Int = 16
+
+        @Volatile
+        var pipVideoH: Int = 9
+
+        /**
+         * Last known playing state, kept current by PlayerScreen's player
+         * listener so the PiP RemoteAction shows the right icon.
+         */
+        @Volatile
+        var pipIsPlaying: Boolean = true
+
+        /**
+         * Fired by the PiP play/pause RemoteAction's broadcast receiver.
+         * PlayerScreen collects this and toggles the ExoPlayer.
+         */
+        val pipToggleRequest = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+        /**
+         * PiP windows only support aspect ratios roughly between 1:2.39 and
+         * 2.39:1 — clamp anything wider/taller (e.g. a 9:16 portrait video
+         * stays portrait, an extreme pano gets clamped, never crashes).
+         */
+        fun clampPipRatio(w: Int, h: Int): Rational {
+            if (w <= 0 || h <= 0) return Rational(16, 9)
+            val r = w.toFloat() / h.toFloat()
+            return when {
+                r > 2.39f -> Rational(239, 100)
+                r < 1f / 2.39f -> Rational(100, 239)
+                else -> Rational(w, h)
+            }
+        }
+
+        /**
+         * Builds PiP params with the video's (clamped) aspect ratio and a
+         * play/pause RemoteAction so the floating window has transport
+         * controls like YouTube's PiP.
+         */
+        fun buildPipParams(context: Context, playing: Boolean): PictureInPictureParams {
+            val toggleIntent = PendingIntent.getBroadcast(
+                context,
+                0,
+                Intent(ACTION_PIP_TOGGLE).setPackage(context.packageName),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val action = if (playing) {
+                RemoteAction(
+                    Icon.createWithResource(context, android.R.drawable.ic_media_pause),
+                    "Pause",
+                    "Pause video",
+                    toggleIntent
+                )
+            } else {
+                RemoteAction(
+                    Icon.createWithResource(context, android.R.drawable.ic_media_play),
+                    "Play",
+                    "Play video",
+                    toggleIntent
+                )
+            }
+            return PictureInPictureParams.Builder()
+                .setAspectRatio(clampPipRatio(pipVideoW, pipVideoH))
+                .setActions(listOf(action))
+                .build()
+        }
+    }
+
+    /**
+     * Receives the PiP window's play/pause RemoteAction taps and forwards
+     * them to PlayerScreen via [pipToggleRequest].
+     */
+    private val pipReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_PIP_TOGGLE) {
+                pipToggleRequest.tryEmit(Unit)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         handleAddonDeepLink(intent)
+        // PiP play/pause RemoteAction receiver (explicit intent, not exported).
+        val pipFilter = IntentFilter(ACTION_PIP_TOGGLE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(pipReceiver, pipFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(pipReceiver, pipFilter)
+        }
         setContent {
             val app = applicationContext as PulseApp
             // If the last run crashed, show the log with a Copy button.
@@ -158,6 +288,53 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleAddonDeepLink(intent)
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(pipReceiver) }
+        super.onDestroy()
+    }
+
+    /**
+     * Refreshes the PiP window's play/pause RemoteAction icon. Called by
+     * PlayerScreen's player listener on every play-state change; the params
+     * only take effect while the video is actually floating.
+     */
+    fun updatePipActions(playing: Boolean) {
+        pipIsPlaying = playing
+        if (isInPictureInPictureMode) {
+            setPictureInPictureParams(buildPipParams(this, playing))
+        }
+    }
+
+    /**
+     * Auto-enter Picture-in-Picture when the user presses Home/recents while
+     * a video is playing (v0.9.0+). Only fires for explicit user leave, not
+     * for in-app navigation, and honors the pipEnabled setting.
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!isPlayerActive) return
+        val app = applicationContext as PulseApp
+        if (!app.settings.pipEnabled) return
+        enterPictureInPictureMode(buildPipParams(this, pipIsPlaying))
+    }
+
+    /**
+     * Tracks PiP state so PlayerScreen can hide its overlay UI while the
+     * video floats (the system draws its own PiP controls instead).
+     * On entering PiP, (re)applies params so the play/pause RemoteAction
+     * is present with the correct icon from the first frame.
+     */
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipMode.value = isInPictureInPictureMode
+        if (isInPictureInPictureMode) {
+            setPictureInPictureParams(buildPipParams(this, pipIsPlaying))
+        }
     }
 
     /**
@@ -199,7 +376,6 @@ class MainActivity : ComponentActivity() {
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
-
 /** One item in the floating dock: icon + tiny label, accent-glowed when selected. */
 @Composable
 private fun DockItem(
@@ -236,11 +412,14 @@ private fun DockItem(
     }
 }
 
-private val tabs = listOf(
-    Tab(Routes.HOME, "Home", Icons.Filled.Home),
-    Tab(Routes.LIVE, "Live", Icons.Filled.LiveTv),
-    Tab(Routes.SEARCH, "Search", Icons.Filled.Search),
-    Tab(Routes.SETTINGS, "Settings", Icons.Filled.Settings)
+/** Bottom-dock tabs; labels come from string resources so they follow the app language. */
+@Composable
+private fun appTabs() = listOf(
+    Tab(Routes.HOME, stringResource(R.string.nav_home), Icons.Filled.Home),
+    Tab(Routes.LIVE, stringResource(R.string.nav_live), Icons.Filled.LiveTv),
+    Tab(Routes.SEARCH, stringResource(R.string.nav_search), Icons.Filled.Search),
+    Tab(Routes.DOWNLOADS, stringResource(R.string.nav_downloads), Icons.Filled.Download),
+    Tab(Routes.SETTINGS, stringResource(R.string.nav_settings), Icons.Filled.Settings)
 )
 
 @Composable
@@ -356,6 +535,7 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
             }
         }
     } else {
+        val tabs = appTabs()
         val showBottomBar = tabs.any { it.route == currentDestination?.route }
         Box(Modifier.fillMaxSize()) {
             Scaffold(
@@ -588,7 +768,23 @@ private fun PulseNavGraph(
                 onGoToStreams = { navController.navigate(Routes.STREAMS_SETTINGS) },
                 onGoToAbout = { navController.navigate(Routes.ABOUT) },
                 onGoToFeedback = { navController.navigate(Routes.FEEDBACK) },
-                onGoToAccount = { navController.navigate(Routes.ACCOUNT) }
+                onGoToFeaturesGuide = { navController.navigate(Routes.FEATURES_GUIDE) },
+                onGoToDownloads = { navController.navigate(Routes.DOWNLOADS) },
+                onGoToAccount = { navController.navigate(Routes.ACCOUNT) },
+                onGoToBackup = { navController.navigate(Routes.BACKUP) },
+                onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) }
+            )
+        }
+        composable(Routes.INTEGRATIONS) {
+            IntegrationsScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.BACKUP) {
+            BackupScreen(
+                repository = repository,
+                onBack = { navController.popBackStack() }
             )
         }
         composable(Routes.ACCOUNT) {
@@ -632,6 +828,27 @@ private fun PulseNavGraph(
             FeedbackScreen(
                 repository = repository,
                 onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.FEATURES_GUIDE) {
+            FeaturesGuideScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.DOWNLOADS) {
+            DownloadsScreen(
+                onBack = { navController.popBackStack() },
+                onPlayFile = { filePath, title ->
+                    // Play the local file in the existing player
+                    repository.pendingPlayback = com.pulsestream.app.data.PlaybackRequest(
+                        streamUrl = "file://$filePath",
+                        title = title,
+                        poster = null,
+                        videoId = "download_${filePath.hashCode()}",
+                        isMovie = true
+                    )
+                    navController.navigate(Routes.PLAYER)
+                }
             )
         }
         composable(Routes.LICENSES) {
