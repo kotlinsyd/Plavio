@@ -3,16 +3,72 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Plavio Media — Free open-source Android streaming app</title>
-<meta name="description" content="Plavio Media is a free, open-source Android streaming app. Your addons, your streams, your player. Download the APK directly from the official site.">
-<meta property="og:title" content="Plavio Media — Your streaming universe">
-<meta property="og:description" content="Free & open-source Android streaming app. Your addons, your streams, your player.">
+<title>Plavio — Free Android Streaming App | Movies, Series &amp; Live TV</title>
+<meta name="description" content="Plavio is a free, open-source Android streaming app. Watch movies, series and live TV on your phone or Android TV. Download the APK directly — no ads, no trackers.">
+<meta name="keywords" content="streaming app, Android TV, watch movies, live TV, free, open source, APK download">
+<meta name="robots" content="index, follow">
+<meta name="google-site-verification" content="FL3IltwrKy0JnSscnZfDonLSzoOHVhWfZ4c582CBxBc">
+<link rel="canonical" href="https://plaviomedia.vercel.app/">
+<meta property="og:title" content="Plavio — Free Android Streaming App | Movies, Series & Live TV">
+<meta property="og:description" content="Free & open-source Android streaming app. Watch movies, series and live TV on your phone or Android TV.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://plaviomedia.vercel.app/">
+<meta property="og:site_name" content="Plavio">
 <meta property="og:image" content="https://plaviomedia.vercel.app/img/logo.png">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="icon" type="image/png" href="img/logo-small.png">
+<meta name="twitter:title" content="Plavio — Free Android Streaming App">
+<meta name="twitter:description" content="Watch movies, series and live TV on Android & Android TV. Free, open-source, no ads.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Plavio",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "Android",
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+  "description": "Plavio is a free, open-source Android streaming app. Watch movies, series and live TV on your phone or Android TV. Download the APK directly — no ads, no trackers.",
+  "url": "https://plaviomedia.vercel.app/",
+  "downloadUrl": "https://plaviomedia.vercel.app/",
+  "softwareVersion": "0.8.26",
+  "image": "https://plaviomedia.vercel.app/img/logo.png"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is Plavio free?",
+      "acceptedAnswer": {"@type": "Answer", "text": "Yes. Plavio is free forever — no ads, no trackers, no subscriptions. The APK is available for direct download on the official site."}
+    },
+    {
+      "@type": "Question",
+      "name": "Does Plavio work on Android TV?",
+      "acceptedAnswer": {"@type": "Answer", "text": "The Android TV version is currently under development — something big is coming soon."}
+    },
+    {
+      "@type": "Question",
+      "name": "How do I install addons?",
+      "acceptedAnswer": {"@type": "Answer", "text": "Copy the addon's manifest URL, open Plavio, go to Addons and tap the + button, then paste the link. The addon installs instantly and its catalogs appear in the app."}
+    },
+    {
+      "@type": "Question",
+      "name": "Is Plavio open source?",
+      "acceptedAnswer": {"@type": "Answer", "text": "Yes. Plavio's source code is public on GitHub and GitLab under the MIT license. Anyone can inspect, fork or contribute to it."}
+    }
+  ]
+}
+</script>
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="192x192" href="img/favicon-192.png">
+<link rel="apple-touch-icon" href="img/favicon-192.png">
 <link rel="stylesheet" href="styles.css">
+<script>
+  window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+</script>
+<script defer src="/_vercel/insights/script.js"></script>
 </head>
 <body>
 
@@ -22,21 +78,26 @@
   <p class="tagline">Your streaming universe.</p>
   <p class="sub">Free &amp; open-source Android app — your addons, your streams, your player.</p>
   <div class="dl-row">
-    <a id="dlGitlab" class="dl-btn" href="https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/0.8.5/Plavio-v0.8.5.apk">
+    <a id="dlGitlab" class="dl-btn" href="https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/0.9.0/Plavio-v0.9.0.apk">
       <span class="dl-icon">⬇</span>
       <span class="dl-text">Download APK</span>
-      <span id="dlVerLab" class="dl-ver">v0.8.5</span>
+      <span id="dlVerLab" class="dl-ver">v0.9.0</span>
     </a>
     <a id="dlGithub" class="dl-btn dl-gh" href="https://github.com/kotlinsyd/Plavio/releases/latest">
       <span class="dl-icon">⬇</span>
       <span class="dl-text">Download from GitHub</span>
       <span id="dlVerHub" class="dl-ver">v0.8.5</span>
     </a>
+    <a id="dlTv" class="dl-btn dl-tv" href="#" onclick="return false;" style="opacity:0.6;cursor:default;">
+      <span class="dl-icon">📺</span>
+      <span class="dl-text">Android TV — Under Development</span>
+      <span id="dlVerTv" class="dl-ver">Something big coming soon 🚀</span>
+    </a>
   </div>
-  <p class="dl-note">Free forever · No ads · ~15&nbsp;MB · Android 8.0+</p>
+  <p class="dl-note">Free forever · No ads · ~19&nbsp;MB · Android 8.0+</p>
 </header>
 
-<div class="tv-banner">📺 <strong>Plavio for Android TV</strong> is in the works — coming soon.</div>
+<div class="tv-banner">📺 <strong>Plavio TV</strong> is under development — something big is coming soon 🚀</div>
 
 <section class="shots">
   <h2>Take a look</h2>
@@ -78,12 +139,34 @@
   <div id="addonList" class="addon-list"></div>
 </section>
 
+<section class="faq">
+  <h2>Frequently asked questions</h2>
+  <div class="faq-list">
+    <div class="faq-item">
+      <h3>Is Plavio free?</h3>
+      <p>Yes. Plavio is free forever — no ads, no trackers, no subscriptions. Download the APK right here on the official site.</p>
+    </div>
+    <div class="faq-item">
+      <h3>Does Plavio work on Android TV?</h3>
+      <p>The Android TV version is currently under development — something big is coming soon.</p>
+    </div>
+    <div class="faq-item">
+      <h3>How do I install addons?</h3>
+      <p>Copy the addon's manifest URL, open Plavio, go to <strong>Addons</strong> and tap <strong>+</strong>, then paste the link. The addon installs instantly and its catalogs show up in the app.</p>
+    </div>
+    <div class="faq-item">
+      <h3>Is Plavio open source?</h3>
+      <p>Yes. The full source code is public on GitHub and GitLab under the MIT license — inspect it, fork it, contribute to it.</p>
+    </div>
+  </div>
+</section>
+
 <section class="links">
   <h2>Follow the project</h2>
   <div class="link-row">
     <a class="pill" href="https://github.com/kotlinsyd/Plavio" target="_blank" rel="noopener">GitHub</a>
     <a class="pill" href="https://gitlab.com/KotlinJS5/plavio" target="_blank" rel="noopener">GitLab</a>
-    <span class="pill soon" title="Coming soon">Reddit · soon</span>
+    <a class="pill" href="https://www.reddit.com/r/Plavio/" target="_blank" rel="noopener">Reddit</a>
     <a class="pill" href="https://discord.gg/pbNwJKU3p" target="_blank" rel="noopener">Discord</a>
   </div>
 </section>
