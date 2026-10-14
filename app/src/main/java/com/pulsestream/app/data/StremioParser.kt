@@ -186,12 +186,20 @@ object StremioParser {
         val obj = json.parseToJsonElement(text).jsonObject
         val streams = (obj["streams"] as? JsonArray)?.mapNotNull { el ->
             val s = el as? JsonObject ?: return@mapNotNull null
-            val url = s.str("url") ?: return@mapNotNull null // skip p2p/infoHash-only entries
+            val url = s.str("url")
+            val infoHash = s.str("infoHash")
+            // Keep entries that have either a direct URL or an infoHash
+            // (infoHash-only entries can be resolved via TorBox debrid).
+            if (url == null && infoHash == null) return@mapNotNull null
             StreamItem(
-                url = url,
+                // Placeholder URL for infoHash-only entries so dedup still
+                // works; StreamRepository replaces it with the real HTTP
+                // link once TorBox resolves it.
+                url = url ?: "infohash:$infoHash",
                 name = s.str("name"),
                 title = s.str("title") ?: s.str("description"),
-                headers = parseProxyHeaders(s)
+                headers = parseProxyHeaders(s),
+                infoHash = infoHash
             )
         } ?: emptyList()
         val subtitles = (obj["subtitles"] as? JsonArray)?.mapNotNull { el ->

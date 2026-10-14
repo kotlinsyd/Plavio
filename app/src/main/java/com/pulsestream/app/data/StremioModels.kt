@@ -112,7 +112,14 @@ data class StreamItem(
      * addon's behaviorHints.proxyHeaders.request). Sent by the player and
      * the stream prober. Empty for normal direct links.
      */
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    /**
+     * Torrent info hash for P2P/debrid streams (parsed from the addon's
+     * "infoHash" field). Null for direct HTTP streams. When set and the
+     * stream has no usable URL, TorBox debrid can resolve it to a direct
+     * HTTP link (only when a TorBox API key is configured).
+     */
+    val infoHash: String? = null
 )
 
 data class Subtitle(
