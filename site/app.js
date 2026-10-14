@@ -77,25 +77,47 @@ fetch("addons.json")
   var hubBtn = document.getElementById('dlGithub');
   var hubVer = document.getElementById('dlVerHub');
 
-  // GitLab: newest release with an .apk asset link.
-  fetch('https://gitlab.com/api/v4/projects/' + GITLAB_PROJECT + '/releases?per_page=10')
-    .then(function (r) { return r.json(); })
-    .then(function (releases) {
-      for (var i = 0; i < releases.length; i++) {
-        var links = (releases[i].assets && releases[i].assets.links) || [];
-        for (var j = 0; j < links.length; j++) {
-          if (/\.apk$/i.test(links[j].url)) {
-            labBtn.href = links[j].url;
-            labVer.textContent = releases[i].tag_name;
-            return;
+  // GitLab: use stable.json version (same as in-app updater) — never serve untested releases.
+  var tvBtn = document.getElementById('dlTv');
+  var tvVer = document.getElementById('dlVerTv');
+  fetch('https://gitlab.com/api/v4/projects/' + GITLAB_PROJECT + '/repository/files/stable.json/raw?ref=main')
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+    .then(function (stable) {
+      var stableVer = (stable.version || '').trim();
+      if (!stableVer) return Promise.reject();
+      return fetch('https://gitlab.com/api/v4/projects/' + GITLAB_PROJECT + '/releases?per_page=20')
+        .then(function (r) { return r.json(); })
+        .then(function (releases) {
+          var tvDone = false, labDone = false;
+          for (var i = 0; i < releases.length && !(tvDone && labDone); i++) {
+            var tag = releases[i].tag_name || '';
+            var isTv = /-tv$/i.test(tag);
+            var links = (releases[i].assets && releases[i].assets.links) || [];
+            for (var j = 0; j < links.length; j++) {
+              if (/\.apk$/i.test(links[j].url)) {
+                if (isTv && tvBtn && !tvDone) {
+                  tvBtn.href = links[j].url;
+                  if (tvVer) tvVer.textContent = tag;
+                  tvDone = true;
+                } else if (!isTv && !labDone) {
+                  // Only use the stable version for the main download button
+                  var relVer = tag.replace(/^v/i, '');
+                  if (relVer === stableVer) {
+                    labBtn.href = links[j].url;
+                    labVer.textContent = tag;
+                    labDone = true;
+                  }
+                }
+                break;
+              }
+            }
           }
-        }
-      }
+        });
     })
     .catch(function () { /* keep the hardcoded fallback link */ });
 
   // GitHub: newest release with an .apk asset.
-  fetch('https://api.github.com/repos/KotlinJS5/PulseStream/releases/latest')
+  fetch('https://api.github.com/repos/kotlinsyd/Plavio/releases/latest')
     .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
     .then(function (rel) {
       var assets = rel.assets || [];
