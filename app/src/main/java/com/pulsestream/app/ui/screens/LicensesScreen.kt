@@ -43,6 +43,7 @@ private data class OssLibrary(
 
 /** Third-party open-source libraries shipped in Plavio, with their licenses. */
 private val OSS_LIBRARIES = listOf(
+    OssLibrary("Plavio", "MIT License", "https://github.com/kotlinsyd/Plavio"),
     OssLibrary("AndroidX Core", "Apache License 2.0", "https://developer.android.com/jetpack/androidx"),
     OssLibrary("AndroidX Lifecycle", "Apache License 2.0", "https://developer.android.com/jetpack/androidx"),
     OssLibrary("AndroidX Activity", "Apache License 2.0", "https://developer.android.com/jetpack/androidx"),
@@ -119,6 +120,28 @@ private const val LGPL_NOTE = """FFmpeg is licensed under the GNU Lesser General
 Under the LGPL you have the right to obtain, modify, and replace the FFmpeg library. The complete corresponding source code for the FFmpeg build used in Plavio is available at https://ffmpeg.org/download.html — contact us via the project's GitHub or Discord and we will point you to the exact version and build configuration.
 
 Full license text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html"""
+
+private const val MIT_LICENSE_TEXT = """MIT License
+
+Copyright (c) 2026 Najam
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE."""
 
 @Composable
 fun LicensesScreen(
@@ -200,7 +223,11 @@ fun LicensesScreen(
                         if (isExpanded) {
                             Spacer(Modifier.height(12.dp))
                             Text(
-                                text = if (lib.license.startsWith("LGPL")) LGPL_NOTE else APACHE_2_0_TEXT,
+                                text = when {
+                                    lib.license.startsWith("LGPL") -> LGPL_NOTE
+                                    lib.license == "MIT License" -> MIT_LICENSE_TEXT
+                                    else -> APACHE_2_0_TEXT
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary
                             )
