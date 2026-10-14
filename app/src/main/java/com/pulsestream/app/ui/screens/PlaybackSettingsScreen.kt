@@ -25,7 +25,10 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -49,8 +52,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.AUDIO_LANGUAGE_OPTIONS
+import com.pulsestream.app.data.BUFFER_PRESETS
+import com.pulsestream.app.data.DISK_CACHE_OPTIONS
 import com.pulsestream.app.data.SettingsStore
 import com.pulsestream.app.data.audioLanguageName
+import com.pulsestream.app.data.bufferPresetName
+import com.pulsestream.app.data.diskCacheName
 import com.pulsestream.app.data.SUBTITLE_BG_OPTIONS
 import com.pulsestream.app.data.SUBTITLE_COLOR_OPTIONS
 import com.pulsestream.app.data.SUBTITLE_EDGE_OPTIONS
@@ -77,8 +84,13 @@ fun PlaybackSettingsScreen(
     var autoPlayNext by remember { mutableStateOf(settings.autoPlayNext) }
     var keepScreenOn by remember { mutableStateOf(settings.keepScreenOn) }
     var showSkip by remember { mutableStateOf(settings.showSkipButton) }
+    var pipEnabled by remember { mutableStateOf(settings.pipEnabled) }
     var audioLang by remember { mutableStateOf(settings.preferredAudioLanguage) }
     var audioLangPickerOpen by remember { mutableStateOf(false) }
+    var bufferPresetOpen by remember { mutableStateOf(false) }
+    var diskCacheOpen by remember { mutableStateOf(false) }
+    // Refresh key so the buffer/disk-cache subtitles update after the dialogs close.
+    var bufferUiTick by remember { mutableStateOf(0) }
 
     GlowBackground {
         LazyColumn(
@@ -160,6 +172,18 @@ fun PlaybackSettingsScreen(
                     }
                 )
             }
+            item(key = "pip") {
+                SettingsToggleRow(
+                    icon = Icons.Filled.PictureInPicture,
+                    title = "Picture-in-Picture",
+                    subtitle = "Float the video when you leave the player",
+                    checked = pipEnabled,
+                    onCheckedChange = {
+                        pipEnabled = it
+                        settings.pipEnabled = it
+                    }
+                )
+            }
             item(key = "audioLang") {
                 SettingsNavRow(
                     icon = Icons.Filled.Audiotrack,
@@ -170,6 +194,25 @@ fun PlaybackSettingsScreen(
                         "Auto-plays ${audioLanguageName(audioLang!!)} when available"
                     },
                     onClick = { audioLangPickerOpen = true }
+                )
+            }
+            item(key = "bufferPreset") {
+                // Read inside the item so recomposition picks up dialog changes.
+                bufferUiTick
+                SettingsNavRow(
+                    icon = Icons.Filled.Speed,
+                    title = "Buffer preset",
+                    subtitle = "Currently: ${bufferPresetName(settings.bufferMinMs, settings.bufferMaxMs, settings.bufferForPlaybackMs)}",
+                    onClick = { bufferPresetOpen = true }
+                )
+            }
+            item(key = "diskCache") {
+                bufferUiTick
+                SettingsNavRow(
+                    icon = Icons.Filled.Storage,
+                    title = "Disk cache",
+                    subtitle = "Cache played media on device: ${diskCacheName(settings.diskCacheMb)}",
+                    onClick = { diskCacheOpen = true }
                 )
             }
         }
@@ -186,6 +229,169 @@ fun PlaybackSettingsScreen(
             }
         )
     }
+
+    if (bufferPresetOpen) {
+        BufferPresetDialog(
+            settings = settings,
+            onDismiss = { bufferPresetOpen = false },
+            onDone = { bufferPresetOpen = false; bufferUiTick++ }
+        )
+    }
+
+    if (diskCacheOpen) {
+        DiskCacheDialog(
+            settings = settings,
+            onDismiss = { diskCacheOpen = false },
+            onDone = { diskCacheOpen = false; bufferUiTick++ }
+        )
+    }
+}
+
+/**
+ * Buffer preset picker (Settings > Playback > Buffer & Cache): Low /
+ * Balanced / Aggressive presets mapping to concrete ExoPlayer buffer
+ * durations. Applies on the next player build (next title played).
+ */
+@Composable
+fun BufferPresetDialog(
+    settings: SettingsStore,
+    onDismiss: () -> Unit,
+    onDone: () -> Unit
+) {
+    var selected by remember {
+        mutableStateOf(
+            BUFFER_PRESETS.indexOfFirst {
+                it.second == Triple(settings.bufferMinMs, settings.bufferMaxMs, settings.bufferForPlaybackMs)
+            }.takeIf { it >= 0 }
+        )
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Buffer preset", color = TextPrimary) },
+        text = {
+            Column {
+                Text(
+                    "How much video is buffered ahead. Higher = fewer stalls on slow networks, more RAM used. Applies to the next title you play.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                    items(BUFFER_PRESETS.size) { index ->
+                        val (label, values) = BUFFER_PRESETS[index]
+                        val (minMs, maxMs, forPlaybackMs) = values
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selected = index }
+                                .tvFocusRing(RoundedCornerShape(10.dp))
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.material3.RadioButton(
+                                selected = selected == index,
+                                onClick = { selected = index },
+                                colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                    selectedColor = LocalPalette.current.accent
+                                )
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(label, color = TextPrimary)
+                                Text(
+                                    "${minMs / 1000}s min · ${maxMs / 1000}s max · starts after ${forPlaybackMs / 1000.0} s",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val idx = selected
+                if (idx != null && idx >= 0) {
+                    val (_, values) = BUFFER_PRESETS[idx]
+                    settings.bufferMinMs = values.first
+                    settings.bufferMaxMs = values.second
+                    settings.bufferForPlaybackMs = values.third
+                }
+                onDone()
+            }) {
+                Text("Done", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextSecondary)
+            }
+        }
+    )
+}
+
+/**
+ * Disk cache picker (Settings > Playback > Buffer & Cache): caches played
+ * media on device so re-watches don't re-download. Applies on the next
+ * player build.
+ */
+@Composable
+fun DiskCacheDialog(
+    settings: SettingsStore,
+    onDismiss: () -> Unit,
+    onDone: () -> Unit
+) {
+    var selected by remember { mutableStateOf(settings.diskCacheMb) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Disk cache", color = TextPrimary) },
+        text = {
+            Column {
+                Text(
+                    "Keep played video on your device so re-watching doesn't download it again. Applies to the next title you play.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                    items(DISK_CACHE_OPTIONS, key = { it.first }) { (mb, label) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selected = mb }
+                                .tvFocusRing(RoundedCornerShape(10.dp))
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.material3.RadioButton(
+                                selected = selected == mb,
+                                onClick = { selected = mb },
+                                colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                    selectedColor = LocalPalette.current.accent
+                                )
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(label, color = TextPrimary)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                settings.diskCacheMb = selected
+                onDone()
+            }) {
+                Text("Done", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextSecondary)
+            }
+        }
+    )
 }
 
 /** Multi-select dialog for the preferred subtitle languages (max 2). */
