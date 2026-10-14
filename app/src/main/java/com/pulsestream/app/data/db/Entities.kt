@@ -59,6 +59,9 @@ interface AddonDao {
 
     @Query("DELETE FROM addons WHERE id = :id")
     suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM addons")
+    suspend fun clearAll()
 }
 
 @Entity(tableName = "playback")
@@ -90,6 +93,12 @@ interface PlaybackDao {
 
     @Query("DELETE FROM playback WHERE `key` = :key")
     suspend fun deleteByKey(key: String)
+
+    @Query("SELECT * FROM playback")
+    suspend fun getAll(): List<PlaybackState>
+
+    @Query("DELETE FROM playback")
+    suspend fun clearAll()
 }
 
 /** Cached catalog rows (per addon + type + catalog id) so Home renders instantly. Added in DB v3. */
@@ -126,6 +135,14 @@ interface CatalogCacheDao {
      */
     @Query("DELETE FROM catalog_cache WHERE length(itemsJson) > :maxBytes")
     suspend fun pruneOversized(maxBytes: Int): Int
+
+    /**
+     * Drops every cached M3U row of one playlist (exact stored baseUrl).
+     * Callers pass both the raw and the normalized URL to cover playlists
+     * stored by older builds.
+     */
+    @Query("DELETE FROM catalog_cache WHERE addonId = 'm3u' AND baseUrl = :baseUrl")
+    suspend fun deleteM3uPlaylist(baseUrl: String)
 }
 
 /** User's watchlist — titles bookmarked for later. Added in DB v3. */
@@ -156,6 +173,12 @@ interface WatchlistDao {
 
     @Query("DELETE FROM watchlist WHERE `key` = :key")
     suspend fun deleteByKey(key: String)
+
+    @Query("SELECT * FROM watchlist")
+    suspend fun getAll(): List<WatchlistItem>
+
+    @Query("DELETE FROM watchlist")
+    suspend fun clearAll()
 }
 
 /** Briefly-cached subtitle search results (per type + IMDb id). Added in DB v3. */
@@ -173,4 +196,55 @@ interface SubtitleCacheDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(row: SubtitleCache)
+}
+
+/** Offline download tracking. Added in DB v8. */
+@Entity(tableName = "downloads")
+data class DownloadItem(
+    @PrimaryKey val id: String,
+    val url: String,
+    val title: String,
+    val fileName: String,
+    val filePath: String,
+    val totalBytes: Long = -1L,
+    val downloadedBytes: Long = 0L,
+    /** QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED */
+    val status: String = "QUEUED",
+    val error: String? = null,
+    val headersJson: String = "{}",
+    val createdAt: Long,
+    val completedAt: Long? = null
+)
+
+@Dao
+interface DownloadDao {
+    @Query("SELECT * FROM downloads ORDER BY createdAt DESC")
+    fun observeAll(): Flow<List<DownloadItem>>
+
+    @Query("SELECT * FROM downloads ORDER BY createdAt DESC")
+    suspend fun getAll(): List<DownloadItem>
+
+    @Query("SELECT * FROM downloads WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): DownloadItem?
+
+    @Query("SELECT * FROM downloads WHERE url = :url AND status != 'CANCELLED' LIMIT 1")
+    suspend fun getByUrl(url: String): DownloadItem?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: DownloadItem)
+
+    @Query("UPDATE downloads SET downloadedBytes = :bytes, status = :status WHERE id = :id")
+    suspend fun updateProgress(id: String, bytes: Long, status: String)
+
+    @Query("UPDATE downloads SET status = :status, error = :error WHERE id = :id")
+    suspend fun updateStatus(id: String, status: String, error: String? = null)
+
+    @Query("UPDATE downloads SET status = 'COMPLETED', downloadedBytes = totalBytes, completedAt = :completedAt WHERE id = :id")
+    suspend fun markCompleted(id: String, completedAt: Long)
+
+    @Query("DELETE FROM downloads WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED', 'DOWNLOADING', 'PAUSED') ORDER BY createdAt ASC")
+    suspend fun getActive(): List<DownloadItem>
 }

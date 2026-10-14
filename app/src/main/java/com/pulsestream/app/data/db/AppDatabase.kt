@@ -11,9 +11,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PlaybackState::class,
         CatalogCache::class,
         WatchlistItem::class,
-        SubtitleCache::class
+        SubtitleCache::class,
+        DownloadItem::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -22,6 +23,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun catalogCacheDao(): CatalogCacheDao
     abstract fun watchlistDao(): WatchlistDao
     abstract fun subtitleCacheDao(): SubtitleCacheDao
+    abstract fun downloadDao(): DownloadDao
 }
 
 /**
@@ -121,5 +123,29 @@ val MIGRATION_6_7 = object : Migration(6, 7) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL("ALTER TABLE addons ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0")
         db.execSQL("ALTER TABLE addons ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+/**
+ * v7 → v8: new `downloads` table for the offline downloader.
+ */
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS downloads (
+                id TEXT NOT NULL PRIMARY KEY,
+                url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                fileName TEXT NOT NULL,
+                filePath TEXT NOT NULL,
+                totalBytes INTEGER NOT NULL DEFAULT -1,
+                downloadedBytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'QUEUED',
+                error TEXT,
+                headersJson TEXT NOT NULL DEFAULT '{}',
+                createdAt INTEGER NOT NULL,
+                completedAt INTEGER
+            )"""
+        )
     }
 }
