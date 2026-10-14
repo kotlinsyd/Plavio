@@ -26,6 +26,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -323,7 +327,8 @@ val LocalBadgeStyleKey: androidx.compose.runtime.ProvidableCompositionLocal<Stri
 fun StreamCard(
     stream: StreamItem,
     selected: Boolean = false,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDownload: ((StreamItem) -> Unit)? = null
 ) {
     val palette = LocalPalette.current
     val pack = rememberBadgePack()
@@ -352,13 +357,32 @@ fun StreamCard(
             .tvFocusRing(shape)
             .padding(12.dp)
     ) {
-        Text(
-            text = headline,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = TextPrimary,
-            maxLines = 2
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(
+                text = headline,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = TextPrimary,
+                maxLines = 2,
+                modifier = Modifier.weight(1f)
+            )
+            if (onDownload != null) {
+                IconButton(
+                    onClick = { onDownload(stream) },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Download,
+                        contentDescription = "Download",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
         if (badges.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
             Row(
@@ -452,7 +476,8 @@ fun StreamList(
     onPick: (StreamItem) -> Unit,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
-    selectedUrl: String? = null
+    selectedUrl: String? = null,
+    onDownload: ((StreamItem) -> Unit)? = null
 ) {
     LazyColumn(
         modifier = modifier,
@@ -461,8 +486,10 @@ fun StreamList(
         itemsIndexed(streams, key = { index, s -> "${index}_${s.url}" }) { _, stream ->
             StreamCard(
                 stream = stream,
-                selected = stream.url == selectedUrl
-            ) { onPick(stream) }
+                selected = stream.url == selectedUrl,
+                onClick = { onPick(stream) },
+                onDownload = onDownload
+            )
         }
     }
 }
@@ -474,12 +501,15 @@ fun StreamList(
 fun LazyListScope.streamListItems(
     streams: List<StreamItem>,
     onPick: (StreamItem) -> Unit,
-    selectedUrl: String? = null
+    selectedUrl: String? = null,
+    onDownload: ((StreamItem) -> Unit)? = null
 ) {
     itemsIndexed(streams, key = { index, s -> "${index}_${s.url}" }) { _, stream ->
         StreamCard(
             stream = stream,
-            selected = stream.url == selectedUrl
-        ) { onPick(stream) }
+            selected = stream.url == selectedUrl,
+            onClick = { onPick(stream) },
+            onDownload = onDownload
+        )
     }
 }
