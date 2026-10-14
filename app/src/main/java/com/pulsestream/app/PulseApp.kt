@@ -19,6 +19,7 @@ import com.pulsestream.app.data.db.MIGRATION_3_4
 import com.pulsestream.app.data.db.MIGRATION_4_5
 import com.pulsestream.app.data.db.MIGRATION_5_6
 import com.pulsestream.app.data.db.MIGRATION_6_7
+import com.pulsestream.app.data.db.MIGRATION_7_8
 import com.pulsestream.app.ui.tv.isTelevision
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -58,6 +59,9 @@ class PulseApp : Application(), ImageLoaderFactory {
     lateinit var settings: SettingsStore
         private set
 
+    lateinit var database: AppDatabase
+        private set
+
     /**
      * A crashing background task must never kill the app (previously an
      * uncaught exception here meant an instant force-close loop that also
@@ -74,6 +78,7 @@ class PulseApp : Application(), ImageLoaderFactory {
         super.onCreate()
         initCrashReporting()
         val db = openDatabase()
+        database = db
         settings = SettingsStore(this)
         repository = StreamRepository(db, StremioApi(), settings)
         // Quietly install the bundled addons (PlavioMeta + PlavioHD + Cinemeta + subtitles) on first launch.
@@ -120,7 +125,7 @@ class PulseApp : Application(), ImageLoaderFactory {
 
     private fun buildDatabase(): AppDatabase =
         Room.databaseBuilder(this, AppDatabase::class.java, DB_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
             .build()
 
     /**
