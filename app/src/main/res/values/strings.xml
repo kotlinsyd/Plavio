@@ -7,6 +7,7 @@
     <string name="nav_home">Home</string>
     <string name="nav_live">Live</string>
     <string name="nav_search">Search</string>
+    <string name="nav_downloads">Downloads</string>
     <string name="nav_settings">Settings</string>
 
     <!-- Settings screen -->
@@ -34,6 +35,8 @@
     <string name="settings_section_account">Account</string>
     <string name="settings_account_title">Account</string>
     <string name="settings_account_sub">Trakt and Simkl sync</string>
+    <string name="settings_backup_title">Backup &amp; Restore</string>
+    <string name="settings_backup_sub">Save or restore everything to a file</string>
 
     <string name="settings_section_about">About</string>
     <string name="settings_about_title">About</string>
