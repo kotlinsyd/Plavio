@@ -3,6 +3,7 @@ package com.pulsestream.app.data
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -39,7 +40,7 @@ object CatalogCodec {
 
     private fun JsonObject.toMetaPreview(): MetaPreview? {
         fun str(key: String): String? =
-            this[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            (this[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
         val id = str("id") ?: return null
         return MetaPreview(
             id = id,
@@ -52,7 +53,7 @@ object CatalogCodec {
             releaseInfo = str("releaseInfo"),
             imdbRating = str("imdbRating"),
             genres = (this["genres"] as? JsonArray)
-                ?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
         )
     }
 
@@ -78,8 +79,8 @@ object CatalogCodec {
         runCatching {
             json.parseToJsonElement(text).jsonArray.mapNotNull { el ->
                 val o = el.jsonObject
-                val url = o["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-                Subtitle(url = url, lang = o["lang"]?.jsonPrimitive?.contentOrNull ?: "und")
+                val url = (o["url"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+                Subtitle(url = url, lang = (o["lang"] as? JsonPrimitive)?.contentOrNull ?: "und")
             }
         }.getOrDefault(emptyList())
 }
