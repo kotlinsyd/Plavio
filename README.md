@@ -1,12 +1,8 @@
-> **Note:** This project was previously developed at [KotlinJS5/PulseStream](https://github.com/KotlinJS5/PulseStream). That account ran into GitHub restrictions, so active development continues here. The Trakt sync integration will be built under this account.
-
 # Plavio
-
-🌐 **Website:** https://plaviomedia.vercel.app
 
 A beautiful open-source streaming app for Android with a built-in player. Install addons to browse movies, series, and live TV — no account, no tracking.
 
-> 📺 **Plavio for Android TV is under development — something big is coming soon.**
+> 📺 **Plavio for Android TV is in the works — coming soon.**
 
 ## Preview
 
