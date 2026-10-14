@@ -217,6 +217,32 @@ val AUTOPLAY_SIZE_OPTIONS: List<Pair<Int, String>> = listOf(
 fun autoplaySizeName(gb: Int): String =
     AUTOPLAY_SIZE_OPTIONS.find { it.first == gb }?.second ?: if (gb <= 0) "No limit" else "Under $gb GB"
 
+/**
+ * Buffer presets offered in Settings > Playback > Buffer & Cache.
+ * Each preset maps to (minBufferMs, maxBufferMs, bufferForPlaybackMs).
+ */
+val BUFFER_PRESETS: List<Pair<String, Triple<Int, Int, Int>>> = listOf(
+    "Low" to Triple(10_000, 30_000, 1_500),
+    "Balanced" to Triple(15_000, 50_000, 2_500),
+    "Aggressive" to Triple(30_000, 100_000, 5_000)
+)
+
+fun bufferPresetName(minMs: Int, maxMs: Int, forPlaybackMs: Int): String =
+    BUFFER_PRESETS.find { it.second == Triple(minMs, maxMs, forPlaybackMs) }?.first
+        ?: "Custom (${minMs / 1000}s / ${maxMs / 1000}s)"
+
+/** Disk cache size options in MB (0 = off). */
+val DISK_CACHE_OPTIONS: List<Pair<Int, String>> = listOf(
+    0 to "Off",
+    100 to "100 MB",
+    500 to "500 MB",
+    1024 to "1 GB"
+)
+
+fun diskCacheName(mb: Int): String =
+    DISK_CACHE_OPTIONS.find { it.first == mb }?.second
+        ?: if (mb <= 0) "Off" else "$mb MB"
+
 /** Tiny SharedPreferences-backed store for user settings (no extra dependency). */
 class SettingsStore(context: Context) {
 
@@ -240,6 +266,44 @@ class SettingsStore(context: Context) {
     var autoPlayNext: Boolean
         get() = prefs.getBoolean(KEY_AUTOPLAY_NEXT, true)
         set(value) = prefs.edit().putBoolean(KEY_AUTOPLAY_NEXT, value).apply()
+
+    /** Play series episodes in random order instead of sequential (v0.9.0+). */
+    var shuffleEpisodes: Boolean
+        get() = prefs.getBoolean(KEY_SHUFFLE_EPISODES, false)
+        set(value) = prefs.edit().putBoolean(KEY_SHUFFLE_EPISODES, value).apply()
+
+    /** Picture-in-Picture: allow the player to shrink into a floating window (v0.9.0+). */
+    var pipEnabled: Boolean
+        get() = prefs.getBoolean(KEY_PIP_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_PIP_ENABLED, value).apply()
+
+    // ------------------------------------------------------------------
+    // Buffer & cache (v0.9.0+): player buffering + on-disk playback cache.
+    // ------------------------------------------------------------------
+
+    /** Minimum media buffered before playback can proceed (ms). */
+    var bufferMinMs: Int
+        get() = prefs.getInt(KEY_BUFFER_MIN_MS, 15_000).coerceIn(5_000, 120_000)
+        set(value) = prefs.edit().putInt(KEY_BUFFER_MIN_MS, value.coerceIn(5_000, 120_000)).apply()
+
+    /** Maximum media buffered ahead during playback (ms). */
+    var bufferMaxMs: Int
+        get() = prefs.getInt(KEY_BUFFER_MAX_MS, 50_000).coerceIn(10_000, 300_000)
+        set(value) = prefs.edit().putInt(KEY_BUFFER_MAX_MS, value.coerceIn(10_000, 300_000)).apply()
+
+    /** How much must be buffered before playback starts/resumes (ms). */
+    var bufferForPlaybackMs: Int
+        get() = prefs.getInt(KEY_BUFFER_FOR_PLAYBACK_MS, 2_500).coerceIn(1_000, 30_000)
+        set(value) = prefs.edit().putInt(KEY_BUFFER_FOR_PLAYBACK_MS, value.coerceIn(1_000, 30_000)).apply()
+
+    /**
+     * On-disk playback cache size in MB (0 = off). Caches progressive
+     * media so re-watches don't re-download. HLS/DASH segments are cached
+     * too; live streams are unaffected (they're never re-watched).
+     */
+    var diskCacheMb: Int
+        get() = prefs.getInt(KEY_DISK_CACHE_MB, 0).coerceAtLeast(0)
+        set(value) = prefs.edit().putInt(KEY_DISK_CACHE_MB, value.coerceAtLeast(0)).apply()
 
     /** Keep the screen awake while the player is open. */
     var keepScreenOn: Boolean
@@ -296,6 +360,23 @@ class SettingsStore(context: Context) {
             if (value == null) prefs.edit().remove(KEY_SIMKL_USERNAME).apply()
             else prefs.edit().putString(KEY_SIMKL_USERNAME, value).apply()
         }
+
+    /** TorBox API key (null = not configured). Debrid-only: resolves cached torrent infoHashes to direct HTTP links. */
+    var torboxApiKey: String?
+        get() = prefs.getString(KEY_TORBOX_API_KEY, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            if (value.isNullOrBlank()) prefs.edit().remove(KEY_TORBOX_API_KEY).apply()
+            else prefs.edit().putString(KEY_TORBOX_API_KEY, value.trim()).apply()
+        }
+
+    /** Real-Debrid API key (null = not configured). Debrid-only. */
+    var realDebridApiKey: String?
+        get() = prefs.getString(KEY_REALDEBRID_API_KEY, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            if (value.isNullOrBlank()) prefs.edit().remove(KEY_REALDEBRID_API_KEY).apply()
+            else prefs.edit().putString(KEY_REALDEBRID_API_KEY, value.trim()).apply()
+        }
+
 
     /** Trakt access token (null = not linked). */
     var traktAccessToken: String?
@@ -404,6 +485,17 @@ class SettingsStore(context: Context) {
         get() = prefs.getInt(KEY_SUB_EDGE, 2)
         set(value) = prefs.edit().putInt(KEY_SUB_EDGE, value.coerceIn(0, 4)).apply()
 
+    /**
+     * Global subtitle timing offset in milliseconds (v0.9.0+). Positive =
+     * subtitles appear later, negative = earlier. Range ±10 seconds.
+     * Applied by rewriting subtitle files with shifted timestamps before
+     * they are attached to the player (ExoPlayer has no delay API for
+     * side-loaded subtitles).
+     */
+    var subtitleOffsetMs: Long
+        get() = prefs.getLong(KEY_SUBTITLE_OFFSET_MS, 0L).coerceIn(-10_000L, 10_000L)
+        set(value) = prefs.edit().putLong(KEY_SUBTITLE_OFFSET_MS, value.coerceIn(-10_000L, 10_000L)).apply()
+
     /** Pinned Live TV channels, keys "addonId|metaId" ("m3u|url" for M3U). */
     var liveFavorites: Set<String>
         get() = prefs.getStringSet(KEY_LIVE_FAVS, emptySet())?.toSet() ?: emptySet()
@@ -481,15 +573,60 @@ class SettingsStore(context: Context) {
         get() = prefs.getInt(KEY_AUTOPLAY_MAX_SIZE, 0).coerceAtLeast(0)
         set(value) = prefs.edit().putInt(KEY_AUTOPLAY_MAX_SIZE, value.coerceAtLeast(0)).apply()
 
+    // ------------------------------------------------------------------
+    // Backup & restore (v0.9.0+): raw prefs access for JSON export/import.
+    // The onboarding prefs file is deliberately excluded — restoring
+    // onboarding_done=true on a new device would skip the first-run guide.
+    // ------------------------------------------------------------------
+
+    /** Snapshot of every stored preference (excludes the onboarding file). */
+    fun exportAllPrefs(): Map<String, *> = prefs.all.toMap()
+
+    /**
+     * Restores preferences from an export map. Unknown keys and wrong-typed
+     * values are skipped; StringSet values are restored as string sets.
+     */
+    fun importAllPrefs(values: Map<String, Any?>) {
+        val e = prefs.edit()
+        for ((k, v) in values) {
+            when (v) {
+                is Boolean -> e.putBoolean(k, v)
+                is Int -> e.putInt(k, v)
+                is Long -> e.putLong(k, v)
+                is Float -> e.putFloat(k, v)
+                is Double -> e.putFloat(k, v.toFloat())
+                is String -> e.putString(k, v)
+                is Set<*> -> {
+                    @Suppress("UNCHECKED_CAST")
+                    e.putStringSet(k, (v as Set<*>).map { it.toString() }.toSet())
+                }
+                is List<*> -> {
+                    // org.json turns JSON arrays into Lists; prefs string-sets
+                    // are the only collection type we store.
+                    e.putStringSet(k, v.map { it.toString() }.toSet())
+                }
+                null -> e.remove(k)
+            }
+        }
+        e.apply()
+    }
+
     companion object {
         private const val KEY_AUTOPLAY = "autoplay"
         private const val KEY_AUTOPLAY_NEXT = "autoplay_next_episode"
+        private const val KEY_SHUFFLE_EPISODES = "shuffle_episodes"
+        private const val KEY_PIP_ENABLED = "pip_enabled"
+        private const val KEY_BUFFER_MIN_MS = "buffer_min_ms"
+        private const val KEY_BUFFER_MAX_MS = "buffer_max_ms"
+        private const val KEY_BUFFER_FOR_PLAYBACK_MS = "buffer_for_playback_ms"
+        private const val KEY_DISK_CACHE_MB = "disk_cache_mb"
         private const val KEY_ONBOARDING_DONE = "onboarding_done"
         private const val KEY_AUDIO_LANG = "preferred_audio_language"
         private const val KEY_SUB_COLOR = "subtitle_text_color"
         private const val KEY_SUB_SIZE = "subtitle_text_size_scale"
         private const val KEY_SUB_BG = "subtitle_background_color"
         private const val KEY_SUB_EDGE = "subtitle_edge_type"
+        private const val KEY_SUBTITLE_OFFSET_MS = "subtitle_offset_ms"
         private const val KEY_SYSTEM_CAPTIONS = "use_system_captions"
         private const val KEY_LIVE_FAVS = "live_favorites"
         private const val KEY_LIVE_RECENT = "live_recent"
@@ -508,6 +645,8 @@ class SettingsStore(context: Context) {
         private const val KEY_TRAKT_REFRESH = "trakt_refresh_token"
         private const val KEY_TRAKT_EXPIRY = "trakt_token_expiry"
         private const val KEY_TRAKT_USERNAME = "trakt_username"
+        private const val KEY_TORBOX_API_KEY = "torbox_api_key"
+        private const val KEY_REALDEBRID_API_KEY = "realdebrid_api_key"
         private const val KEY_STREAMS_PER_SOURCE = "streams_per_source"
         private const val KEY_QUALITY_ORDER = "quality_order"
         private const val KEY_STREAM_AUTOPLAY = "stream_autoplay"

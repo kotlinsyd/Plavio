@@ -1,5 +1,9 @@
 package com.pulsestream.app.data
 
+import com.pulsestream.app.BuildConfig
+import org.json.JSONArray
+import org.json.JSONObject
+
 import com.pulsestream.app.data.db.AppDatabase
 import com.pulsestream.app.data.db.CatalogCache
 import com.pulsestream.app.data.db.InstalledAddon
@@ -824,6 +828,72 @@ class StreamRepository(
                 }
             }
         }
+        // Debrid: resolve infoHash-only streams to direct HTTP links.
+        // Runs after the main fetch so direct streams show first; resolved
+        // streams are appended as they complete (parallel, non-blocking).
+        // Only active when at least one debrid API key is configured.
+        // Per stream, providers are tried in order (TorBox → Real-Debrid)
+        // and the first success wins.
+        data class DebridProvider(
+            val tag: String,
+            val resolve: suspend (String) -> String?
+        )
+        val debridProviders = buildList {
+            val torboxKey = settings.torboxApiKey
+            if (!torboxKey.isNullOrBlank()) {
+                val torbox = com.pulsestream.app.data.debrid.TorBoxApi(torboxKey)
+                add(DebridProvider("⚡ TorBox") { hash ->
+                    runCatching { torbox.resolveCachedToHttp(hash) }.getOrNull()
+                })
+            }
+            val rdKey = settings.realDebridApiKey
+            if (!rdKey.isNullOrBlank()) {
+                val rd = com.pulsestream.app.data.debrid.RealDebridApi(rdKey)
+                add(DebridProvider("⚡ RD") { hash ->
+                    runCatching { rd.resolveCachedToHttp(hash) }.getOrNull()
+                })
+            }
+        }
+        if (debridProviders.isNotEmpty()) {
+            val pending = mutex.withLock {
+                accStreams.filter { it.infoHash != null && it.url.startsWith("infohash:") }
+            }
+            if (pending.isNotEmpty()) {
+                coroutineScope {
+                    pending.forEach { stream ->
+                        launch {
+                            var resolved: Pair<String, String>? = null
+                            for (provider in debridProviders) {
+                                val httpUrl = provider.resolve(stream.infoHash!!)
+                                if (!httpUrl.isNullOrBlank()) {
+                                    resolved = provider.tag to httpUrl
+                                    break
+                                }
+                            }
+                            val (tag, httpUrl) = resolved ?: return@launch
+                            var changed = false
+                            mutex.withLock {
+                                val idx = accStreams.indexOfFirst {
+                                    it.infoHash == stream.infoHash && it.url.startsWith("infohash:")
+                                }
+                                if (idx >= 0 && seenStreams.add(httpUrl)) {
+                                    val old = accStreams[idx]
+                                    accStreams[idx] = old.copy(
+                                        url = httpUrl,
+                                        infoHash = null,
+                                        sourceName = tag + (old.sourceName?.let { " · $it" } ?: "")
+                                    )
+                                    changed = true
+                                }
+                            }
+                            if (changed) {
+                                mutex.withLock { send(StreamResult(prioritize(accStreams.toList()), accSubs.toList())) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         mutex.withLock { send(StreamResult(prioritize(accStreams.toList()), accSubs.toList())) }
     }.flowOn(Dispatchers.IO)
 
@@ -1278,5 +1348,164 @@ class StreamRepository(
             json = CatalogCodec.encodeMetas(items.take(take))
         }
         return json
+    }
+
+    // ------------------------------------------------------------------
+    // Backup & restore (v0.9.0+): local-file JSON export/import.
+    // Covers settings (minus the onboarding file), installed addons,
+    // watchlist and playback states. Catalog/subtitle caches are transient
+    // and deliberately excluded.
+    // ------------------------------------------------------------------
+
+    /**
+     * Serializes the backup payload to JSON. Never throws: returns an
+     * error Result instead so the UI can show a message.
+     */
+    suspend fun exportBackupJson(): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val root = JSONObject()
+            root.put("format", "plavio-backup")
+            root.put("version", 1)
+            root.put("exportedAt", System.currentTimeMillis())
+            root.put("appVersion", BuildConfig.VERSION_NAME)
+
+            val prefsJson = JSONObject()
+            for ((k, v) in settings.exportAllPrefs()) {
+                when (v) {
+                    is Boolean, is Int, is Long, is Float, is Double, is String -> prefsJson.put(k, v)
+                    is Set<*> -> prefsJson.put(k, JSONArray(v.map { it.toString() }))
+                    null -> prefsJson.put(k, JSONObject.NULL)
+                }
+            }
+            root.put("settings", prefsJson)
+
+            fun addonJson(a: InstalledAddon) = JSONObject().apply {
+                put("id", a.id); put("name", a.name); put("version", a.version)
+                put("description", a.description); put("baseUrl", a.baseUrl)
+                put("types", a.types); put("resources", a.resources)
+                put("preinstalled", a.preinstalled); put("enabled", a.enabled)
+                put("configurable", a.configurable); put("showOnHome", a.showOnHome)
+                put("logoUrl", a.logoUrl); put("sortOrder", a.sortOrder)
+                put("starred", a.starred); put("addedAt", a.addedAt)
+            }
+            root.put("addons", JSONArray(db.addonDao().getAll().map { addonJson(it) }))
+
+            fun watchlistJson(w: WatchlistItem) = JSONObject().apply {
+                put("key", w.key); put("addonId", w.addonId); put("type", w.type)
+                put("metaId", w.metaId); put("name", w.name)
+                put("poster", w.poster ?: JSONObject.NULL); put("addedAt", w.addedAt)
+            }
+            root.put("watchlist", JSONArray(db.watchlistDao().getAll().map { watchlistJson(it) }))
+
+            fun playbackJson(p: PlaybackState) = JSONObject().apply {
+                put("key", p.key); put("title", p.title)
+                put("poster", p.poster ?: JSONObject.NULL); put("videoId", p.videoId)
+                put("streamUrl", p.streamUrl); put("positionMs", p.positionMs)
+                put("durationMs", p.durationMs)
+                put("imdbId", p.imdbId ?: JSONObject.NULL)
+                put("season", p.season); put("episode", p.episode)
+                put("updatedAt", p.updatedAt)
+            }
+            root.put("playback", JSONArray(db.playbackDao().getAll().map { playbackJson(it) }))
+
+            root.toString()
+        }
+    }
+
+    /**
+     * Restores a backup payload: replaces settings, addons, watchlist and
+     * playback states wholesale. Returns a Result so the UI can report
+     * success/failure. The caller should recreate the activity afterwards
+     * so every screen picks up the restored state.
+     */
+    suspend fun importBackupJson(json: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val root = JSONObject(json)
+            require(root.optString("format") == "plavio-backup") { "Not a Plavio backup file." }
+
+            // Settings first — plain map, unknown keys are kept verbatim and
+            // simply ignored by SettingsStore on read.
+            val prefsMap = mutableMapOf<String, Any?>()
+            val prefsJson = root.optJSONObject("settings")
+            if (prefsJson != null) {
+                val keys = prefsJson.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    prefsMap[k] = when (val v = prefsJson.opt(k)) {
+                        JSONObject.NULL -> null
+                        is JSONArray -> (0 until v.length()).map { v.optString(it) }
+                        else -> v
+                    }
+                }
+            }
+
+            // Parse rows before touching the DB so a malformed file fails
+            // before anything is wiped.
+            val addons = root.optJSONArray("addons")?.let { arr ->
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    InstalledAddon(
+                        id = o.getString("id"),
+                        name = o.optString("name", ""),
+                        version = o.optString("version", ""),
+                        description = o.optString("description", ""),
+                        baseUrl = o.optString("baseUrl", ""),
+                        types = o.optString("types", ""),
+                        resources = o.optString("resources", "catalog,meta,stream"),
+                        preinstalled = o.optBoolean("preinstalled", false),
+                        enabled = o.optBoolean("enabled", true),
+                        configurable = o.optBoolean("configurable", false),
+                        showOnHome = o.optBoolean("showOnHome", true),
+                        logoUrl = o.optString("logoUrl", ""),
+                        sortOrder = o.optInt("sortOrder", 0),
+                        starred = o.optBoolean("starred", false),
+                        addedAt = o.optLong("addedAt", System.currentTimeMillis())
+                    )
+                }
+            } ?: emptyList()
+
+            val watchlist = root.optJSONArray("watchlist")?.let { arr ->
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    WatchlistItem(
+                        key = o.getString("key"),
+                        addonId = o.optString("addonId", ""),
+                        type = o.optString("type", ""),
+                        metaId = o.optString("metaId", ""),
+                        name = o.optString("name", ""),
+                        poster = o.optString("poster", null),
+                        addedAt = o.optLong("addedAt", System.currentTimeMillis())
+                    )
+                }
+            } ?: emptyList()
+
+            val playback = root.optJSONArray("playback")?.let { arr ->
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    PlaybackState(
+                        key = o.getString("key"),
+                        title = o.optString("title", ""),
+                        poster = o.optString("poster", null),
+                        videoId = o.optString("videoId", ""),
+                        streamUrl = o.optString("streamUrl", ""),
+                        positionMs = o.optLong("positionMs", 0L),
+                        durationMs = o.optLong("durationMs", 0L),
+                        imdbId = o.optString("imdbId", null),
+                        season = o.optInt("season", 0),
+                        episode = o.optInt("episode", 0),
+                        updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
+                    )
+                }
+            } ?: emptyList()
+
+            // All parsed — now replace.
+            settings.importAllPrefs(prefsMap)
+            db.addonDao().clearAll()
+            addons.forEach { db.addonDao().upsert(it) }
+            db.watchlistDao().clearAll()
+            watchlist.forEach { db.watchlistDao().upsert(it) }
+            db.playbackDao().clearAll()
+            playback.forEach { db.playbackDao().upsert(it) }
+        }
     }
 }
