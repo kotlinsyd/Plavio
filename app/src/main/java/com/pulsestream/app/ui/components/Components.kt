@@ -459,7 +459,7 @@ fun PlayButton(
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.height(52.dp),
+        modifier = modifier.height(52.dp).tvFocusRing(RoundedCornerShape(28.dp)),
         colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
         contentPadding = androidx.compose.foundation.layout.PaddingValues()
     ) {
