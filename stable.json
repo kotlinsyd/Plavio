@@ -1,1 +1,1 @@
-{"apkUrl":"https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/0.9.6/Plavio-v0.9.6.apk","major":false,"notes":"Hotfix: fixed audio not working on some devices (duplicate audio renderer removed).","version":"0.9.6"}
+{"apkUrl":"https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/0.9.7/Plavio-v0.9.7.apk","major":false,"notes":"Hotfix: fixed EAC3/Dolby audio not playing on devices without hardware Dolby decoders (e.g. OnePlus 13R) — now forces FFmpeg software decoding for Dolby/DTS codecs.","version":"0.9.7"}
