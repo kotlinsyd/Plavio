@@ -1,5 +1,7 @@
 package com.pulsestream.app.ui.screens
 
+import com.pulsestream.app.ui.screens.player.*
+
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
@@ -44,6 +46,8 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -70,10 +74,12 @@ import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -109,6 +115,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.stringResource
+import com.pulsestream.app.MainActivity
 import com.pulsestream.app.R
 import com.pulsestream.app.ui.tv.rememberIsTv
 import com.pulsestream.app.ui.tv.tvFocusRing
@@ -124,9 +131,14 @@ import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.VideoSize
+import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.DefaultRenderersFactory
+import com.pulsestream.app.player.PlavioRenderersFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -138,6 +150,7 @@ import com.pulsestream.app.data.ASPECT_MODES
 import com.pulsestream.app.data.IntroDbApi
 import com.pulsestream.app.data.PlaybackHeaders
 import com.pulsestream.app.data.PlaybackRequest
+import com.pulsestream.app.util.ExternalPlayer
 import com.pulsestream.app.data.TvChannelRef
 import com.pulsestream.app.data.ResolvedSubtitle
 import java.util.concurrent.TimeUnit
@@ -151,12 +164,13 @@ import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.Subtitle
 import com.pulsestream.app.data.resolveSubtitleFiles
+import com.pulsestream.app.data.shiftSubtitles
+import com.pulsestream.app.data.formatOffsetMs
 import com.pulsestream.app.data.Video
 import com.pulsestream.app.data.subtitleLangMatches
 import com.pulsestream.app.data.simkl.SimklManager
-import com.pulsestream.app.data.simkl.SimklScrobbler
+import com.pulsestream.app.data.scrobble.ScrobbleManager
 import com.pulsestream.app.data.trakt.TraktManager
-import com.pulsestream.app.data.trakt.TraktScrobbler
 import com.pulsestream.app.data.buttonLabel
 import com.pulsestream.app.data.streamQualityLabel
 import com.pulsestream.app.ui.components.AddonTabs
@@ -189,180 +203,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
-
-/**
- * Nuvio parity: HEAD-probe a URL's Content-Type for self-heal.
- * Returns a media3 MIME string (or null when unknown).
- */
-private fun probePlaybackContentType(url: String, headers: Map<String, String>): String? {
-    return try {
-        val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
-            requestMethod = "HEAD"
-            connectTimeout = 8000
-            readTimeout = 8000
-            instanceFollowRedirects = true
-            headers.forEach { (k, v) -> setRequestProperty(k, v) }
-        }
-        conn.connect()
-        val ct = conn.contentType?.lowercase().orEmpty()
-        conn.disconnect()
-        when {
-            "mpegurl" in ct || "m3u8" in ct -> androidx.media3.common.MimeTypes.APPLICATION_M3U8
-            "mpd" in ct || "dash" in ct -> androidx.media3.common.MimeTypes.APPLICATION_MPD
-            "mp4" in ct -> androidx.media3.common.MimeTypes.VIDEO_MP4
-            "webm" in ct -> androidx.media3.common.MimeTypes.VIDEO_WEBM
-            "matroska" in ct -> androidx.media3.common.MimeTypes.VIDEO_MATROSKA
-            else -> null
-        }
-    } catch (_: Exception) { null }
-}
-
-/** Installs the fallback-trust SSLSocketFactory once (idempotent, NuvioTV parity). */
-private var playbackTlsInstalled = false
-private fun ensurePlaybackTlsInstalled() {
-    if (playbackTlsInstalled) return
-    playbackTlsInstalled = true
-    try {
-        val platformTm = run {
-            val tmf = TrustManagerFactory.getInstance(
-                TrustManagerFactory.getDefaultAlgorithm()
-            ).apply { init(null as java.security.KeyStore?) }
-            tmf.trustManagers.filterIsInstance<X509TrustManager>().first()
-        }
-        val fallbackTm = object : X509TrustManager {
-            override fun checkClientTrusted(
-                chain: Array<java.security.cert.X509Certificate>, authType: String
-            ) = platformTm.checkClientTrusted(chain, authType)
-            override fun checkServerTrusted(
-                chain: Array<java.security.cert.X509Certificate>, authType: String
-            ) {
-                try {
-                    platformTm.checkServerTrusted(chain, authType)
-                } catch (_: Exception) {
-                    // Fall back to trust-all (NuvioTV parity).
-                }
-            }
-            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> =
-                platformTm.acceptedIssuers
-        }
-        val sslContext = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf<TrustManager>(fallbackTm), java.security.SecureRandom())
-        }
-        HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
-        val platformVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
-        HttpsURLConnection.setDefaultHostnameVerifier { hostname, session ->
-            try {
-                platformVerifier.verify(hostname, session)
-            } catch (_: Exception) {
-                true // Fall back to allow (NuvioTV parity).
-            }
-        }
-    } catch (_: Exception) { /* platform TLS unchanged */ }
-}
-
-/** Transient on-screen feedback for gestures, speed, aspect and track changes. */
-private sealed interface PlayerIndicator {
-    data class Volume(val percent: Int) : PlayerIndicator
-    data class Brightness(val percent: Int) : PlayerIndicator
-    data class Seek(val text: String) : PlayerIndicator
-    data class Speed(val label: String) : PlayerIndicator
-    data class Message(val text: String) : PlayerIndicator
-}
-
-private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
-
-private fun speedLabel(s: Float): String =
-    if (s == s.toInt().toFloat()) "${s.toInt()}x" else "${s}x"
-
-/** Stable identity of a resolved subtitle list (cache files are reused across re-resolves). */
-private fun subtitleIdentity(list: List<ResolvedSubtitle>): String =
-    list.joinToString("|") { it.file.absolutePath + "#" + it.mimeType }
-
-private fun formatMs(ms: Long): String {
-    val s = (ms / 1000).coerceAtLeast(0)
-    val h = s / 3600
-    val m = (s % 3600) / 60
-    val sec = s % 60
-    return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
-}
-
-/** ISO 639-2/B (and -1) codes seen in the wild → display names. */
-private val LANG_NAMES = mapOf(
-    "eng" to "English", "en" to "English",
-    "spa" to "Spanish", "es" to "Spanish",
-    "fre" to "French", "fra" to "French", "fr" to "French",
-    "deu" to "German", "ger" to "German", "de" to "German",
-    "ita" to "Italian", "it" to "Italian",
-    "por" to "Portuguese", "pob" to "Portuguese (BR)", "pt" to "Portuguese",
-    "rus" to "Russian", "ru" to "Russian",
-    "ara" to "Arabic", "ar" to "Arabic",
-    "hin" to "Hindi", "hi" to "Hindi",
-    "urd" to "Urdu", "ur" to "Urdu",
-    "tur" to "Turkish", "tr" to "Turkish",
-    "zho" to "Chinese", "chi" to "Chinese", "zh" to "Chinese",
-    "jpn" to "Japanese", "ja" to "Japanese",
-    "kor" to "Korean", "ko" to "Korean",
-    "nld" to "Dutch", "dut" to "Dutch", "nl" to "Dutch",
-    "swe" to "Swedish", "sv" to "Swedish",
-    "nor" to "Norwegian", "nob" to "Norwegian", "no" to "Norwegian",
-    "dan" to "Danish", "da" to "Danish",
-    "fin" to "Finnish", "fi" to "Finnish",
-    "pol" to "Polish", "pl" to "Polish",
-    "ces" to "Czech", "cze" to "Czech", "cs" to "Czech",
-    "slk" to "Slovak", "slo" to "Slovak", "sk" to "Slovak",
-    "ron" to "Romanian", "rum" to "Romanian", "ro" to "Romanian",
-    "ell" to "Greek", "gre" to "Greek", "el" to "Greek",
-    "heb" to "Hebrew", "he" to "Hebrew",
-    "tha" to "Thai", "th" to "Thai",
-    "vie" to "Vietnamese", "vi" to "Vietnamese",
-    "ind" to "Indonesian", "id" to "Indonesian",
-    "msa" to "Malay", "may" to "Malay", "ms" to "Malay",
-    "tam" to "Tamil", "ta" to "Tamil",
-    "tel" to "Telugu", "te" to "Telugu",
-    "ben" to "Bengali", "bn" to "Bengali",
-    "mar" to "Marathi", "mr" to "Marathi",
-    "pan" to "Punjabi", "pa" to "Punjabi",
-    "guj" to "Gujarati", "gu" to "Gujarati",
-    "ukr" to "Ukrainian", "uk" to "Ukrainian",
-    "hun" to "Hungarian", "hu" to "Hungarian",
-    "srp" to "Serbian", "sr" to "Serbian",
-    "hrv" to "Croatian", "hr" to "Croatian",
-    "bos" to "Bosnian", "ba" to "Bosnian",
-    "slv" to "Slovenian", "sl" to "Slovenian",
-    "bul" to "Bulgarian", "bg" to "Bulgarian",
-    "cat" to "Catalan", "ca" to "Catalan"
-)
-
-private fun displayLanguage(code: String?): String? {
-    if (code.isNullOrBlank() || code == "und") return null
-    return LANG_NAMES[code.lowercase()] ?: code.uppercase()
-}
-
-private data class TrackOption(
-    val group: TrackGroup,
-    val trackIndex: Int,
-    val label: String,
-    val selected: Boolean
-)
-
-private fun trackLabel(format: Format, fallbackIndex: Int): String {
-    if (!format.label.isNullOrBlank()) return format.label!!
-    return displayLanguage(format.language) ?: "Track ${fallbackIndex + 1}"
-}
-
-private fun trackOptions(player: ExoPlayer, type: Int): List<TrackOption> =
-    player.currentTracks.groups
-        .filter { it.type == type }
-        .flatMapIndexed { gi, g ->
-            (0 until g.length).map { i ->
-                TrackOption(g.mediaTrackGroup, i, trackLabel(g.getTrackFormat(i), gi), g.isSelected)
-            }
-        }
-
-private fun hasSelectedTrack(player: ExoPlayer, type: Int): Boolean =
-    player.currentTracks.groups.any { it.type == type && it.isSelected }
 
 /**
  * Reference-style player: title block top-left, icon cluster top-right,
@@ -381,6 +224,15 @@ fun PlayerScreen(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val initialRequest = repository.pendingPlayback
     val settings = repository.settings
+
+    // PiP (v0.9.0+): track whether the video floats so overlay UI can hide,
+    // and mark the player active so MainActivity.onUserLeaveHint auto-enters
+    // PiP when Home/recents is pressed mid-playback.
+    val inPip by MainActivity.pipMode.collectAsState()
+    DisposableEffect(Unit) {
+        MainActivity.isPlayerActive = true
+        onDispose { MainActivity.isPlayerActive = false }
+    }
 
     // (Back handling is registered below, after the UI state it depends on.)
 
@@ -403,6 +255,8 @@ fun PlayerScreen(
     val disposed = remember { AtomicBoolean(false) }
     /** Non-null while the current stream is in a failed state (#4). */
     var playerError by remember { mutableStateOf<String?>(null) }
+    /** Auto-failover: counts consecutive auto-advance attempts (max 3). */
+    var autoFailoverCount by remember { mutableStateOf(0) }
     /** Nuvio parity: self-heal — probe Content-Type and retry once on format errors. */
     var mimeHealAttempted by remember { mutableStateOf(false) }
     /**
@@ -410,6 +264,12 @@ fun PlayerScreen(
      * self-heal path. Indirection avoids forward-reference issues.
      */
     var healOnFormatError: ((PlaybackException) -> Unit)? by remember { mutableStateOf(null) }
+    /**
+     * Set after the local helpers below are declared; invoked by errorListener
+     * for the auto-failover path. Indirection avoids forward-reference issues
+     * (same pattern as healOnFormatError).
+     */
+    var failoverToNextSource: ((attempt: Int) -> Unit)? by remember { mutableStateOf(null) }
     /**
      * Registered on every player instance we build (#4). ExoPlayer invokes
      * listeners on the player's application thread (main here), so touching
@@ -427,8 +287,39 @@ fun PlayerScreen(
                     healOnFormatError?.invoke(error)
                     return
                 }
+                // Auto-failover: on source error, automatically try the next stream
+                // (across all addons) up to 3 times before showing the error UI.
+                // Also covers decoder errors (e.g. 4K on phones that can't decode it).
+                val isSourceError = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+                    error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ||
+                    error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
+                    error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+                    error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
+                    error.errorCode == PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED
+                if (isSourceError && autoFailoverCount < 3) {
+                    autoFailoverCount++
+                    failoverToNextSource?.invoke(autoFailoverCount)
+                    return
+                }
+                autoFailoverCount = 0
                 playerError = error.message?.takeIf { it.isNotBlank() }
                     ?: "Playback failed (code ${error.errorCode})"
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                // Keeps the PiP window's play/pause RemoteAction icon in sync.
+                (activity as? MainActivity)?.updatePipActions(isPlaying)
+                // Reset auto-failover counter on successful playback
+                if (isPlaying) autoFailoverCount = 0
+            }
+
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                // Keeps the PiP aspect ratio current (portrait videos float
+                // portrait like YouTube) for Home-press auto-PiP.
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    MainActivity.pipVideoW = videoSize.width
+                    MainActivity.pipVideoH = videoSize.height
+                }
             }
         }
     }
@@ -511,27 +402,37 @@ fun PlayerScreen(
         val inferredMime = forcedMime ?: PlaybackHeaders.inferMimeType(req.streamUrl)
         // Memory-conscious buffering: on low-RAM devices (e.g. 48MB-heap TVs)
         // the default ~50s HLS buffer exhausts the heap mid-playback and OOMs.
-        // Use a smaller buffer window so playback survives constrained heaps.
+        // The user's buffer settings (Settings > Playback > Buffer & Cache)
+        // apply here, capped to the safe low-memory window on such devices.
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val lowMemory = am.isLowRamDevice || am.memoryClass <= 64
-        val loadControl = if (lowMemory) {
-            DefaultLoadControl.Builder()
-                .setBufferDurationsMs(
-                    /* minBufferMs = */ 15_000,
-                    /* maxBufferMs = */ 30_000,
-                    /* bufferForPlaybackMs = */ 2_500,
-                    /* bufferForPlaybackAfterRebufferMs = */ 5_000
-                )
-                .build()
+        val minBufferMs = if (lowMemory) minOf(settings.bufferMinMs, 15_000) else settings.bufferMinMs
+        val maxBufferMs = if (lowMemory) minOf(settings.bufferMaxMs, 30_000) else settings.bufferMaxMs
+        val forPlaybackMs = if (lowMemory) minOf(settings.bufferForPlaybackMs, 2_500) else settings.bufferForPlaybackMs
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ minBufferMs,
+                /* maxBufferMs = */ maxBufferMs,
+                /* bufferForPlaybackMs = */ forPlaybackMs,
+                /* bufferForPlaybackAfterRebufferMs = */ (forPlaybackMs * 2).coerceAtMost(30_000)
+            )
+            .build()
+        // Optional on-disk playback cache (Settings > Playback > Buffer &
+        // Cache): caches media so re-watches don't re-download. 0 = off.
+        val cacheMb = settings.diskCacheMb
+        val mediaSourceFactory = if (cacheMb > 0) {
+            val upstreamFactory = dataSourceFactory
+            val cacheDataSourceFactory = CacheDataSource.Factory()
+                .setCache(PlaybackCache.get(context, cacheMb * 1024L * 1024L))
+                .setUpstreamDataSourceFactory(upstreamFactory)
+            DefaultMediaSourceFactory(cacheDataSourceFactory)
         } else {
-            DefaultLoadControl()
+            DefaultMediaSourceFactory(dataSourceFactory)
         }
         return ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
-            .setRenderersFactory(
-                DefaultRenderersFactory(context).setExtensionRendererMode(
-                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER))
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .setRenderersFactory(PlavioRenderersFactory(context))
+            .setMediaSourceFactory(mediaSourceFactory)
             // Belt and suspenders: also tell the track selector the preferred
             // subtitle languages, so his languages win even if the default
             // flag is ever ignored.
@@ -605,6 +506,16 @@ fun PlayerScreen(
     val latestPlayer = rememberUpdatedState(player)
     val latestRequest = rememberUpdatedState(currentRequest)
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
+
+    // PiP RemoteAction: the floating window's play/pause button toggles the
+    // player here. The player listener's onIsPlayingChanged then refreshes
+    // the RemoteAction icon via MainActivity.updatePipActions.
+    // (Placed after `player` is declared — composable locals are positional.)
+    LaunchedEffect(Unit) {
+        MainActivity.pipToggleRequest.collect {
+            player.playWhenReady = !player.playWhenReady
+        }
+    }
     /**
      * Side-loaded subtitles, resolved (downloaded + format-sniffed) in the
      * background for the current request. Kept in state so a rebuilt player
@@ -612,6 +523,39 @@ fun PlayerScreen(
      * re-preparing the video to attach them (#29).
      */
     var resolvedSubs by remember { mutableStateOf(emptyList<ResolvedSubtitle>()) }
+    /**
+     * Raw (unshifted) downloaded subtitles — the source of truth for timing
+     * shifts. The in-player +/- timing buttons re-shift from these files,
+     * never from already-shifted output (which would compound the offset).
+     */
+    var rawResolvedSubs by remember { mutableStateOf(emptyList<ResolvedSubtitle>()) }
+    /**
+     * In-memory per-title subtitle timing override (ms), added to the global
+     * [SettingsStore.subtitleOffsetMs]. Resets when the title changes — only
+     * the global setting persists across titles.
+     */
+    var subOffsetOverrideMs by remember { mutableLongStateOf(0L) }
+    /**
+     * Effective subtitle timing offset for the current title: global default
+     * plus the in-player per-title adjustment, clamped to ±10s.
+     */
+    fun effectiveSubOffsetMs(): Long =
+        (settings.subtitleOffsetMs + subOffsetOverrideMs).coerceIn(-10_000L, 10_000L)
+    /**
+     * Re-applies the effective timing offset to the raw subtitles and
+     * publishes the shifted list (which re-attaches to the player via the
+     * existing resolvedSubs effect). Runs on IO; no-op when there is nothing
+     * to shift.
+     */
+    fun applySubtitleTiming() {
+        val raw = rawResolvedSubs
+        if (raw.isEmpty()) return
+        val offset = effectiveSubOffsetMs()
+        ioScope.launch {
+            val shifted = shiftSubtitles(raw, offset, context.cacheDir)
+            if (!disposed.get()) resolvedSubs = shifted
+        }
+    }
     // Self-heal handler: probe Content-Type, rebuild once with probed MIME.
     healOnFormatError = { error ->
         ioScope.launch {
@@ -641,15 +585,20 @@ fun PlayerScreen(
      */
     var subsAttached by remember { mutableStateOf<Pair<ExoPlayer, String>?>(null) }
 
-    // Simkl sync: scrobbles playback progress when the account is linked.
+    // Unified scrobbling: one pipeline fans playback events out to every
+    // linked backend (Trakt, Simkl, …). Each service is enabled/disabled
+    // independently via its own login state; auth flows are untouched.
     val simkl = remember { SimklManager(settings) }
-    val simklScrobbler = remember { SimklScrobbler(simkl, ioScope) }
-    // Trakt sync: same, when the Trakt account is linked.
     val trakt = remember { TraktManager(settings) }
-    val traktScrobbler = remember { TraktScrobbler(trakt, ioScope) }
+    val scrobbler = remember { ScrobbleManager(listOf(simkl, trakt), ioScope) }
 
     var showControls by remember { mutableStateOf(true) }
     var controlsTick by remember { mutableIntStateOf(0) }
+    // PiP: drop the transport UI the moment the window floats (the system
+    // draws its own PiP controls); restore the default on return.
+    LaunchedEffect(inPip) {
+        if (inPip) showControls = false
+    }
     var locked by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(true) }
     var positionMs by remember { mutableLongStateOf(0L) }
@@ -708,8 +657,11 @@ fun PlayerScreen(
     // Sources + episodes sheets
     var sourcesOpen by remember { mutableStateOf(false) }
     var episodesOpen by remember { mutableStateOf(false) }
+    var downloadStream by remember { mutableStateOf<com.pulsestream.app.data.StreamItem?>(null) }
     var zapping by remember { mutableStateOf(false) }
     var availableStreams by remember { mutableStateOf(initialRequest.streams) }
+    /** Count of streams hidden because the device can't decode them (e.g. 4K on budget phones). */
+    var hiddenIncompatibleCount by remember { mutableStateOf(0) }
     var streamsLoading by remember { mutableStateOf(false) }
     var streamsJob by remember { mutableStateOf<Job?>(null) }
 
@@ -888,13 +840,18 @@ fun PlayerScreen(
         val all = reqAtStart.subtitles + addedSubs
         subLoadError = false
         resolvedSubs = emptyList()
+        rawResolvedSubs = emptyList()
+        subOffsetOverrideMs = 0L
         if (all.isEmpty() || disposed.get()) return@LaunchedEffect
         val resolved = resolveSubtitleFiles(all, context.cacheDir)
         // Superseded while resolving (source/episode/zap switch) — the newer
         // effect run owns the result.
         if (currentRequest != reqAtStart || disposed.get()) return@LaunchedEffect
         subLoadError = resolved.isEmpty()
-        resolvedSubs = resolved
+        // Store the raw files, then publish the timing-shifted list. The
+        // separate attach effect picks up resolvedSubs.
+        rawResolvedSubs = resolved
+        resolvedSubs = shiftSubtitles(resolved, effectiveSubOffsetMs(), context.cacheDir)
     }
 
     // Attach resolved subtitles to the player. Skips silently when the fresh
@@ -1076,7 +1033,11 @@ fun PlayerScreen(
             try {
                 repository.streamResultsFlow(type, videoId).collect { result ->
                     if (result.streams.isNotEmpty()) {
-                        withContext(Dispatchers.Main) { availableStreams = result.streams }
+                        withContext(Dispatchers.Main) {
+                            val (playable, hidden) = ( result.streams to 0 )
+                            availableStreams = playable
+                            hiddenIncompatibleCount = hidden
+                        }
                     }
                 }
             } finally {
@@ -1113,6 +1074,12 @@ fun PlayerScreen(
         switchSource(next)
     }
 
+    // Wire the auto-failover path now that the helpers exist.
+    failoverToNextSource = { attempt ->
+        pokeIndicator(PlayerIndicator.Message("Trying next source… ($attempt/3)"))
+        nextSource()
+    }
+
     fun playEpisode(video: Video) {
         // #9: never start episode work on disposed state (ghost audio).
         if (disposed.get()) return
@@ -1125,12 +1092,14 @@ fun PlayerScreen(
             }
             // Back to the main thread: everything below touches Compose state.
             withContext(Dispatchers.Main) {
-                val stream = result?.streams?.firstOrNull()
+                val (playableStreams, hidden) = result?.streams?.let { ( it to 0 ) } ?: (emptyList<com.pulsestream.app.data.StreamItem>() to 0)
+                val stream = playableStreams.firstOrNull()
                 if (stream == null) {
                     pokeIndicator(PlayerIndicator.Message("No sources found for this episode"))
                 } else {
                     val showName = currentRequest.seriesName ?: currentRequest.title
-                    availableStreams = result.streams
+                    availableStreams = playableStreams
+                    hiddenIncompatibleCount = hidden
                     replaceStream(
                         currentRequest.copy(
                             streamUrl = stream.url,
@@ -1138,13 +1107,13 @@ fun PlayerScreen(
                             title = "$showName S${video.season}E${video.episode}",
                             poster = video.thumbnail ?: currentRequest.poster,
                             videoId = video.id,
-                            subtitles = result.subtitles,
+                            subtitles = result?.subtitles ?: emptyList(),
                             season = video.season,
                             episode = video.episode,
                             episodeTitle = video.title,
                             streamLabel = streamQualityLabel(stream),
                             sourceName = stream.sourceName,
-                            streams = result.streams
+                            streams = result?.streams ?: emptyList()
                         ),
                         startAtMs = 0L,
                         autoplay = true
@@ -1339,22 +1308,22 @@ fun PlayerScreen(
                 val eps = currentRequest.episodes.sortedWith(
                     compareBy({ it.season }, { it.episode })
                 )
-                val idx = eps.indexOfFirst { it.id == currentRequest.videoId }
-                val next = if (idx >= 0) eps.getOrNull(idx + 1) else null
+                // v0.9.0: shuffle mode picks a random episode instead of the
+                // sequential next one (never the just-finished episode itself).
+                val next = if (settings.shuffleEpisodes) {
+                    eps.filter { it.id != currentRequest.videoId }.randomOrNull()
+                        ?: eps.randomOrNull()
+                } else {
+                    val idx = eps.indexOfFirst { it.id == currentRequest.videoId }
+                    if (idx >= 0) eps.getOrNull(idx + 1) else null
+                }
                 if (next != null) {
                     pokeIndicator(PlayerIndicator.Message("Playing next episode…"))
                     playEpisode(next)
                 }
             }
             if (!currentRequest.isTrailer) {
-                simklScrobbler.tick(
-                    currentRequest,
-                    positionMs,
-                    durationMs,
-                    isPlaying,
-                    c.playbackState == Player.STATE_ENDED
-                )
-                traktScrobbler.tick(
+                scrobbler.tick(
                     currentRequest,
                     positionMs,
                     durationMs,
@@ -1394,9 +1363,11 @@ fun PlayerScreen(
                 repository.streamResultsFlow(req.type, req.videoId)
                     .firstOrNull { it.streams.isNotEmpty() }
             }
-            val stream = fresh?.streams?.firstOrNull()
+            val (playableFresh, hiddenFresh) = fresh?.streams?.let { ( it to 0 ) } ?: (emptyList<com.pulsestream.app.data.StreamItem>() to 0)
+            val stream = playableFresh.firstOrNull()
             if (fresh != null && stream != null && !disposed.get()) {
-                availableStreams = fresh.streams
+                availableStreams = playableFresh
+                hiddenIncompatibleCount = hiddenFresh
                 req = req.copy(
                     streamUrl = stream.url,
                     headers = stream.headers,
@@ -1465,6 +1436,10 @@ fun PlayerScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE) {
                 savePosition()
+                // PiP: the activity pauses when the video floats, but playback
+                // must continue in the PiP window — only pause when the app is
+                // truly backgrounded (not floating).
+                if (activity?.isInPictureInPictureMode == true) return@LifecycleEventObserver
                 // #10: pause on background — release stays in onDispose.
                 latestPlayer.value.pause()
             }
@@ -1489,8 +1464,7 @@ fun PlayerScreen(
             // #9: from here on, no late work may build a player (ghost audio).
             disposed.set(true)
             savePosition()
-            simklScrobbler.shutdown()
-            traktScrobbler.shutdown()
+            scrobbler.shutdown()
             // #9: kill late zap/episode/source-switch work. The scope itself
             // stays valid (the scrobblers above hold it); only its children
             // are cancelled. savePosition()'s save runs NonCancellable so it
@@ -1621,8 +1595,9 @@ fun PlayerScreen(
             .focusable()
     } else Modifier
     Box(tvKeys.fillMaxSize().background(Color.Black).then(tvContainerModifier)) {
-        // Video surface with the full gesture set.
-        Box(Modifier.fillMaxSize().videoGestures()) {
+        // Video surface with the full gesture set (gestures off while floating —
+        // taps on the PiP window belong to the system's PiP controls).
+        Box(Modifier.fillMaxSize().then(if (inPip) Modifier else Modifier.videoGestures())) {
             AndroidView(
                 factory = { ctx ->
                     PlayerView(ctx).also { pv ->
@@ -1645,6 +1620,11 @@ fun PlayerScreen(
                 modifier = Modifier.fillMaxSize()
             )
         }
+
+        // PiP (v0.9.0+): while the video floats, skip every overlay layer —
+        // the system draws its own PiP controls. Only the PlayerView surface
+        // stays composed, so playback continues uninterrupted.
+        if (inPip) return@Box
 
         // Pulse-branded loading line while the stream connects / buffers.
         // Suppressed on a fatal error — the error overlay takes its place (#4).
@@ -1862,16 +1842,6 @@ fun PlayerScreen(
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
-                            onClick = {
-                                locked = true
-                                showControls = false
-                                pokeIndicator(PlayerIndicator.Message("Controls locked"))
-                            },
-                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
-                        ) {
-                            Icon(Icons.Filled.LockOpen, "Lock controls", tint = TextPrimary)
-                        }
-                        IconButton(
                             onClick = onBack,
                             modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
                         ) {
@@ -1985,6 +1955,32 @@ fun PlayerScreen(
                                 Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                // Lock controls (moved from top-right).
+                                PillBarButton(
+                                    icon = if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                                    label = if (locked) "Unlock" else "Lock",
+                                    onClick = {
+                                        locked = !locked
+                                        if (locked) {
+                                            showControls = false
+                                            pokeIndicator(PlayerIndicator.Message("Controls locked"))
+                                        } else {
+                                            showControls = true
+                                            controlsTick++
+                                            pokeIndicator(PlayerIndicator.Message("Controls unlocked"))
+                                        }
+                                    }
+                                )
+                                // Open in external player (VLC/MX) — instant
+                                // fallback if the built-in player isn't working.
+                                PillBarButton(
+                                    icon = Icons.Filled.OpenInNew,
+                                    label = "External",
+                                    onClick = {
+                                        val ctx = activity ?: return@PillBarButton
+                                        ExternalPlayer.play(ctx, req)
+                                    }
+                                )
                                 // Speed control.
                                 PillBarButton(
                                     icon = Icons.Filled.AspectRatio,
@@ -2002,29 +1998,34 @@ fun PlayerScreen(
                                             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                                     }
                                 )
-                                Box {
-                                    PillBarButton(
-                                        icon = Icons.Filled.Speed,
-                                        label = speedLabel(speed),
-                                        onClick = { speedMenuOpen = true }
-                                    )
-                                    DropdownMenu(
-                                        expanded = speedMenuOpen,
-                                        onDismissRequest = { speedMenuOpen = false }
-                                    ) {
-                                        SPEEDS.forEach { s ->
-                                            DropdownMenuItem(
-                                                text = { Text(speedLabel(s)) },
-                                                onClick = {
-                                                    speed = s
-                                                    player.setPlaybackSpeed(s)
-                                                    speedMenuOpen = false
-                                                    pokeIndicator(PlayerIndicator.Speed(speedLabel(s)))
-                                                }
-                                            )
+                                PillBarButton(
+                                    icon = Icons.Filled.PictureInPicture,
+                                    label = "PiP",
+                                    onClick = {
+                                        if (!settings.pipEnabled) return@PillBarButton
+                                        val act = activity as? MainActivity ?: return@PillBarButton
+                                        val vs = player.videoSize
+                                        if (vs.width > 0 && vs.height > 0) {
+                                            MainActivity.pipVideoW = vs.width
+                                            MainActivity.pipVideoH = vs.height
                                         }
+                                        act.enterPictureInPictureMode(
+                                            MainActivity.buildPipParams(act, player.isPlaying)
+                                        )
                                     }
-                                }
+                                )
+                                SpeedMenuButton(
+                                    speed = speed,
+                                    menuOpen = speedMenuOpen,
+                                    onOpenMenu = { speedMenuOpen = true },
+                                    onDismissMenu = { speedMenuOpen = false },
+                                    onSpeedSelected = { s ->
+                                        speed = s
+                                        player.setPlaybackSpeed(s)
+                                        speedMenuOpen = false
+                                        pokeIndicator(PlayerIndicator.Speed(speedLabel(s)))
+                                    }
+                                )
                                 PillBarButton(
                                     icon = Icons.Filled.ClosedCaption,
                                     label = "Subs",
@@ -2056,46 +2057,19 @@ fun PlayerScreen(
 
         // Resume prompt.
         resumeOfferMs?.let { saved ->
-            fun dismissResume() {
-                resumeOfferMs = null
-            }
-            AlertDialog(
-                onDismissRequest = {
+            ResumePromptDialog(
+                savedMs = saved,
+                title = headerTitle,
+                onResume = {
                     // Tapping outside keeps their place and resumes.
-                    dismissResume()
+                    resumeOfferMs = null
                     player.playWhenReady = true
                 },
-                containerColor = Color(0xFF14141F),
-                title = {
-                    Text(
-                        "Resume playback",
-                        color = TextPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                text = {
-                    Text(
-                        "Resume \"${headerTitle}\" from ${formatMs(saved)}?",
-                        color = TextSecondary
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        dismissResume()
-                        player.playWhenReady = true
-                    }) {
-                        Text("Resume", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = {
-                        dismissResume()
-                        ioScope.launch { repository.deleteSavedPosition(currentRequest.streamUrl) }
-                        player.seekTo(0)
-                        player.playWhenReady = true
-                    }) {
-                        Text("Start over", color = TextSecondary)
-                    }
+                onStartOver = {
+                    resumeOfferMs = null
+                    ioScope.launch { repository.deleteSavedPosition(currentRequest.streamUrl) }
+                    player.seekTo(0)
+                    player.playWhenReady = true
                 }
             )
         }
@@ -2171,6 +2145,75 @@ fun PlayerScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.padding(vertical = 8.dp)
                                 )
+                            }
+                        }
+                        // Subtitle timing shift (v0.9.0+): nudges all subtitle
+                        // timestamps for this title. Per-title only — the
+                        // global default lives in Settings > Subtitles.
+                        if (rawResolvedSubs.isNotEmpty()) {
+                            item {
+                                val offset = effectiveSubOffsetMs()
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 8.dp)
+                                ) {
+                                    Text(
+                                        "Subtitle timing",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextPrimary,
+                                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.padding(horizontal = 4.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                subOffsetOverrideMs =
+                                                    (subOffsetOverrideMs - 500L).coerceIn(-10_000L, 10_000L)
+                                                applySubtitleTiming()
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("−500 ms")
+                                        }
+                                        Text(
+                                            formatOffsetMs(offset),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = LocalPalette.current.accent,
+                                            modifier = Modifier.padding(horizontal = 4.dp)
+                                        )
+                                        OutlinedButton(
+                                            onClick = {
+                                                subOffsetOverrideMs =
+                                                    (subOffsetOverrideMs + 500L).coerceIn(-10_000L, 10_000L)
+                                                applySubtitleTiming()
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("+500 ms")
+                                        }
+                                    }
+                                    if (offset != 0L) {
+                                        TextButton(
+                                            onClick = {
+                                                subOffsetOverrideMs = 0L
+                                                applySubtitleTiming()
+                                            },
+                                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                                        ) {
+                                            Text(
+                                                "Reset timing",
+                                                color = TextSecondary,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                         item {
@@ -2289,8 +2332,16 @@ fun PlayerScreen(
                         "${availableStreams.size} available",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
-                        modifier = Modifier.padding(bottom = 12.dp)
+                        modifier = Modifier.padding(bottom = if (hiddenIncompatibleCount > 0) 4.dp else 12.dp)
                     )
+                    if (hiddenIncompatibleCount > 0) {
+                        Text(
+                            "$hiddenIncompatibleCount 4K stream${if (hiddenIncompatibleCount > 1) "s" else ""} hidden — your device doesn't support 4K playback",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+                    }
                 }
                 AddonTabs(browserState, modifier = Modifier.padding(bottom = 4.dp))
                 when {
@@ -2340,12 +2391,22 @@ fun PlayerScreen(
                                 contentPadding = PaddingValues(
                                     start = 4.dp, end = 4.dp, bottom = 32.dp
                                 ),
-                                selectedUrl = currentRequest.streamUrl
+                                selectedUrl = currentRequest.streamUrl,
+                                onDownload = { downloadStream = it }
                             )
                         }
                     }
                 }
             }
+        }
+
+        // Download confirmation dialog
+        downloadStream?.let { stream ->
+            com.pulsestream.app.ui.components.DownloadConfirmDialog(
+                stream = stream,
+                title = currentRequest.title,
+                onDismiss = { downloadStream = null }
+            )
         }
 
         // Episodes picker for series.
@@ -2460,154 +2521,3 @@ fun PlayerScreen(
     }
 }
 
-@Composable
-private fun TrackRow(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .tvFocusRing(RoundedCornerShape(10.dp))
-            .padding(vertical = 8.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        RadioButton(
-            selected = selected,
-            onClick = onClick,
-            colors = RadioButtonDefaults.colors(selectedColor = LocalPalette.current.accent)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            label,
-            color = TextPrimary,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f)
-        )
-    }
-}
-
-@Composable
-private fun SlimSeekBar(
-    positionMs: Long,
-    durationMs: Long,
-    onSeek: (Long) -> Unit,
-    modifier: Modifier = Modifier,
-    isTv: Boolean = false,
-    onSeekDelta: ((Long) -> Unit)? = null,
-    onFocusChanged: ((Boolean) -> Unit)? = null
-) {
-    var dragFrac by remember { mutableStateOf<Float?>(null) }
-    val frac = (dragFrac ?: if (durationMs > 0) positionMs.toFloat() / durationMs else 0f)
-        .coerceIn(0f, 1f)
-    val density = LocalDensity.current
-    val progressColor = LocalPalette.current.accent
-    // TV: the seekbar is a D-pad stop with the green ring; Left/Right seeks
-    // ±10s while focused, Up/Down moves to the other control rows.
-    val tvModifier = if (isTv) {
-        Modifier
-            .focusable()
-            .onFocusChanged { onFocusChanged?.invoke(it.isFocused) }
-            .tvFocusRing(RoundedCornerShape(8.dp))
-            .onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (event.key) {
-                    Key.DirectionLeft -> { onSeekDelta?.invoke(-10_000); true }
-                    Key.DirectionRight -> { onSeekDelta?.invoke(10_000); true }
-                    else -> false
-                }
-            }
-    } else Modifier
-    Canvas(
-        modifier
-            .fillMaxWidth()
-            .height(30.dp)
-            .then(tvModifier)
-            .pointerInput(durationMs) {
-                detectTapGestures(onTap = { offset ->
-                    onSeek(((offset.x / size.width).coerceIn(0f, 1f) * durationMs).toLong())
-                })
-            }
-            .pointerInput(durationMs) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        dragFrac = (offset.x / size.width).coerceIn(0f, 1f)
-                    },
-                    onDrag = { change, _ ->
-                        dragFrac = (change.position.x / size.width).coerceIn(0f, 1f)
-                    },
-                    onDragEnd = {
-                        dragFrac?.let { onSeek((it * durationMs).toLong()) }
-                        dragFrac = null
-                    },
-                    onDragCancel = { dragFrac = null }
-                )
-            }
-    ) {
-        val trackH = with(density) { 4.dp.toPx() }
-        val handle = with(density) { 14.dp.toPx() }
-        val cy = size.height / 2f
-        drawRoundRect(
-            color = Color.White.copy(alpha = 0.28f),
-            topLeft = Offset(0f, cy - trackH / 2f),
-            size = Size(size.width, trackH),
-            cornerRadius = CornerRadius(trackH / 2f, trackH / 2f)
-        )
-        val pw = size.width * frac
-        if (pw > 1f) {
-            drawRoundRect(
-                color = progressColor,
-                topLeft = Offset(0f, cy - trackH / 2f),
-                size = Size(pw, trackH),
-                cornerRadius = CornerRadius(trackH / 2f, trackH / 2f)
-            )
-        }
-        val hx = (pw - handle / 2f).coerceIn(0f, size.width - handle)
-        drawRoundRect(
-            color = Color.White,
-            topLeft = Offset(hx, cy - handle / 2f),
-            size = Size(handle, handle),
-            cornerRadius = CornerRadius(handle / 2f, handle / 2f)
-        )
-    }
-}
-
-/** Small time pill shown under the seekbar. */
-@Composable
-private fun TimeChip(text: String) {
-    Surface(
-        color = Color.White.copy(alpha = 0.14f),
-        shape = RoundedCornerShape(50)
-    ) {
-        Text(
-            text,
-            Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = TextPrimary
-        )
-    }
-}
-
-/** One icon+label button in the bottom pill toolbar. */
-@Composable
-private fun PillBarButton(icon: ImageVector, label: String, onClick: () -> Unit) {
-    Column(
-        Modifier
-            .clickable(onClick = onClick)
-            .tvFocusRing(RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(icon, label, tint = TextPrimary, modifier = Modifier.size(21.dp))
-        Spacer(Modifier.height(2.dp))
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = TextSecondary,
-            maxLines = 1
-        )
-    }
-}
