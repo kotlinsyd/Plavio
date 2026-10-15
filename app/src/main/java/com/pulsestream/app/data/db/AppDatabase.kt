@@ -12,9 +12,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CatalogCache::class,
         WatchlistItem::class,
         SubtitleCache::class,
-        DownloadItem::class
+        DownloadItem::class,
+        CustomList::class,
+        CustomListItem::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -24,6 +26,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun watchlistDao(): WatchlistDao
     abstract fun subtitleCacheDao(): SubtitleCacheDao
     abstract fun downloadDao(): DownloadDao
+    abstract fun customListDao(): CustomListDao
 }
 
 /**
@@ -146,6 +149,44 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
                 createdAt INTEGER NOT NULL,
                 completedAt INTEGER
             )"""
+        )
+    }
+}
+
+/**
+ * v8 → v9: `custom_lists` + `custom_list_items` tables for user-created
+ * named lists. Composite primary key (listId, itemKey) prevents duplicates.
+ * NOTE: register in PulseApp.buildDatabase()'s addMigrations chain —
+ * that file is intentionally untouched by the custom-lists change.
+ */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // Drop existing tables first to ensure clean schema (handles cases where
+        // test builds created tables with slightly different schemas)
+        db.execSQL("DROP TABLE IF EXISTS custom_list_items")
+        db.execSQL("DROP TABLE IF EXISTS custom_lists")
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS custom_lists (
+                id TEXT NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL,
+                createdAt INTEGER NOT NULL
+            )"""
+        )
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS custom_list_items (
+                listId TEXT NOT NULL,
+                itemKey TEXT NOT NULL,
+                addonId TEXT NOT NULL,
+                type TEXT NOT NULL,
+                metaId TEXT NOT NULL,
+                name TEXT NOT NULL,
+                poster TEXT,
+                addedAt INTEGER NOT NULL,
+                PRIMARY KEY (listId, itemKey)
+            )"""
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_custom_list_items_listId ON custom_list_items (listId)"
         )
     }
 }
