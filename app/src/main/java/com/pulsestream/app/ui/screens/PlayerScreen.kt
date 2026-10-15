@@ -138,7 +138,7 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
-import com.pulsestream.app.player.PlavioRenderersFactory
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -431,7 +431,9 @@ fun PlayerScreen(
         }
         return ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
-            .setRenderersFactory(PlavioRenderersFactory(context))
+            .setRenderersFactory(
+                DefaultRenderersFactory(context).setExtensionRendererMode(
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER))
             .setMediaSourceFactory(mediaSourceFactory)
             // Belt and suspenders: also tell the track selector the preferred
             // subtitle languages, so his languages win even if the default
