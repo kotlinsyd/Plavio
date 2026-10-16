@@ -1293,7 +1293,7 @@ class StreamRepository(
     suspend fun ensurePreinstalledAddons() = withContext(Dispatchers.IO) {
         val targets = listOf(
             "https://plaviometa.vercel.app/manifest.json",
-            "https://plaviohd.vercel.app/manifest.json",
+            "https://plaviohd.edon.workers.dev/manifest.json",
             "https://opensubtitles-v3.strem.io/manifest.json",
             "https://subsense.nepiraw.com/manifest.json"
         )
@@ -1440,8 +1440,12 @@ class StreamRepository(
             }
 
             // Parse rows before touching the DB so a malformed file fails
-            // before anything is wiped.
-            val addons = root.optJSONArray("addons")?.let { arr ->
+            // before anything is wiped. Each section parses to null when the
+            // backup does not contain that key at all — a partial backup must
+            // never wipe tables it doesn't include. An explicitly empty array
+            // (key present, []) still clears that table, as the user intended.
+            val addons: List<InstalledAddon>? = if (root.has("addons")) {
+                val arr = root.optJSONArray("addons") ?: JSONArray()
                 (0 until arr.length()).map { i ->
                     val o = arr.getJSONObject(i)
                     InstalledAddon(
@@ -1462,9 +1466,10 @@ class StreamRepository(
                         addedAt = o.optLong("addedAt", System.currentTimeMillis())
                     )
                 }
-            } ?: emptyList()
+            } else null
 
-            val watchlist = root.optJSONArray("watchlist")?.let { arr ->
+            val watchlist: List<WatchlistItem>? = if (root.has("watchlist")) {
+                val arr = root.optJSONArray("watchlist") ?: JSONArray()
                 (0 until arr.length()).map { i ->
                     val o = arr.getJSONObject(i)
                     WatchlistItem(
@@ -1477,9 +1482,10 @@ class StreamRepository(
                         addedAt = o.optLong("addedAt", System.currentTimeMillis())
                     )
                 }
-            } ?: emptyList()
+            } else null
 
-            val playback = root.optJSONArray("playback")?.let { arr ->
+            val playback: List<PlaybackState>? = if (root.has("playback")) {
+                val arr = root.optJSONArray("playback") ?: JSONArray()
                 (0 until arr.length()).map { i ->
                     val o = arr.getJSONObject(i)
                     PlaybackState(
@@ -1496,16 +1502,24 @@ class StreamRepository(
                         updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
                     )
                 }
-            } ?: emptyList()
+            } else null
 
-            // All parsed — now replace.
-            settings.importAllPrefs(prefsMap)
-            db.addonDao().clearAll()
-            addons.forEach { db.addonDao().upsert(it) }
-            db.watchlistDao().clearAll()
-            watchlist.forEach { db.watchlistDao().upsert(it) }
-            db.playbackDao().clearAll()
-            playback.forEach { db.playbackDao().upsert(it) }
+            // All parsed — now replace, but only the tables the backup
+            // actually contains. Tables absent from the file are left alone.
+            if (prefsJson != null) settings.importAllPrefs(prefsMap)
+            addons?.let {
+                db.addonDao().clearAll()
+                it.forEach { row -> db.addonDao().upsert(row) }
+            }
+            watchlist?.let {
+                db.watchlistDao().clearAll()
+                it.forEach { row -> db.watchlistDao().upsert(row) }
+            }
+            playback?.let {
+                db.playbackDao().clearAll()
+                it.forEach { row -> db.playbackDao().upsert(row) }
+            }
+            Unit
         }
     }
 }
