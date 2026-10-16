@@ -1301,8 +1301,16 @@ class StreamRepository(
             try {
                 val baseUrl = StremioApi.normalizeBaseUrl(url)
                 val manifest = api.fetchManifest(baseUrl)
+                // Migrate existing addon to the new baseUrl when the preinstalled
+                // host changes (e.g. PlavioHD Vercel -> Cloudflare). The manifest id
+                // stays the same, so without this the old baseUrl (and its
+                // /configure page) sticks around forever.
+                val existing = db.addonDao().getAll().firstOrNull { it.id == manifest.id }
+                if (existing != null && existing.baseUrl != baseUrl) {
+                    db.addonDao().upsert(existing.copy(baseUrl = baseUrl))
+                }
                 if (settings.isPreinstallDone(manifest.id)) continue
-                val alreadyThere = db.addonDao().getAll().any { it.id == manifest.id }
+                val alreadyThere = existing != null
                 addAddonFromUrl(url).onSuccess { addon ->
                     if (!alreadyThere) db.addonDao().upsert(addon.copy(preinstalled = true))
                     settings.setPreinstallDone(manifest.id)
