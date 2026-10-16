@@ -74,6 +74,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -86,7 +87,13 @@ import androidx.navigation.navArgument
 import kotlinx.coroutines.withContext
 import com.pulsestream.app.data.update.UpdateChecker
 import com.pulsestream.app.data.AddonShare
+import com.pulsestream.app.data.PlaybackRequest
+import com.pulsestream.app.data.PlayerChoice
+import com.pulsestream.app.data.CustomListsRepository
 import com.pulsestream.app.data.StreamRepository
+import com.pulsestream.app.data.notifications.EpisodeNotifications
+import com.pulsestream.app.data.notifications.NotificationNav
+import com.pulsestream.app.util.ExternalPlayer
 import com.pulsestream.app.data.update.UpdateInfo
 import com.pulsestream.app.ui.components.CrashReportDialog
 import com.pulsestream.app.ui.components.UpdatePrompt
@@ -118,6 +125,8 @@ import com.pulsestream.app.ui.components.TrailerMiniController
 import com.pulsestream.app.ui.components.TrailerPlayerState
 import com.pulsestream.app.ui.screens.TrailerPlayerScreen
 import com.pulsestream.app.ui.screens.WatchlistScreen
+import com.pulsestream.app.ui.screens.ListsScreen
+import com.pulsestream.app.ui.screens.ListDetailScreen
 import com.pulsestream.app.ui.screens.BackupScreen
 import com.pulsestream.app.ui.screens.IntegrationsScreen
 import com.pulsestream.app.ui.theme.AccentTheme
@@ -153,6 +162,14 @@ class MainActivity : ComponentActivity() {
 
         /** Broadcast action for the PiP window's play/pause RemoteAction. */
         const val ACTION_PIP_TOGGLE = "com.pulsestream.app.ACTION_PIP_TOGGLE"
+
+        /**
+         * Intent extra carrying a nav route (e.g. a detail page) requested
+         * by a notification tap. MainActivity stashes it on
+         * [com.pulsestream.app.data.notifications.NotificationNav]; PulseNav
+         * navigates there once past splash/onboarding.
+         */
+        const val EXTRA_OPEN_ROUTE = "com.pulsestream.app.OPEN_ROUTE"
 
         /**
          * Last known video dimensions, kept current by PlayerScreen's
@@ -243,6 +260,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         handleAddonDeepLink(intent)
+        handleNotificationRoute(intent)
+        // Safety net: (re)schedule the episode check on cold start.
+        // Idempotent (KEEP) and a no-op when alerts are disabled.
+        EpisodeNotifications.ensureScheduled(this)
         // PiP play/pause RemoteAction receiver (explicit intent, not exported).
         val pipFilter = IntentFilter(ACTION_PIP_TOGGLE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -288,6 +309,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleAddonDeepLink(intent)
+        handleNotificationRoute(intent)
     }
 
     override fun onDestroy() {
@@ -373,6 +395,21 @@ class MainActivity : ComponentActivity() {
         val app = applicationContext as PulseApp
         app.repository.setPendingAddonBundle(link)
     }
+
+    /**
+     * Notification tap (episode alert): the PendingIntent carries
+     * [EXTRA_OPEN_ROUTE] with a detail-page route. Stash it on
+     * NotificationNav; PulseNav navigates there once past
+     * splash/onboarding — same pattern as the addon deep link above.
+     * The extra is consumed (removed) so a later onNewIntent without a
+     * route doesn't re-trigger the navigation.
+     */
+    private fun handleNotificationRoute(intent: Intent?) {
+        val route = intent?.getStringExtra(EXTRA_OPEN_ROUTE)?.takeIf { it.isNotBlank() }
+            ?: return
+        intent.removeExtra(EXTRA_OPEN_ROUTE)
+        NotificationNav.pendingRoute.value = route
+    }
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
@@ -392,7 +429,7 @@ private fun DockItem(
                 if (selected) palette.accent.copy(alpha = 0.18f) else Color.Transparent
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 9.dp),
+            .padding(horizontal = 10.dp, vertical = 9.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(
@@ -404,7 +441,7 @@ private fun DockItem(
         Spacer(Modifier.height(3.dp))
         Text(
             tab.label,
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             color = if (selected) palette.accent else TextSecondary.copy(alpha = 0.85f),
             maxLines = 1
@@ -428,6 +465,9 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
     val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
     val app = appContext as PulseApp
     val repository = remember { app.repository }
+    val listsRepository = remember { CustomListsRepository(app.database) }
+    // Activity context for the "Ask every time" player chooser dialog.
+    val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
 
     // In-app update check (GitLab releases) on every launch; silent when nothing new.
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -464,6 +504,23 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         }
     }
 
+    // Notification tap (episode alert): MainActivity stashed a detail route
+    // via handleNotificationRoute. Navigate once past splash/onboarding,
+    // then clear so it fires exactly once.
+    val pendingRoute by NotificationNav.pendingRoute.collectAsState()
+    LaunchedEffect(pendingRoute, currentDestination) {
+        val route = pendingRoute
+        val dest = currentDestination?.route
+        if (route != null && dest != null &&
+            dest != Routes.SPLASH && dest != Routes.ONBOARDING
+        ) {
+            NotificationNav.pendingRoute.value = null
+            navController.navigate(route) {
+                launchSingleTop = true
+            }
+        }
+    }
+
     if (isTv) {
         // TV: bottom-center nav bar (replaced the old left rail). The bar is
         // hidden on splash/onboarding/player, same as the rail was. Content
@@ -473,18 +530,20 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         val destRoutes = currentDestination?.hierarchy?.mapNotNull { it.route }.orEmpty()
         val showBar = destRoutes.none { it in barHiddenRoutes }
         val barFocus = remember { FocusRequester() }
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxSize()
                 .background(LocalPalette.current.background)
         ) {
-            // Top-left Home button: jumps home and parks focus on the bar.
+            // Left-side Home button, vertically centered: jumps home and
+            // parks focus on the bar.
             if (showBar) {
-                Row(
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 12.dp, top = 10.dp, end = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .fillMaxHeight()
+                        .padding(start = 12.dp, end = 8.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     IconButton(
                         onClick = {
@@ -508,29 +567,35 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                     }
                 }
             }
-            Box(
+            Column(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
+                    .fillMaxHeight()
             ) {
-                PulseNavGraph(navController, repository, onThemeChanged)
-            }
-            if (showBar) {
                 Box(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = Alignment.Center
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
                 ) {
-                    TvBottomBar(
-                        currentDestination = currentDestination,
-                        barFocus = barFocus,
-                        onNavigate = { route ->
-                            navController.navigate(route) {
-                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                launchSingleTop = true
-                                restoreState = true
+                    PulseNavGraph(navController, repository, listsRepository, onThemeChanged)
+                }
+                if (showBar) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        TvBottomBar(
+                            currentDestination = currentDestination,
+                            barFocus = barFocus,
+                            onNavigate = { route ->
+                                navController.navigate(route) {
+                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
                             }
-                        }
-                    )
+                        )
+                    }
                 }
             }
         }
@@ -556,8 +621,8 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                         shadowElevation = 10.dp
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(0.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             tabs.forEach { tab ->
@@ -582,7 +647,7 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         }
     ) { padding ->
         Box(Modifier.padding(padding)) {
-            PulseNavGraph(navController, repository, onThemeChanged, trailerMini)
+            PulseNavGraph(navController, repository, listsRepository, onThemeChanged, trailerMini)
         }
     }
         // Full portrait trailer layer — floats above the current tab (which
@@ -644,9 +709,51 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
 private fun PulseNavGraph(
     navController: NavHostController,
     repository: StreamRepository,
+    listsRepository: CustomListsRepository,
     onThemeChanged: () -> Unit,
     trailerMini: TrailerMiniController? = null
 ) {
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+
+    /**
+     * Single choke point for all playback. Honors Settings > Playback >
+     * "Preferred player". Built-in behavior is unchanged; external/ask modes
+     * only divert when the user chose them.
+     */
+    fun playRequest(req: PlaybackRequest) {
+        when (PlayerChoice.fromName(repository.settings.preferredPlayer)) {
+            PlayerChoice.BUILT_IN -> {
+                repository.pendingPlayback = req
+                navController.navigate(Routes.PLAYER)
+            }
+            PlayerChoice.EXTERNAL -> {
+                // Toast shown inside on failure; fall back to built-in.
+                if (!ExternalPlayer.play(activity ?: appContext, req)) {
+                    repository.pendingPlayback = req
+                    navController.navigate(Routes.PLAYER)
+                }
+            }
+            PlayerChoice.ASK -> {
+                val act = activity
+                if (act == null || act.isFinishing) {
+                    repository.pendingPlayback = req
+                    navController.navigate(Routes.PLAYER)
+                } else {
+                    android.app.AlertDialog.Builder(act)
+                        .setTitle("Play with")
+                        .setItems(arrayOf("Built-in player", "External player")) { _, which ->
+                            if (which == 1 && ExternalPlayer.play(act, req)) return@setItems
+                            repository.pendingPlayback = req
+                            navController.navigate(Routes.PLAYER)
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+            }
+        }
+    }
+
     NavHost(navController = navController, startDestination = Routes.SPLASH) {
         composable(Routes.SPLASH) {
             // Warm the home catalog cache while the splash animation
@@ -686,10 +793,11 @@ private fun PulseNavGraph(
                     navController.navigate(Routes.detail(addonId, type, metaId))
                 },
                 onResumePlayback = {
-                    navController.navigate(Routes.PLAYER)
+                    repository.pendingPlayback?.let { playRequest(it) }
                 },
                 onGoToAddons = { navController.navigate(Routes.ADDONS) },
                 onGoToWatchlist = { navController.navigate(Routes.WATCHLIST) },
+                onGoToLists = { navController.navigate(Routes.LISTS) },
                 onOpenCatalog = { row ->
                     repository.pendingCatalog = row
                     navController.navigate(
@@ -704,8 +812,7 @@ private fun PulseNavGraph(
                 onPlay = { req ->
                     // #3: the Live tab builds the PlaybackRequest — it must be
                     // handed to the player, not dropped.
-                    repository.pendingPlayback = req
-                    navController.navigate(Routes.PLAYER)
+                    playRequest(req)
                 },
                 onGoToAddons = { navController.navigate(Routes.ADDONS) }
             )
@@ -732,6 +839,29 @@ private fun PulseNavGraph(
         composable(Routes.WATCHLIST) {
             WatchlistScreen(
                 repository = repository,
+                onOpenDetail = { addonId, type, metaId ->
+                    navController.navigate(Routes.detail(addonId, type, metaId))
+                }
+            )
+        }
+        composable(Routes.LISTS) {
+            ListsScreen(
+                listsRepository = listsRepository,
+                onOpenList = { listId ->
+                    navController.navigate(Routes.listDetail(listId))
+                }
+            )
+        }
+        composable(
+            Routes.LIST_DETAIL,
+            arguments = listOf(
+                navArgument("listId") { type = NavType.StringType }
+            )
+        ) { entry ->
+            ListDetailScreen(
+                listsRepository = listsRepository,
+                listId = entry.arguments!!.getString("listId")!!,
+                onBack = { navController.popBackStack() },
                 onOpenDetail = { addonId, type, metaId ->
                     navController.navigate(Routes.detail(addonId, type, metaId))
                 }
@@ -769,7 +899,6 @@ private fun PulseNavGraph(
                 onGoToAbout = { navController.navigate(Routes.ABOUT) },
                 onGoToFeedback = { navController.navigate(Routes.FEEDBACK) },
                 onGoToFeaturesGuide = { navController.navigate(Routes.FEATURES_GUIDE) },
-                onGoToDownloads = { navController.navigate(Routes.DOWNLOADS) },
                 onGoToAccount = { navController.navigate(Routes.ACCOUNT) },
                 onGoToBackup = { navController.navigate(Routes.BACKUP) },
                 onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) }
@@ -839,15 +968,15 @@ private fun PulseNavGraph(
             DownloadsScreen(
                 onBack = { navController.popBackStack() },
                 onPlayFile = { filePath, title ->
-                    // Play the local file in the existing player
-                    repository.pendingPlayback = com.pulsestream.app.data.PlaybackRequest(
-                        streamUrl = "file://$filePath",
-                        title = title,
-                        poster = null,
-                        videoId = "download_${filePath.hashCode()}",
-                        isMovie = true
+                    playRequest(
+                        PlaybackRequest(
+                            streamUrl = "file://$filePath",
+                            title = title,
+                            poster = null,
+                            videoId = "download_${filePath.hashCode()}",
+                            isMovie = true
+                        )
                     )
-                    navController.navigate(Routes.PLAYER)
                 }
             )
         }
@@ -867,11 +996,18 @@ private fun PulseNavGraph(
             val trailerCtx = androidx.compose.ui.platform.LocalContext.current.applicationContext
             DetailScreen(
                 repository = repository,
+                listsRepository = listsRepository,
                 addonId = Routes.dec(entry.arguments!!.getString("addonId")!!),
                 type = Routes.dec(entry.arguments!!.getString("type")!!),
                 metaId = Routes.dec(entry.arguments!!.getString("metaId")!!),
                 onBack = { navController.popBackStack() },
-                onPlay = { navController.navigate(Routes.PLAYER) },
+                onPlay = {
+                    // startPlayback() stashed the request; honor the
+                    // preferred-player setting instead of always navigating.
+                    val req = repository.pendingPlayback
+                    if (req != null) playRequest(req)
+                    else navController.navigate(Routes.PLAYER)
+                },
                 onPlayTrailer = { req ->
                     repository.pendingPlayback = req
                     // Mini floating player (mobile); TV falls back to the full player.
