@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 74
-        versionName = "0.9.7"
+        versionCode = 75
+        versionName = "0.10.0"
     }
 
     buildTypes {
@@ -76,6 +76,8 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
+    implementation(libs.media3.common)
+    implementation(libs.media3.decoder)
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.exoplayer.dash)
     implementation(libs.okhttp)
