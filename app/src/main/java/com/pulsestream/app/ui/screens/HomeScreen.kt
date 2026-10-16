@@ -25,8 +25,11 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -154,6 +157,7 @@ fun HomeScreen(
     onResumePlayback: () -> Unit,
     onGoToAddons: () -> Unit,
     onGoToWatchlist: () -> Unit,
+    onGoToLists: () -> Unit,
     onOpenCatalog: (row: CatalogRow) -> Unit
 ) {
     val vm: HomeViewModel = viewModel(factory = vmFactory { HomeViewModel(repository) })
@@ -195,12 +199,42 @@ fun HomeScreen(
                         color = TextSecondary
                     )
                 }
-                IconButton(onClick = onGoToWatchlist) {
-                    Icon(
-                        Icons.Filled.Bookmark,
-                        contentDescription = "Watchlist",
-                        tint = TextSecondary
-                    )
+                // Single button for saved content: Watchlist + My Lists
+                // (both serve the same purpose — saved titles).
+                var savedMenuOpen by remember { mutableStateOf(false) }
+                Box {
+                    IconButton(onClick = { savedMenuOpen = true }) {
+                        Icon(
+                            Icons.Filled.Bookmark,
+                            contentDescription = "Saved",
+                            tint = TextSecondary
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = savedMenuOpen,
+                        onDismissRequest = { savedMenuOpen = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Watchlist") },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Bookmark, contentDescription = null)
+                            },
+                            onClick = {
+                                savedMenuOpen = false
+                                onGoToWatchlist()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("My Lists") },
+                            leadingIcon = {
+                                Icon(Icons.Filled.FormatListBulleted, contentDescription = null)
+                            },
+                            onClick = {
+                                savedMenuOpen = false
+                                onGoToLists()
+                            }
+                        )
+                    }
                 }
             }
 
@@ -359,7 +393,8 @@ private fun featuredTitles(rows: List<CatalogRow>, max: Int = 6): List<FeaturedT
 
 /**
  * Netflix-style hero carousel: full-bleed backdrop pager at the top of
- * Home. Auto-advances every 5s, pausing while the user is touching it.
+ * Home. Auto-advances every 5s on mobile (pausing while the user is touching
+ * it); never auto-advances on TV to avoid stealing frames from D-pad input.
  * Tap opens the title's detail screen.
  */
 @Composable
@@ -369,8 +404,13 @@ private fun HeroCarousel(
     heroFocus: FocusRequester? = null
 ) {
     val pagerState = rememberPagerState(pageCount = { featured.size })
+    val isTv = rememberIsTv()
 
     LaunchedEffect(pagerState, featured.size) {
+        // No auto-advance on TV: the 5s full-bleed pager animation steals
+        // frames from D-pad browsing on weak TV GPUs/CPUs and its backdrop
+        // re-decodes cause jank spikes that coincide with user input.
+        if (isTv) return@LaunchedEffect
         while (featured.size > 1) {
             delay(5000)
             if (!pagerState.isScrollInProgress) {
