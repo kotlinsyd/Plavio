@@ -20,6 +20,8 @@ import com.pulsestream.app.data.db.MIGRATION_4_5
 import com.pulsestream.app.data.db.MIGRATION_5_6
 import com.pulsestream.app.data.db.MIGRATION_6_7
 import com.pulsestream.app.data.db.MIGRATION_7_8
+import com.pulsestream.app.data.db.MIGRATION_8_9
+import com.pulsestream.app.data.db.MIGRATION_9_10
 import com.pulsestream.app.ui.tv.isTelevision
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -98,8 +100,13 @@ class PulseApp : Application(), ImageLoaderFactory {
     }
 
     /**
-     * Opens the database, self-healing from corruption: if the file is
-     * unreadable the app recreates it empty instead of crash-looping.
+     * Opens the database, self-healing ONLY from genuine file corruption.
+     *
+     * A corrupt database file is renamed to a .corrupt.bak backup (never
+     * silently deleted) before recreating empty, so user data can still be
+     * recovered. Any other failure — failed migration, transient I/O error,
+     * programming bug — is rethrown to crash loudly and reach Crashlytics,
+     * instead of silently wiping the user's add-ons, watchlist and history.
      * The in-app updater keeps working, so a fix can always reach the phone.
      */
     private fun openDatabase(): AppDatabase {
@@ -109,10 +116,31 @@ class PulseApp : Application(), ImageLoaderFactory {
                 it.openHelper.writableDatabase
             }
         } catch (e: Exception) {
-            Log.e("PulseApp", "Database unreadable, recreating fresh", e)
-            try {
-                deleteDatabase(DB_NAME)
-            } catch (_: Exception) {
+            if (!isCorruption(e)) {
+                // Not corruption — do NOT delete user data. Crash loudly so
+                // the real bug is visible in Crashlytics instead of masking
+                // it as an empty database.
+                throw e
+            }
+            Log.e("PulseApp", "Database file corrupt, backing up and recreating", e)
+            // Rename the corrupt file as a backup instead of deleting it.
+            runCatching {
+                val dbFile = getDatabasePath(DB_NAME)
+                if (dbFile.exists()) {
+                    val bak = java.io.File(dbFile.parent, "$DB_NAME.corrupt.bak")
+                    runCatching { bak.delete() }
+                    dbFile.renameTo(bak)
+                    // Also move the -wal / -shm sidecars so they don't confuse reopen.
+                    for (suffix in listOf("-wal", "-shm")) {
+                        runCatching {
+                            java.io.File(dbFile.parent, "$DB_NAME$suffix").renameTo(
+                                java.io.File(dbFile.parent, "$DB_NAME$suffix.corrupt.bak")
+                            )
+                        }
+                    }
+                } else {
+                    deleteDatabase(DB_NAME)
+                }
             }
             // The fresh DB is empty but the preinstall_done_* flags survived
             // in SharedPreferences — without clearing them the bundled
@@ -123,9 +151,27 @@ class PulseApp : Application(), ImageLoaderFactory {
         }
     }
 
+    /** True only for genuine SQLite file-corruption failures. */
+    private fun isCorruption(e: Throwable): Boolean {
+        var t: Throwable? = e
+        while (t != null) {
+            if (t is android.database.sqlite.SQLiteDatabaseCorruptException) return true
+            val msg = (t.message ?: "").lowercase()
+            // SQLite corruption signatures — deliberately narrow so a failed
+            // migration or I/O error never counts as "corrupt".
+            if ("database disk image is malformed" in msg ||
+                "file is not a database" in msg ||
+                "database is corrupt" in msg ||
+                "notadb" in msg
+            ) return true
+            t = t.cause
+        }
+        return false
+    }
+
     private fun buildDatabase(): AppDatabase =
         Room.databaseBuilder(this, AppDatabase::class.java, DB_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
             .build()
 
     /**
