@@ -52,8 +52,8 @@ android {
             applicationIdSuffix = ".tv"
             versionNameSuffix = "-tv"
             // TV's own version sequence (com.pulsestream.app.tv).
-            versionCode = 61
-            versionName = "0.8.32"
+            versionCode = 62
+            versionName = "0.8.34"
             resValue("string", "app_name", "Plavio TV")
         }
     }
