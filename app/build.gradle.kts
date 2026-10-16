@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 79
-        versionName = "0.10.4"
+        versionCode = 80
+        versionName = "0.10.5"
     }
 
     signingConfigs {
@@ -34,6 +34,7 @@ android {
             signingConfig = signingConfigs.getByName("plavioDebug")
         }
         release {
+            signingConfig = signingConfigs.getByName("plavioDebug")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -52,8 +53,8 @@ android {
             applicationIdSuffix = ".tv"
             versionNameSuffix = "-tv"
             // TV's own version sequence (com.pulsestream.app.tv).
-            versionCode = 62
-            versionName = "0.8.34"
+            versionCode = 63
+            versionName = "0.8.35"
             resValue("string", "app_name", "Plavio TV")
         }
     }
