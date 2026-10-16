@@ -64,18 +64,25 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.pulsestream.app.ui.tv.tvFocusRing
+import com.pulsestream.app.ui.tv.rememberIsTv
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.GlassWhite
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
 
-/** Full-screen deep background with soft accent radial glows. */
+/** Full-screen deep background with soft accent radial glows.
+ * On TV the 3 fullscreen radial gradients are skipped (flat background):
+ * re-executing 3 fullscreen gradient shaders on every animation frame is
+ * fill-rate-bound on weak TV GPUs and turned small focus animations into
+ * jank. Mobile keeps the glows. */
 @Composable
 fun GlowBackground(content: @Composable BoxScope.() -> Unit) {
     val palette = LocalPalette.current
+    val isTv = rememberIsTv()
     Box(modifier = Modifier.fillMaxSize().background(palette.background)) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
+        if (!isTv) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
             val w = size.width
             val h = size.height
             val glow1 = palette.accent
@@ -107,6 +114,7 @@ fun GlowBackground(content: @Composable BoxScope.() -> Unit) {
                 radius = w * 0.9f,
                 center = Offset(w * 0.4f, h * 1.02f)
             )
+            }
         }
         content()
     }
@@ -454,11 +462,12 @@ fun PlayButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    text: String = "Play"
+    text: String = "Play",
+    isLoading: Boolean = false
 ) {
     Button(
         onClick = onClick,
-        enabled = enabled,
+        enabled = enabled && !isLoading,
         modifier = modifier.height(52.dp).tvFocusRing(RoundedCornerShape(28.dp)),
         colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
         contentPadding = androidx.compose.foundation.layout.PaddingValues()
@@ -469,22 +478,30 @@ fun PlayButton(
                 .background(LocalPalette.current.gradient, RoundedCornerShape(28.dp)),
             contentAlignment = Alignment.Center
         ) {
-            androidx.compose.foundation.layout.Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    Icons.Filled.PlayArrow,
-                    contentDescription = null,
-                    tint = Color(0xFF0A0A12),
-                    modifier = Modifier.size(26.dp)
+            if (isLoading) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = Color(0xFF0A0A12),
+                    strokeWidth = 3.dp
                 )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = text,
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Color(0xFF0A0A12)
-                )
+            } else {
+                androidx.compose.foundation.layout.Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        tint = Color(0xFF0A0A12),
+                        modifier = Modifier.size(26.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = text,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color(0xFF0A0A12)
+                    )
+                }
             }
         }
     }
