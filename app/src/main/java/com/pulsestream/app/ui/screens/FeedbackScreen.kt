@@ -26,7 +26,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-private val FEEDBACK_URL = "https://plaviohd.vercel.app/feedback"
+private val FEEDBACK_URL = "https://plaviohd.edon.workers.dev/feedback"
 
 /**
  * Send Feedback screen: bug report / feature request / other.
