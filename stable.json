@@ -1,1 +1,1 @@
-{"apkUrl":"https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/0.10.4/Plavio-v0.10.4.apk","major":false,"notes":"Minor update: PlavioHD addon URL migrates to Cloudflare for existing installs.","version":"0.10.4"}
+{"apkUrl":"https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/0.10.4/Plavio-v0.10.4.apk","major":true,"notes":"Crash fix + PlavioHD on Cloudflare.","version":"0.10.4"}
