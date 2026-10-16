@@ -19,7 +19,7 @@ import java.util.UUID
  * (retried on next launch until the first ping succeeds).
  */
 object AnalyticsPing {
-    private const val ENDPOINT = "https://plaviohd.vercel.app/app-ping"
+    private const val ENDPOINT = "https://plaviohd.edon.workers.dev/app-ping"
     private const val PREFS = "pulse_analytics"
     private const val KEY_UUID = "install_uuid"
     private const val KEY_PINGED = "ping_sent"
