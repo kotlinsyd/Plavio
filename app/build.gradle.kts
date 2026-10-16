@@ -20,7 +20,19 @@ android {
         versionName = "0.10.0"
     }
 
+    signingConfigs {
+        create("plavioDebug") {
+            storeFile = file("/home/hatch/workspace/.tools/pulsestream-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("plavioDebug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
