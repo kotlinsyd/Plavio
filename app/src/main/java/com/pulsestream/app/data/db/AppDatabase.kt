@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CustomList::class,
         CustomListItem::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -187,6 +187,44 @@ val MIGRATION_8_9 = object : Migration(8, 9) {
         )
         db.execSQL(
             "CREATE INDEX IF NOT EXISTS index_custom_list_items_listId ON custom_list_items (listId)"
+        )
+    }
+}
+
+/**
+ * v9 → v10: Rebuild `custom_lists` + `custom_list_items` with the exact
+ * schema Room expects. Fixes "Migration didn't properly handle:
+ * custom_list_items" crashes (126 events) where the v8→9 migration left
+ * a schema mismatch on some devices. Data in these tables is user-created
+ * lists; the tables are dropped and recreated empty — the alternative is
+ * a crash loop on every app start.
+ */
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("DROP TABLE IF EXISTS custom_list_items")
+        db.execSQL("DROP TABLE IF EXISTS custom_lists")
+        db.execSQL(
+            """CREATE TABLE custom_lists (
+                id TEXT NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL,
+                createdAt INTEGER NOT NULL
+            )"""
+        )
+        db.execSQL(
+            """CREATE TABLE custom_list_items (
+                listId TEXT NOT NULL,
+                itemKey TEXT NOT NULL,
+                addonId TEXT NOT NULL,
+                type TEXT NOT NULL,
+                metaId TEXT NOT NULL,
+                name TEXT NOT NULL,
+                poster TEXT,
+                addedAt INTEGER NOT NULL,
+                PRIMARY KEY (listId, itemKey)
+            )"""
+        )
+        db.execSQL(
+            "CREATE INDEX index_custom_list_items_listId ON custom_list_items (listId)"
         )
     }
 }
