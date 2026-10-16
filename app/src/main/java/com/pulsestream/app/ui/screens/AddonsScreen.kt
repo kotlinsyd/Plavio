@@ -243,6 +243,9 @@ fun AddonsScreen(
     // Pre-fill for the import dialog when a plavio-addons:// deep link opened
     // the app (MainActivity stashed the link on the repository).
     var importPrefill by remember { mutableStateOf<String?>(null) }
+    // Pre-fill for the single-addon dialog when a stremio:// deep link opened
+    // the app (MainActivity stashed the manifest URL on the repository).
+    var deepLinkPrefill by remember { mutableStateOf<String?>(null) }
     val pendingBundle by repository.pendingAddonBundle.collectAsState()
     val pendingManifestUrl by repository.pendingManifestUrl.collectAsState()
     LaunchedEffect(pendingBundle) {
@@ -252,12 +255,14 @@ fun AddonsScreen(
             showImportDialog = true
         }
     }
-    // stremio:// deep link: pre-fill the manifest URL in the import dialog.
+    // stremio:// deep link: open the single-addon install dialog with the
+    // manifest URL pre-filled (not the bundle import dialog).
     LaunchedEffect(pendingManifestUrl) {
         if (pendingManifestUrl != null) {
             repository.clearPendingManifestUrl()
-            importPrefill = pendingManifestUrl
-            showImportDialog = true
+            deepLinkPrefill = pendingManifestUrl
+            vm.reset()
+            showDialog = true
         }
     }
     // Bundle-share selection mode: tick addons, export as one shareable link.
@@ -472,8 +477,9 @@ fun AddonsScreen(
     if (showDialog) {
         AddAddonDialog(
             state = vm.addState,
-            onDismiss = { showDialog = false; vm.reset() },
-            onConfirm = { url -> vm.addAddon(url) { showDialog = false } }
+            initialUrl = deepLinkPrefill ?: "",
+            onDismiss = { showDialog = false; deepLinkPrefill = null; vm.reset() },
+            onConfirm = { url -> vm.addAddon(url) { showDialog = false; deepLinkPrefill = null } }
         )
     }
 
@@ -914,10 +920,11 @@ private fun PreinstalledBadge() {
 @Composable
 private fun AddAddonDialog(
     state: AddUiState,
+    initialUrl: String = "",
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit
 ) {
-    var url by remember { mutableStateOf("") }
+    var url by remember(initialUrl) { mutableStateOf(initialUrl) }
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = LocalPalette.current.panel,
