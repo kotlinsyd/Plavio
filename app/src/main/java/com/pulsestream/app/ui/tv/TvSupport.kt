@@ -4,6 +4,8 @@ import android.app.UiModeManager
 import android.content.Context
 import android.content.res.Configuration
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -52,7 +54,11 @@ fun rememberIsTv(): Boolean {
  * The ring, tint AND scale all live inside the same graphicsLayer, so the
  * scaled-up card art can never cover the ring (the v0.8.21-tv bug: the ring
  * was drawn at the unscaled bounds and the 1.08x poster hid it completely).
- * Focused cards also get breathing-room padding so the ring clears neighbours.
+ * The 6dp breathing room is reserved PERMANENTLY (not toggled on focus):
+ * toggling padding on every focus change forced a full remeasure/re-layout
+ * on the UI thread per D-pad press = the v0.10.x "lag with every click".
+ * The focus pop uses a fast 120ms tween (not the loose default spring) so
+ * rapid D-pad presses never pile up unfinished animations.
  */
 @Composable
 fun Modifier.tvFocusRing(shape: Shape = RoundedCornerShape(16.dp)): Modifier {
@@ -60,11 +66,12 @@ fun Modifier.tvFocusRing(shape: Shape = RoundedCornerShape(16.dp)): Modifier {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (focused) 1.1f else 1f,
+        animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing),
         label = "tvFocusScale"
     )
     return this
         .onFocusChanged { focused = it.isFocused }
-        .then(if (focused) Modifier.padding(6.dp) else Modifier)
+        .padding(6.dp)
         .then(
             if (focused) Modifier
                 .border(BorderStroke(8.dp, TvFocusGreen), shape)
