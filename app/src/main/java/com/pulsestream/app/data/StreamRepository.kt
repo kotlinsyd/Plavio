@@ -637,9 +637,18 @@ class StreamRepository(
             }
             val local = search(query, type)
             val seen = local.map { it.addonId + it.meta.id }.toMutableSet()
-            // A remote failure must never wipe out local results.
             val remote = runCatching { searchRemote(query, type) }.getOrDefault(emptyList())
-            local + remote.filter { seen.add(it.addonId + it.meta.id) }
+            val combined = (local + remote.filter { seen.add(it.addonId + it.meta.id) }).toMutableList()
+            val tmdbKey = settings.tmdbApiKey
+            if (!tmdbKey.isNullOrBlank()) {
+                val tmdbResults = runCatching { TmdbClient.search(tmdbKey, query) }.getOrDefault(emptyList())
+                for (preview in tmdbResults) {
+                    if (seen.add("tmdb_" + preview.id)) {
+                        combined.add(CachedMeta("tmdb", "TMDB", "", preview))
+                    }
+                }
+            }
+            combined
         }
 
     /** In-memory manifest cache so Home/Live/search don't refetch manifests per load. */

@@ -42,9 +42,12 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Hd
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PictureInPicture
@@ -134,6 +137,7 @@ import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.VideoSize
 import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
@@ -143,6 +147,8 @@ import com.pulsestream.app.player.PlavioAudioRenderersFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
@@ -372,13 +378,66 @@ fun PlayerScreen(
      */
     fun buildPlaybackDataSourceFactory(
         headers: Map<String, String>
-    ): DefaultHttpDataSource.Factory {
+    ): androidx.media3.datasource.DataSource.Factory {
         ensurePlaybackTlsInstalled()
-        return DefaultHttpDataSource.Factory().apply {
+        val httpFactory = DefaultHttpDataSource.Factory().apply {
             setDefaultRequestProperties(headers)
             setConnectTimeoutMs(15_000)
             setReadTimeoutMs(15_000)
             setAllowCrossProtocolRedirects(true)
+        }
+        // DefaultDataSource delegates per URI scheme: FileDataSource for
+        // file:// (downloads), HttpDataSource for http(s):// (streams).
+        return DefaultDataSource.Factory(context, httpFactory)
+    }
+
+    /**
+     * MediaSource.Factory for a request (headers + optional disk cache).
+     * Shared by [buildPlaybackMediaSource] and the player's own factory so
+     * later setMediaItem calls use the same networking.
+     */
+    fun playbackMediaSourceFactory(req: PlaybackRequest): MediaSource.Factory {
+        val playbackHeaders = PlaybackHeaders.buildPlaybackHeaders(req.headers, isTv)
+        val dataSourceFactory = buildPlaybackDataSourceFactory(playbackHeaders)
+        val cacheMb = settings.diskCacheMb
+        return if (cacheMb > 0) {
+            val cacheDataSourceFactory = CacheDataSource.Factory()
+                .setCache(PlaybackCache.get(context, cacheMb * 1024L * 1024L))
+                .setUpstreamDataSourceFactory(dataSourceFactory)
+            DefaultMediaSourceFactory(cacheDataSourceFactory)
+        } else {
+            DefaultMediaSourceFactory(dataSourceFactory)
+        }
+    }
+
+    /**
+     * Builds the MediaSource for a request. YouTube DASH qualities are
+     * video-only — when [PlaybackRequest.mergeAudioUrl] is set, the video is
+     * merged with that audio stream so every quality plays with sound.
+     */
+    fun buildPlaybackMediaSource(
+        req: PlaybackRequest,
+        subs: List<ResolvedSubtitle> = emptyList(),
+        forcedMime: String? = null
+    ): MediaSource {
+        val mediaSourceFactory = playbackMediaSourceFactory(req)
+        // Nuvio parity: infer HLS/DASH from the FULL URL (path + query) so
+        // proxied URLs like /api/manifest?url=<encoded ...m3u8> play as HLS
+        // instead of being misidentified as progressive.
+        val inferredMime = forcedMime ?: PlaybackHeaders.inferMimeType(req.streamUrl)
+        val videoItem = MediaItem.Builder()
+            .setUri(req.streamUrl)
+            .apply { inferredMime?.let { setMimeType(it) } }
+            .setSubtitleConfigurations(subtitleConfigs(subs))
+            .build()
+        val mergeAudio = req.mergeAudioUrl
+        return if (mergeAudio != null) {
+            MergingMediaSource(
+                mediaSourceFactory.createMediaSource(videoItem),
+                mediaSourceFactory.createMediaSource(MediaItem.fromUri(mergeAudio))
+            )
+        } else {
+            mediaSourceFactory.createMediaSource(videoItem)
         }
     }
 
@@ -389,19 +448,6 @@ fun PlayerScreen(
     ): ExoPlayer {
         val prefs = settings.subtitleLanguages
         val audioPref = settings.preferredAudioLanguage
-        // Nuvio parity: forward the addon's proxyHeaders verbatim (dropping
-        // only blanks + Range). The addon-supplied User-Agent is honored —
-        // upstreams that ship one expect it, and a missing UA is itself a
-        // bot-filter trigger. Falls back to a Chrome UA when none supplied.
-        val playbackHeaders = PlaybackHeaders.buildPlaybackHeaders(req.headers, isTv)
-        // Nuvio parity: OkHttp-backed data source with trust-all TLS scoped
-        // to stream playback only (some proxied upstreams serve certs
-        // Android rejects). Timeouts 15s, cross-protocol redirects allowed.
-        val dataSourceFactory = buildPlaybackDataSourceFactory(playbackHeaders)
-        // Nuvio parity: infer HLS/DASH from the FULL URL (path + query) so
-        // proxied URLs like /api/manifest?url=<encoded ...m3u8> play as HLS
-        // instead of being misidentified as progressive.
-        val inferredMime = forcedMime ?: PlaybackHeaders.inferMimeType(req.streamUrl)
         // Memory-conscious buffering: on low-RAM devices (e.g. 48MB-heap TVs)
         // the default ~50s HLS buffer exhausts the heap mid-playback and OOMs.
         // The user's buffer settings (Settings > Playback > Buffer & Cache)
@@ -419,18 +465,7 @@ fun PlayerScreen(
                 /* bufferForPlaybackAfterRebufferMs = */ (forPlaybackMs * 2).coerceAtMost(30_000)
             )
             .build()
-        // Optional on-disk playback cache (Settings > Playback > Buffer &
-        // Cache): caches media so re-watches don't re-download. 0 = off.
-        val cacheMb = settings.diskCacheMb
-        val mediaSourceFactory = if (cacheMb > 0) {
-            val upstreamFactory = dataSourceFactory
-            val cacheDataSourceFactory = CacheDataSource.Factory()
-                .setCache(PlaybackCache.get(context, cacheMb * 1024L * 1024L))
-                .setUpstreamDataSourceFactory(upstreamFactory)
-            DefaultMediaSourceFactory(cacheDataSourceFactory)
-        } else {
-            DefaultMediaSourceFactory(dataSourceFactory)
-        }
+        val mediaSourceFactory = playbackMediaSourceFactory(req)
         return ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
             .setRenderersFactory(PlavioAudioRenderersFactory(context))
@@ -455,13 +490,9 @@ fun PlayerScreen(
             )
             .build()
             .apply {
-                setMediaItem(
-                    MediaItem.Builder()
-                        .setUri(req.streamUrl)
-                        .apply { inferredMime?.let { setMimeType(it) } }
-                        .setSubtitleConfigurations(subtitleConfigs(subs))
-                        .build()
-                )
+                // YouTube DASH (video-only + merged audio) goes through
+                // setMediaSource; everything else keeps the setMediaItem path.
+                setMediaSource(buildPlaybackMediaSource(req, subs, forcedMime))
             }
     }
 
@@ -616,7 +647,9 @@ fun PlayerScreen(
     var indicator by remember { mutableStateOf<PlayerIndicator?>(null) }
     var indicatorTick by remember { mutableIntStateOf(0) }
 
-    var isPortrait by remember { mutableStateOf(false) }
+    // YouTube opens portrait-first (user rotates via the Rotate pill);
+    // everything else opens landscape as before.
+    var isPortrait by remember { mutableStateOf(initialRequest.sourceName == "YouTube") }
     // Aspect ratio (in-player only — cycles Fit → Fill → Zoom)
     var aspectMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
     val aspectLabel = ASPECT_MODES.firstOrNull { it.first == aspectMode }?.second ?: "Fit"
@@ -648,13 +681,19 @@ fun PlayerScreen(
         if (attached != null && attached.first === player && attached.second == key) return
         val pos = player.currentPosition
         val wasPlaying = player.isPlaying
-        player.setMediaItem(
-            MediaItem.Builder()
-                .setUri(currentRequest.streamUrl)
-                .setSubtitleConfigurations(subtitleConfigs(resolved, defaultUrl))
-                .build(),
-            pos
-        )
+        // YouTube DASH keeps its merged audio via the shared builder;
+        // everything else keeps the setMediaItem path.
+        if (currentRequest.mergeAudioUrl != null) {
+            player.setMediaSource(buildPlaybackMediaSource(currentRequest, resolved, null), pos)
+        } else {
+            player.setMediaItem(
+                MediaItem.Builder()
+                    .setUri(currentRequest.streamUrl)
+                    .setSubtitleConfigurations(subtitleConfigs(resolved, defaultUrl))
+                    .build(),
+                pos
+            )
+        }
         player.prepare()
         player.playWhenReady = wasPlaying
         subsAttached = player to key
@@ -1048,8 +1087,11 @@ fun PlayerScreen(
                     if (result.streams.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
                             val (playable, hidden) = ( result.streams to 0 )
-                            availableStreams = playable
-                            hiddenIncompatibleCount = hidden
+                            // Debounce: only update if list grew (avoids chunky recompositions)
+                            if (playable.size > availableStreams.size) {
+                                availableStreams = playable
+                                hiddenIncompatibleCount = hidden
+                            }
                         }
                     }
                 }
@@ -1367,7 +1409,9 @@ fun PlayerScreen(
         val saved = repository.getSavedPosition(initialRequest.streamUrl)
         var req: PlaybackRequest = initialRequest
         var offerResume = saved > 0
-        if (saved > 0 && req.streams.isEmpty() && req.type != "tv" && !disposed.get()) {
+        // Local files (downloads): never re-resolve sources — play the file directly.
+        val isLocalFile = initialRequest.streamUrl.startsWith("file://")
+        if (saved > 0 && req.streams.isEmpty() && req.type != "tv" && !isLocalFile && !disposed.get()) {
             // #15: Continue Watching resume — re-resolve the title's streams
             // first so signed/expiring URLs are fresh, and resume at the saved
             // position on the fresh URL. Falls back to the stored URL when
@@ -1425,7 +1469,8 @@ fun PlayerScreen(
         }
         // Sources sheet fallback: if we arrived without a stream list
         // (e.g. from Continue Watching), fill it quietly in the background.
-        if (availableStreams.isEmpty()) {
+        // Local files (downloads): no sources to fetch — play the file directly.
+        if (availableStreams.isEmpty() && !isLocalFile) {
             refreshStreamsBackground(req.type, req.videoId)
         }
     }
@@ -1462,8 +1507,12 @@ fun PlayerScreen(
     }
 
     // Landscape + immersive; restore on exit; save + release on dispose.
+    // YouTube opens portrait-first (Rotate pill switches to landscape).
     DisposableEffect(Unit) {
-        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        activity?.requestedOrientation = if (initialRequest.sourceName == "YouTube")
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        else
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         val window = activity?.window
         if (window != null) {
             WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -1728,7 +1777,11 @@ fun PlayerScreen(
                         }
                     }
                     Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = { sourcesOpen = true }) {
+                    TextButton(onClick = {
+                        // Fresh fetch when opening Sources — ensures full list
+                        refreshStreamsBackground(currentRequest.type, currentRequest.videoId)
+                        sourcesOpen = true
+                    }) {
                         Text(
                             "Browse all sources",
                             color = LocalPalette.current.accent,
@@ -2088,7 +2141,12 @@ fun PlayerScreen(
                                 PillBarButton(
                                     icon = Icons.Filled.CloudDownload,
                                     label = "Sources",
-                                    onClick = { sourcesOpen = true }
+                                    onClick = {
+                                        // Fresh fetch when opening Sources — ensures full list, not stale partial
+                                        // Fresh fetch when opening Sources — ensures full list, not stale partial
+                                        refreshStreamsBackground(currentRequest.type, currentRequest.videoId)
+                                        sourcesOpen = true
+                                    }
                                 )
                                 if (!req.isMovie && req.episodes.isNotEmpty()) {
                                     PillBarButton(
@@ -2460,6 +2518,7 @@ fun PlayerScreen(
             )
         }
 
+        // TEST: YouTube quality picker dialog.
         // Episodes picker for series.
         if (episodesOpen) {
             val episodes = currentRequest.episodes

@@ -257,6 +257,25 @@ fun AccountScreen(
                                     color = LocalPalette.current.accent
                                 )
                             }
+                            if (isLoginMode) {
+                                TextButton(
+                                    onClick = {
+                                        if (email.isBlank()) {
+                                            error = "Enter your email first, then tap Forgot password."
+                                        } else {
+                                            scope.launch {
+                                                busy = true; error = null
+                                                val result = cloud.resetPassword(email.trim())
+                                                busy = false
+                                                error = if (result.isSuccess) "Reset email sent \u2014 check your inbox."
+                                                    else result.exceptionOrNull()?.message ?: "Could not send reset email."
+                                            }
+                                        }
+                                    },
+                                    enabled = !busy,
+                                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                                ) { Text("Forgot password?", color = TextSecondary) }
+                            }
                         }
                     }
                 }

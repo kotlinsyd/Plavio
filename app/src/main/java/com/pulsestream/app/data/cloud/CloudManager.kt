@@ -137,23 +137,51 @@ class CloudManager(
                 } catch (e: Exception) { "Sign up failed." }
                 return@withContext Result.failure(Exception(msg))
             }
-            // Check if email confirmation is required
             val obj = try { JSONObject(response) } catch (e: Exception) { JSONObject() }
-            val user = obj.optJSONObject("user")
-            val confirmedAt = user?.optString("confirmed_at", "") ?: ""
-            val identities = obj.optJSONArray("identities")
-            
-            if (confirmedAt.isEmpty() && (identities == null || identities.length() == 0)) {
-                // Email confirmation required - don't auto-signin
+            val session = obj.optJSONObject("session")
+            val accessToken = session?.optString("access_token", "") ?: ""
+            if (accessToken.isEmpty()) {
                 return@withContext Result.failure(
                     Exception("VERIFY_EMAIL:Please check your email and click the verification link, then log in.")
                 )
             }
-            // Auto sign in after signup (only if no confirmation needed)
-            signIn(email, password)
+            saveSession(session)
+            Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    private fun saveSession(session: org.json.JSONObject) {
+        val accessToken = session.optString("access_token", "")
+        val refreshToken = session.optString("refresh_token", "")
+        val user = session.optJSONObject("user")
+        val userId = user?.optString("id", "") ?: ""
+        val userEmail = user?.optString("email", "") ?: ""
+        prefs.edit().apply {
+            putString(KEY_ACCESS_TOKEN, accessToken)
+            putString(KEY_REFRESH_TOKEN, refreshToken)
+            putString(KEY_USER_ID, userId)
+            putString(KEY_USER_EMAIL, userEmail)
+            apply()
+        }
+    }
+
+    suspend fun resetPassword(email: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val body = org.json.JSONObject().apply { put("email", email) }.toString()
+            val (code, response) = post(
+                "/auth/v1/recover",
+                body,
+                mapOf("apikey" to SUPABASE_ANON_KEY, "Content-Type" to "application/json")
+            )
+            if (code !in 200..299) {
+                val msg = try { org.json.JSONObject(response).optString("msg", "Could not send reset email.") }
+                    catch (e: Exception) { "Could not send reset email." }
+                return@withContext Result.failure(Exception(msg))
+            }
+            Result.success(Unit)
+        } catch (e: Exception) { Result.failure(e) }
     }
 
     suspend fun signIn(email: String, password: String): Result<Unit> = withContext(Dispatchers.IO) {

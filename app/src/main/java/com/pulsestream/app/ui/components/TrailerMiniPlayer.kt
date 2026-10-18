@@ -96,6 +96,10 @@ class TrailerMiniController {
         request = null
         playerState = TrailerPlayerState.Hidden
     }
+
+    fun pauseForBackground() {
+        player?.pause()
+    }
 }
 
 /** Floating mini player overlay — bottom-right, above the tab dock. */

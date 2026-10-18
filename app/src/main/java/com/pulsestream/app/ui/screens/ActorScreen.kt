@@ -59,10 +59,20 @@ fun ActorScreen(
 ) {
     var person by remember(personId) { mutableStateOf<PersonDetail?>(null) }
     var loading by remember(personId) { mutableStateOf(true) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val tmdbKey = remember {
+        context.getSharedPreferences("pulse_settings", android.content.Context.MODE_PRIVATE)
+            .getString("tmdb_api_key", null)
+    }
 
     LaunchedEffect(personId) {
         loading = true
-        person = runCatching { repository.getPerson(personId) }.getOrNull()
+        // Try TMDB directly first (user's key), fall back to PlavioMeta
+        person = if (!tmdbKey.isNullOrBlank()) {
+            runCatching { com.pulsestream.app.data.TmdbClient.getPerson(tmdbKey, personId) }.getOrNull()
+        } else {
+            runCatching { repository.getPerson(personId) }.getOrNull()
+        }
         loading = false
     }
 

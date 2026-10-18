@@ -127,7 +127,8 @@ fun SettingsScreen(
     onGoToFeaturesGuide: () -> Unit = {},
     onGoToAccount: () -> Unit = {},
     onGoToBackup: () -> Unit = {},
-    onGoToIntegrations: () -> Unit = {}
+    onGoToIntegrations: () -> Unit = {},
+    onGoToDownloads: () -> Unit = {}
 ) {
     val settings = repository.settings
     val context = LocalContext.current
@@ -155,13 +156,28 @@ fun SettingsScreen(
             contentPadding = PaddingValues(bottom = 120.dp)
         ) {
             item {
-                Text(
-                    text = stringResource(R.string.settings_title),
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary,
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 8.dp, top = 16.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = stringResource(R.string.settings_title),
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    // TEST: icon-only downloads shortcut.
+                    IconButton(onClick = onGoToDownloads) {
+                        Icon(
+                            Icons.Filled.Download,
+                            contentDescription = "Downloads",
+                            tint = TextSecondary
+                        )
+                    }
+                }
             }
 
 

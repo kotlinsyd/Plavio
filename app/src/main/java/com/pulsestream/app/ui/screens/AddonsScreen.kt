@@ -888,6 +888,25 @@ private fun AddonCard(
                         tint = if (addon.starred) Color(0xFFFBBF24) else TextSecondary
                     )
                 }
+                if (addon.configurable) {
+                    val ctx = androidx.compose.ui.platform.LocalContext.current
+                    IconButton(
+                        onClick = {
+                            val base = addon.baseUrl.trimEnd('/')
+                            runCatching {
+                                ctx.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse("$base/configure")
+                                    )
+                                )
+                            }
+                        },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Configure", tint = TextSecondary)
+                    }
+                }
                 IconButton(onClick = { showDeleteDialog = true }, modifier = Modifier.size(40.dp)) {
                     Icon(
                         Icons.Filled.Delete,

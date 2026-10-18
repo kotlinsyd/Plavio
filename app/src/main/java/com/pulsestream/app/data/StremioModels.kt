@@ -185,7 +185,12 @@ data class PlaybackRequest(
      * Trailer playback (Trailers tab): skips auto-play-next-episode, resume
      * position saving, and Trakt/Simkl scrobbling.
      */
-    val isTrailer: Boolean = false
+    val isTrailer: Boolean = false,
+    /**
+     * YouTube DASH: when the video stream is video-only, URL of the audio
+     * stream the player merges in so the quality plays with sound.
+     */
+    val mergeAudioUrl: String? = null
 )
 
 /** One entry on the Trailers tab: catalog item + where to fetch its meta/trailers. */

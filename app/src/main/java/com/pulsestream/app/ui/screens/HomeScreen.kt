@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -164,7 +165,8 @@ fun HomeScreen(
     onGoToAddons: () -> Unit,
     onGoToWatchlist: () -> Unit,
     onGoToLists: () -> Unit,
-    onOpenCatalog: (row: CatalogRow) -> Unit
+    onOpenCatalog: (row: CatalogRow) -> Unit,
+    onGoToDownloads: () -> Unit = {},
 ) {
     val vm: HomeViewModel = viewModel(factory = vmFactory { HomeViewModel(repository) })
     val watching by repository.continueWatching.collectAsState(initial = emptyList())
@@ -212,38 +214,40 @@ fun HomeScreen(
                 // Single button for saved content: Watchlist + My Lists
                 // (both serve the same purpose — saved titles).
                 var savedMenuOpen by remember { mutableStateOf(false) }
-                Box {
-                    IconButton(onClick = { savedMenuOpen = true }) {
-                        Icon(
-                            Icons.Filled.Bookmark,
-                            contentDescription = "Saved",
-                            tint = TextSecondary
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = savedMenuOpen,
-                        onDismissRequest = { savedMenuOpen = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Watchlist") },
-                            leadingIcon = {
-                                Icon(Icons.Filled.Bookmark, contentDescription = null)
-                            },
-                            onClick = {
-                                savedMenuOpen = false
-                                onGoToWatchlist()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("My Lists") },
-                            leadingIcon = {
-                                Icon(Icons.Filled.FormatListBulleted, contentDescription = null)
-                            },
-                            onClick = {
-                                savedMenuOpen = false
-                                onGoToLists()
-                            }
-                        )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box {
+                        IconButton(onClick = { savedMenuOpen = true }) {
+                            Icon(
+                                Icons.Filled.Bookmark,
+                                contentDescription = "Saved",
+                                tint = TextSecondary
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = savedMenuOpen,
+                            onDismissRequest = { savedMenuOpen = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Watchlist") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Bookmark, contentDescription = null)
+                                },
+                                onClick = {
+                                    savedMenuOpen = false
+                                    onGoToWatchlist()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("My Lists") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.FormatListBulleted, contentDescription = null)
+                                },
+                                onClick = {
+                                    savedMenuOpen = false
+                                    onGoToLists()
+                                }
+                            )
+                        }
                     }
                 }
             }

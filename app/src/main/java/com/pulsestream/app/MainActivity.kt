@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -77,8 +78,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -331,6 +335,13 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    override fun onPause() {
+        super.onPause()
+        // Auto-backup to Plavio Cloud when app goes to background (if logged in)
+        // Note: CloudManager needs settings/repository; auto-backup is handled
+        // via the AccountScreen's lifecycle instead to avoid circular dependencies.
+    }
+
     /**
      * Refreshes the PiP window's play/pause RemoteAction icon. Called by
      * PlayerScreen's player listener on every play-state change; the params
@@ -426,7 +437,11 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class Tab(val route: String, val label: String, val icon: ImageVector)
+private data class Tab(
+    val route: String,
+    val label: String,
+    val icon: ImageVector,
+)
 /** One item in the floating dock: icon + tiny label, accent-glowed when selected. */
 @Composable
 private fun DockItem(
@@ -527,6 +542,17 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
     // Mini floating trailer player (YouTube-style): one trailer at a time,
     // floats above all tabs. Mobile only — TV keeps the full player.
     val trailerMini = remember { TrailerMiniController() }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) {
+                trailerMini.pauseForBackground()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Deep link: a plavio-addons:// link opened the app (cold start or while
     // running — MainActivity stashed it via handleAddonDeepLink). Jump to the
@@ -868,7 +894,8 @@ private fun PulseNavGraph(
                     navController.navigate(
                         Routes.catalog(row.addonId, row.type, row.catalogId)
                     )
-                }
+                },
+                onGoToDownloads = { navController.navigate(Routes.DOWNLOADS) },
             )
         }
         composable(Routes.LIVE) {
@@ -897,7 +924,33 @@ private fun PulseNavGraph(
             SearchScreen(
                 repository = repository,
                 onOpenDetail = { addonId, type, metaId ->
-                    navController.navigate(Routes.detail(addonId, type, metaId))
+                    if (addonId == "tmdb" && metaId.startsWith("tmdb:")) {
+                        val parts = metaId.split(":")
+                        if (parts.size == 3) {
+                            val tmdbType = parts[1]; val tmdbId = parts[2]
+                            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                                try {
+                                    val key = repository.settings.tmdbApiKey ?: return@launch
+                                    val client = okhttp3.OkHttpClient()
+                                    val url = "https://api.themoviedb.org/3/$tmdbType/$tmdbId/external_ids?api_key=$key"
+                                    val resp = client.newCall(okhttp3.Request.Builder().url(url).get().build()).execute()
+                                    if (resp.isSuccessful) {
+                                        val imdbId = org.json.JSONObject(resp.body?.string() ?: "").optString("imdb_id", "")
+                                        if (imdbId.isNotBlank()) {
+                                            val dt = if (tmdbType == "movie") "movie" else "series"
+                                            val ma = repository.metaAddonsFor(dt)
+                                            val useId = (ma.firstOrNull { it.id.contains("cinemeta", ignoreCase = true) } ?: ma.firstOrNull())?.id ?: addonId
+                                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                navController.navigate(Routes.detail(useId, dt, imdbId))
+                                            }
+                                        }
+                                    }
+                                } catch (e: Exception) { }
+                            }
+                        }
+                    } else {
+                        navController.navigate(Routes.detail(addonId, type, metaId))
+                    }
                 }
             )
         }
@@ -966,7 +1019,8 @@ private fun PulseNavGraph(
                 onGoToFeaturesGuide = { navController.navigate(Routes.FEATURES_GUIDE) },
                 onGoToAccount = { navController.navigate(Routes.ACCOUNT) },
                 onGoToBackup = { navController.navigate(Routes.BACKUP) },
-                onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) }
+                onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) },
+                onGoToDownloads = { navController.navigate(Routes.DOWNLOADS) }
             )
         }
         composable(Routes.INTEGRATIONS) {
@@ -1033,15 +1087,24 @@ private fun PulseNavGraph(
             DownloadsScreen(
                 onBack = { navController.popBackStack() },
                 onPlayFile = { filePath, title ->
-                    playRequest(
-                        PlaybackRequest(
-                            streamUrl = "file://$filePath",
-                            title = title,
-                            poster = null,
-                            videoId = "download_${filePath.hashCode()}",
-                            isMovie = true
+                    val file = java.io.File(filePath)
+                    if (!file.exists() || !file.canRead()) {
+                        android.widget.Toast.makeText(
+                            appContext,
+                            "Downloaded file not found \u2014 it may have been deleted.",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        playRequest(
+                            PlaybackRequest(
+                                streamUrl = "file://$filePath",
+                                title = title,
+                                poster = null,
+                                videoId = "download_${filePath.hashCode()}",
+                                isMovie = true
+                            )
                         )
-                    )
+                    }
                 }
             )
         }
