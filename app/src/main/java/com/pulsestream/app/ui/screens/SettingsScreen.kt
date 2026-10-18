@@ -301,7 +301,7 @@ fun SettingsScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = stringResource(R.string.settings_credit),
+                        text = "Made with 💜 by Kotlinsyd",
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.SemiBold
                         ),
@@ -310,13 +310,6 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(12.dp))
                     SocialIconRow()
-                    Spacer(Modifier.height(16.dp))
-                    Text(
-                        text = "Made with 💜 by Kotlinsyd",
-                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
-                        color = TextPrimary,
-                        textAlign = TextAlign.Center
-                    )
                     Spacer(Modifier.height(24.dp))
                 }
             }

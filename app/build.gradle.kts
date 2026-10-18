@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 80
-        versionName = "0.10.5"
+        versionCode = 82
+        versionName = "0.11.1"
     }
 
     signingConfigs {
