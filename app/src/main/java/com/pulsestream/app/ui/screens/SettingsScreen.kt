@@ -150,7 +150,9 @@ fun SettingsScreen(
     GlowBackground {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 40.dp)
+            // Bottom padding ensures the floating nav capsule never covers the last card,
+            // including on smaller phones (capsule ~80dp + system nav ~32dp + margin)
+            contentPadding = PaddingValues(bottom = 120.dp)
         ) {
             item {
                 Text(
@@ -162,6 +164,33 @@ fun SettingsScreen(
                 )
             }
 
+
+            // ---- Account ----
+            item { SettingsSectionHeader(stringResource(R.string.settings_section_account)) }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Person,
+                    title = stringResource(R.string.settings_account_title),
+                    subtitle = stringResource(R.string.settings_account_sub),
+                    onClick = onGoToAccount
+                )
+            }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Link,
+                    title = "Integrations",
+                    subtitle = "TorBox debrid and more",
+                    onClick = onGoToIntegrations
+                )
+            }
+            item {
+                SettingsNavRow(
+                    icon = Icons.Filled.Backup,
+                    title = stringResource(R.string.settings_backup_title),
+                    subtitle = stringResource(R.string.settings_backup_sub),
+                    onClick = onGoToBackup
+                )
+            }
             // ---- Playback: everything that affects how video plays ----
             item { SettingsSectionHeader(stringResource(R.string.settings_section_playback)) }
             item {
@@ -239,41 +268,15 @@ fun SettingsScreen(
                     onClick = { showBadgeStyleDialog = true }
                 )
             }
-            // ---- Account ----
-            item { SettingsSectionHeader(stringResource(R.string.settings_section_account)) }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Person,
-                    title = stringResource(R.string.settings_account_title),
-                    subtitle = stringResource(R.string.settings_account_sub),
-                    onClick = onGoToAccount
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Backup,
-                    title = stringResource(R.string.settings_backup_title),
-                    subtitle = stringResource(R.string.settings_backup_sub),
-                    onClick = onGoToBackup
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Link,
-                    title = "Integrations",
-                    subtitle = "TorBox debrid and more",
-                    onClick = onGoToIntegrations
-                )
-            }
 
-            // ---- About ----
-            item { SettingsSectionHeader(stringResource(R.string.settings_section_about)) }
+            // ---- Help & About ----
+            item { SettingsSectionHeader("Help & About") }
             item {
                 SettingsNavRow(
-                    icon = Icons.Filled.Info,
-                    title = stringResource(R.string.settings_about_title),
-                    subtitle = stringResource(R.string.settings_about_sub),
-                    onClick = onGoToAbout
+                    icon = Icons.Filled.Book,
+                    title = "Features Guide",
+                    subtitle = "Learn what Plavio can do",
+                    onClick = onGoToFeaturesGuide
                 )
             }
             item {
@@ -286,10 +289,10 @@ fun SettingsScreen(
             }
             item {
                 SettingsNavRow(
-                    icon = Icons.Filled.Book,
-                    title = "Features Guide",
-                    subtitle = "Learn what Plavio can do",
-                    onClick = onGoToFeaturesGuide
+                    icon = Icons.Filled.Info,
+                    title = stringResource(R.string.settings_about_title),
+                    subtitle = stringResource(R.string.settings_about_sub),
+                    onClick = onGoToAbout
                 )
             }
 
@@ -548,140 +551,6 @@ fun SettingsStaticRow(
             Spacer(Modifier.width(12.dp))
             trailing()
         }
-    }
-}
-
-/**
- * TMDB API key input card (Settings > Account).
- * User pastes their free TMDB API key; enables clickable actors and
- * in-app "You May Like" recommendations. Key is masked in the UI.
- */
-@Composable
-fun TmdbApiKeyCard(settings: com.pulsestream.app.data.SettingsStore) {
-    val palette = LocalPalette.current
-    var keyInput by remember { mutableStateOf(settings.tmdbApiKey) }
-    var saved by remember { mutableStateOf(settings.tmdbApiKey.isNotBlank()) }
-    var showSavedTick by remember { mutableStateOf(false) }
-
-    // Masked display: first 4 chars + "..." or "Not set"
-    val maskedKey = remember(keyInput, saved) {
-        val k = if (saved) settings.tmdbApiKey else keyInput
-        if (k.isBlank()) "Not set"
-        else if (k.length <= 4) "••••"
-        else k.take(4) + "••••••••"
-    }
-
-    GlassCard(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp)
-    ) {
-        Column(Modifier.fillMaxWidth().padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SettingsIconTile(Icons.Filled.VpnKey, "TMDB API Key")
-                Spacer(Modifier.width(14.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "TMDB API Key",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = TextPrimary
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        if (saved) "Key saved: $maskedKey" else "Not set",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (saved) palette.accent else TextSecondary
-                    )
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = keyInput,
-                onValueChange = {
-                    keyInput = it.trim()
-                    // Auto-save on change (debounced by the Save button state)
-                    if (showSavedTick) showSavedTick = false
-                },
-                label = { Text("Paste your TMDB API key") },
-                placeholder = { Text("e.g. a1b2c3d4...") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(50),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = palette.accent,
-                    focusedLabelColor = palette.accent,
-                    unfocusedBorderColor = GlassBorder,
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent
-                )
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Get a free key at themoviedb.org/settings/api — enables clickable actors and recommendations.",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                // Save button (capsule)
-                Button(
-                    onClick = {
-                        settings.tmdbApiKey = keyInput.trim()
-                        saved = keyInput.isNotBlank()
-                        showSavedTick = true
-                    },
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = palette.accent.copy(alpha = 0.18f),
-                        contentColor = palette.accent
-                    )
-                ) {
-                    if (showSavedTick) {
-                        Icon(
-                            Icons.Filled.Check,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Saved")
-                    } else {
-                        Text("Save Key")
-                    }
-                }
-                // Clear button (capsule, ghost)
-                OutlinedButton(
-                    onClick = {
-                        keyInput = ""
-                        settings.tmdbApiKey = ""
-                        saved = false
-                        showSavedTick = false
-                    },
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Clear", color = TextSecondary)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ComingSoonChip() {
-    Box(
-        modifier = Modifier
-            .border(1.dp, LocalPalette.current.accent.copy(alpha = 0.5f), RoundedCornerShape(50))
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
-        Text(
-            "Coming soon",
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = LocalPalette.current.accent
-        )
     }
 }
 

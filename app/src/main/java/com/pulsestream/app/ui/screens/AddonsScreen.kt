@@ -39,6 +39,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -356,8 +358,130 @@ fun AddonsScreen(
                 }
             }
 
+            item(key = "overview") {
+                Text(
+                    "Overview",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextSecondary,
+                    modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
+                )
+            }
+
+            item(key = "stats-card") {
+                val totalCatalogs = remember(addons) {
+                    // Estimate from addon types; actual catalog count comes from manifests
+                    addons.sumOf { addon ->
+                        try {
+                            val types = org.json.JSONArray(addon.types ?: "[]")
+                            types.length() * 3 // rough estimate
+                        } catch (e: Exception) { 3 }
+                    }
+                }
+                GlassCard(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 20.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        StatColumn(
+                            value = addons.size.toString(),
+                            label = "Addons"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(1.dp)
+                                .height(48.dp)
+                                .background(GlassBorder)
+                        )
+                        StatColumn(
+                            value = enabledCount.toString(),
+                            label = "Active"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(1.dp)
+                                .height(48.dp)
+                                .background(GlassBorder)
+                        )
+                        StatColumn(
+                            value = totalCatalogs.toString(),
+                            label = "Catalogs"
+                        )
+                    }
+                }
+            }
+
+            item(key = "add-addon-header") {
+                Text(
+                    "Add Addon",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextSecondary,
+                    modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
+                )
+            }
+
             item(key = "install-card") {
-                InstallAddonCard(onClick = { vm.reset(); showDialog = true })
+                var urlInput by remember { mutableStateOf("") }
+                var installing by remember { mutableStateOf(false) }
+                GlassCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        OutlinedTextField(
+                            value = urlInput,
+                            onValueChange = { urlInput = it },
+                            label = { Text("Addon URL") },
+                            placeholder = { Text("Paste manifest URL...") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = LocalPalette.current.accent,
+                                focusedLabelColor = LocalPalette.current.accent,
+                                unfocusedBorderColor = GlassBorder,
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent
+                            )
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                if (urlInput.isNotBlank()) {
+                                    installing = true
+                                    vm.addAddon(urlInput.trim()) {
+                                        installing = false
+                                        urlInput = ""
+                                    }
+                                } else {
+                                    vm.reset()
+                                    showDialog = true
+                                }
+                            },
+                            enabled = !installing,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(50),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = LocalPalette.current.accent.copy(alpha = 0.2f),
+                                contentColor = LocalPalette.current.accent,
+                                disabledContainerColor = Color.White.copy(alpha = 0.06f),
+                                disabledContentColor = TextSecondary
+                            )
+                        ) {
+                            if (installing) {
+                                CircularProgressIndicator(
+                                    color = LocalPalette.current.accent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            } else {
+                                Text(
+                                    if (urlInput.isBlank()) "Browse to Install" else "Install Addon",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // TV only: push addons from the phone over home Wi-Fi instead of
@@ -372,15 +496,24 @@ fun AddonsScreen(
                 item(key = "empty") {
                     EmptyState(
                         title = "No addons installed",
-                        message = "Tap the card above and paste an addon manifest URL to get started.",
-                        actionLabel = "Add your first addon",
+                        message = "Paste an addon manifest URL above to get started.",
+                        actionLabel = "Browse addons",
                         onAction = { vm.reset(); showDialog = true }
                     )
                 }
             } else {
+                item(key = "installed-header") {
+                    Text(
+                        "Installed Addons",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
+                    )
+                }
                 items(ordered, key = { it.id }) { addon ->
                     val idx = ordered.indexOfFirst { it.id == addon.id }
-                    AddonRow(
+                    AddonCard(
                         addon = addon,
                         selectionMode = selectionMode,
                         selected = addon.id in selectedIds,
@@ -509,6 +642,27 @@ private fun StatPill(text: String, color: Color) {
     }
 }
 
+/** Small stat column for the Overview card (value on top, label below). */
+@Composable
+private fun StatColumn(value: String, label: String) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(horizontal = 16.dp)
+    ) {
+        Text(
+            value,
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary
+        )
+    }
+}
+
 /** Slim capsule install affordance at the top of the list. */
 @Composable
 private fun InstallAddonCard(onClick: () -> Unit) {
@@ -618,7 +772,7 @@ private fun TvSetupCard(onClick: () -> Unit) {
 }
 
 @Composable
-private fun AddonRow(
+private fun AddonCard(
     addon: InstalledAddon,
     selectionMode: Boolean = false,
     selected: Boolean = false,
@@ -634,186 +788,214 @@ private fun AddonRow(
     canUp: Boolean,
     canDown: Boolean
 ) {
-    val context = LocalContext.current
-    var expanded by remember { mutableStateOf(false) }
-    Surface(
-        shape = RoundedCornerShape(28.dp),
-        color = Color.White.copy(alpha = 0.04f),
-        border = BorderStroke(1.dp, GlassBorder),
+    val palette = LocalPalette.current
+    var showDeleteDialog by remember { mutableStateOf(false) }
+
+    GlassCard(
         modifier = Modifier
             .fillMaxWidth()
             .alpha(if (addon.enabled) 1f else 0.55f)
     ) {
-        Column {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        if (selectionMode) onSelect() else expanded = !expanded
-                    }
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 if (selectionMode) {
                     androidx.compose.material3.Checkbox(
                         checked = selected,
                         onCheckedChange = { onSelect() },
                         colors = androidx.compose.material3.CheckboxDefaults.colors(
-                            checkedColor = LocalPalette.current.accent
+                            checkedColor = palette.accent
                         )
                     )
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(8.dp))
                 }
-                AddonLogo(addon, size = 40.dp)
-                Spacer(Modifier.width(10.dp))
+                AddonLogo(addon, size = 48.dp)
+                Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        addon.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (addon.version.isNotBlank()) {
                         Text(
-                            addon.name,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                        if (addon.version.isNotBlank()) {
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                "v${addon.version}",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = LocalPalette.current.accent,
-                                maxLines = 1
-                            )
-                        }
-                    }
-                    if (addon.starred || addon.preinstalled) {
-                        Spacer(Modifier.height(2.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (addon.starred) {
-                                Icon(
-                                    Icons.Filled.Star,
-                                    contentDescription = null,
-                                    tint = Color(0xFFFBBF24),
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                            }
-                            if (addon.preinstalled) PreinstalledBadge()
-                        }
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                OnOffPill(enabled = addon.enabled, onToggle = onToggle)
-            }
-            AnimatedVisibility(visible = expanded) {
-                Column(
-                    Modifier.padding(start = 62.dp, end = 14.dp, bottom = 12.dp)
-                ) {
-                    if (addon.description.isNotBlank()) {
-                        Text(
-                            addon.description,
+                            "Version ${addon.version}",
                             style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(Modifier.height(4.dp))
-                    }
-                    val caps = buildList {
-                        if (addon.hasCatalog) add("Catalogs")
-                        if (addon.hasStream) add("Streams")
-                        if (addon.hasSubtitles) add("Subtitles")
-                    }
-                    if (caps.isNotEmpty()) {
-                        Text(
-                            caps.joinToString(" • "),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextSecondary.copy(alpha = 0.8f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(Modifier.height(8.dp))
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = onStar, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                if (addon.starred) Icons.Filled.Star else Icons.Outlined.Star,
-                                contentDescription = if (addon.starred) "Unstar" else "Star for priority",
-                                tint = if (addon.starred) Color(0xFFFBBF24) else TextSecondary.copy(alpha = 0.6f),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        TinyIconButton(onClick = onRefresh, enabled = !refreshing) {
-                            if (refreshing) {
-                                CircularProgressIndicator(
-                                    strokeWidth = 2.dp,
-                                    color = LocalPalette.current.accent,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Filled.Refresh,
-                                    "Refresh addon",
-                                    tint = TextSecondary.copy(alpha = 0.8f),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                        TinyIconButton(onClick = onUp, enabled = canUp) {
-                            Icon(Icons.Filled.KeyboardArrowUp, "Move up", modifier = Modifier.size(18.dp))
-                        }
-                        TinyIconButton(onClick = onDown, enabled = canDown) {
-                            Icon(Icons.Filled.KeyboardArrowDown, "Move down", modifier = Modifier.size(18.dp))
-                        }
-                        if (addon.configurable) {
-                            TinyIconButton(onClick = {
-                                // Normalize + build with HttpUrl so query-string addon
-                                // configs stay in the query instead of breaking the path.
-                                val configureUrl = StremioApi.normalizeBaseUrl(addon.baseUrl)
-                                    .toHttpUrlOrNull()?.newBuilder()
-                                    ?.addPathSegment("configure")?.build()?.toString()
-                                    ?: "${addon.baseUrl}/configure"
-                                val intent = Intent(
-                                    Intent.ACTION_VIEW,
-                                    Uri.parse(configureUrl)
-                                )
-                                context.startActivity(intent)
-                            }) {
-                                Icon(
-                                    Icons.Filled.Settings,
-                                    "Configure addon",
-                                    tint = LocalPalette.current.accent,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                        Spacer(Modifier.weight(1f))
-                        TinyIconButton(onClick = onRemove) {
-                            Icon(
-                                Icons.Filled.Delete,
-                                "Remove",
-                                tint = Color(0xFFFF6B6B),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-                    if (refreshNote != null) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            refreshNote.message,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (refreshNote.isError) Color(0xFFFF6B6B)
-                            else LocalPalette.current.accent,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
+                            color = TextSecondary
                         )
                     }
                 }
+                androidx.compose.material3.Switch(
+                    checked = addon.enabled,
+                    onCheckedChange = onToggle,
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = palette.accent,
+                        uncheckedThumbColor = Color.White,
+                        uncheckedTrackColor = Color(0xFF3A3A4A)
+                    )
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                if (canUp) {
+                    IconButton(onClick = onUp, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            Icons.Filled.KeyboardArrowUp,
+                            contentDescription = "Move up",
+                            tint = TextSecondary
+                        )
+                    }
+                }
+                if (canDown) {
+                    IconButton(onClick = onDown, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            Icons.Filled.KeyboardArrowDown,
+                            contentDescription = "Move down",
+                            tint = TextSecondary
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.size(40.dp),
+                    enabled = !refreshing
+                ) {
+                    if (refreshing) {
+                        CircularProgressIndicator(
+                            color = palette.accent,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    } else {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = "Refresh",
+                            tint = TextSecondary
+                        )
+                    }
+                }
+                IconButton(onClick = onStar, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        if (addon.starred) Icons.Filled.Star else Icons.Outlined.Star,
+                        contentDescription = "Star",
+                        tint = if (addon.starred) Color(0xFFFBBF24) else TextSecondary
+                    )
+                }
+                IconButton(onClick = { showDeleteDialog = true }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Delete",
+                        tint = Color(0xFFF87171)
+                    )
+                }
+            }
+
+            if (refreshNote != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    refreshNote.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (!refreshNote.isError) palette.accent else Color(0xFFF87171)
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Badge(text = if (addon.enabled) "Active" else "Disabled")
+                val resourceCount = try {
+                    org.json.JSONArray(addon.resources ?: "[]").length()
+                } catch (e: Exception) { 0 }
+                if (resourceCount > 0) {
+                    Badge(text = "$resourceCount resource${if (resourceCount == 1) "" else "s"}")
+                }
+                val catalogEstimate = try {
+                    org.json.JSONArray(addon.types ?: "[]").length() * 3
+                } catch (e: Exception) { 0 }
+                if (catalogEstimate > 0) {
+                    Badge(text = "$catalogEstimate catalogs")
+                }
+            }
+
+            if (addon.description.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    addon.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            val typesText = try {
+                val types = org.json.JSONArray(addon.types ?: "[]")
+                (0 until types.length()).joinToString(" / ") { types.getString(it) }
+            } catch (e: Exception) { "" }
+            if (typesText.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    typesText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary.copy(alpha = 0.7f)
+                )
             }
         }
+    }
+
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete ${addon.name}?", color = TextPrimary) },
+            text = {
+                Text(
+                    "This will remove the addon from Plavio.",
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRemove()
+                        showDeleteDialog = false
+                    }
+                ) {
+                    Text("Delete", color = Color(0xFFF87171))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            }
+        )
+    }
+}
+
+/** Small pill badge for addon metadata. */
+@Composable
+private fun Badge(text: String) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = Color.White.copy(alpha = 0.06f),
+        border = BorderStroke(1.dp, GlassBorder)
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            color = TextSecondary,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+        )
     }
 }
 

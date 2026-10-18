@@ -1,8 +1,5 @@
 package com.pulsestream.app.ui.screens
 
-import android.content.Intent
-import android.net.Uri
-import android.os.SystemClock
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -11,25 +8,31 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.CloudQueue
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -39,21 +42,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.StreamRepository
-import com.pulsestream.app.data.simkl.SimklApi
-import com.pulsestream.app.data.simkl.SimklManager
-import com.pulsestream.app.data.trakt.TraktApi
-import com.pulsestream.app.data.trakt.TraktManager
+import com.pulsestream.app.data.cloud.CloudManager
+import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.GlowBackground
+import com.pulsestream.app.ui.screens.SettingsStaticRow
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
+/**
+ * Account screen (v0.11.2+): Plavio Cloud login + profiles.
+ * Login is OPTIONAL — the app works fully without an account.
+ * When logged in: backup/restore watchlist, continue watching, settings, addons.
+ * Profiles: multiple profiles per account (e.g. for family members).
+ * The last used profile is remembered — no login prompt on every launch.
+ */
 @Composable
 fun AccountScreen(
     repository: StreamRepository,
@@ -62,100 +69,59 @@ fun AccountScreen(
     val settings = repository.settings
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val simkl = remember { SimklManager(settings) }
-    // Bumped on Simkl login/logout to recompose the account row.
-    var simklTick by remember { mutableIntStateOf(0) }
-    var showPinDialog by remember { mutableStateOf(false) }
-    var deviceData by remember { mutableStateOf<SimklApi.DeviceData?>(null) }
-    var pinError by remember { mutableStateOf<String?>(null) }
-    var showLogoutDialog by remember { mutableStateOf(false) }
+    val cloud = remember { CloudManager(context, settings, repository) }
 
-    // ---- Trakt ----
-    val trakt = remember { TraktManager(settings) }
-    var traktTick by remember { mutableIntStateOf(0) }
-    var showTraktDialog by remember { mutableStateOf(false) }
-    var traktPkce by remember { mutableStateOf<TraktApi.Pkce?>(null) }
-    var traktCode by remember { mutableStateOf("") }
-    var traktError by remember { mutableStateOf<String?>(null) }
-    var traktBusy by remember { mutableStateOf(false) }
-    var showTraktLogoutDialog by remember { mutableStateOf(false) }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var isLoginMode by remember { mutableStateOf(true) }
+    var busy by remember { mutableStateOf(false) }
+    var syncing by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var cloudTick by remember { mutableStateOf(0) }
 
-    fun startTraktLogin() {
-        traktError = null
-        traktCode = ""
-        traktBusy = false
-        val pkce = trakt.newPkce()
-        traktPkce = pkce
-        showTraktDialog = true
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse(trakt.authorizeUrl(pkce)))
-        )
-    }
+    val isLoggedIn = remember(cloudTick) { cloud.isLoggedIn }
+    val userEmail = remember(cloudTick) { cloud.userEmail }
+    val profiles = remember(cloudTick) { cloud.getProfiles() }
+    val activeProfileId = remember(cloudTick) { cloud.activeProfileId }
 
-    fun submitTraktCode() {
-        val pkce = traktPkce ?: return
-        val code = traktCode.trim()
-        if (code.isEmpty()) {
-            traktError = "Paste the code shown on the Trakt page."
+    fun doAuth() {
+        if (email.isBlank() || password.isBlank()) {
+            error = "Enter your email and password."
             return
         }
-        traktBusy = true
-        traktError = null
-        scope.launch {
-            val ok = withContext(Dispatchers.IO) { trakt.loginWithCode(code, pkce.verifier) }
-            traktBusy = false
-            if (ok) {
-                traktTick++
-                showTraktDialog = false
-                traktPkce = null
-                traktCode = ""
-            } else {
-                traktError = "That code didn't work. Try linking again."
-            }
+        if (password.length < 6) {
+            error = "Password must be at least 6 characters."
+            return
         }
-    }
-
-    fun startPinLogin() {
-        pinError = null
-        deviceData = null
-        showPinDialog = true
+        busy = true
+        error = null
         scope.launch {
-            val device = withContext(Dispatchers.IO) { simkl.requestDeviceCode() }
-            if (device == null) {
-                pinError = "Couldn't reach Simkl. Check your connection and try again."
+            val result = if (isLoginMode) {
+                cloud.signIn(email.trim(), password)
             } else {
-                deviceData = device
+                cloud.signUp(email.trim(), password)
             }
-        }
-    }
-
-    // Poll for device approval while the dialog is open.
-    if (showPinDialog && deviceData != null) {
-        LaunchedEffect(deviceData) {
-            val device = deviceData ?: return@LaunchedEffect
-            var intervalMs = device.intervalSec * 1000L
-            val deadline = SystemClock.elapsedRealtime() + device.expiresInSec * 1000L
-            while (SystemClock.elapsedRealtime() < deadline) {
-                delay(intervalMs)
-                when (val result = withContext(Dispatchers.IO) { simkl.pollDeviceToken(device.deviceCode) }) {
-                    is SimklApi.PollResult.Approved -> {
-                        val name = withContext(Dispatchers.IO) { simkl.fetchUsername(result.accessToken) }
-                        simkl.saveLogin(result.accessToken, name)
-                        simklTick++
-                        showPinDialog = false
-                        deviceData = null
-                        break
-                    }
-                    SimklApi.PollResult.SlowDown -> intervalMs += 5000L
-                    SimklApi.PollResult.Expired -> {
-                        pinError = "That code expired. Please try again."
-                        deviceData = null
-                        break
-                    }
-                    SimklApi.PollResult.Pending, SimklApi.PollResult.Failed -> {
-                        // Keep polling; transient failures ride out the deadline.
-                    }
+            busy = false
+            result.onFailure {
+                val msg = it.message ?: "Something went wrong. Try again."
+                if (msg.startsWith("VERIFY_EMAIL:")) {
+                    // Show as info, not error - user needs to verify email
+                    error = msg.removePrefix("VERIFY_EMAIL:")
+                    // Switch to login mode so they can log in after verifying
+                    isLoginMode = true
+                } else {
+                    error = msg
                 }
+            }.onSuccess {
+                // Auto-sync: restore cloud backup on login
+                if (isLoginMode) {
+                    syncing = true
+                    cloud.autoSyncOnLogin()
+                    syncing = false
+                }
+                cloudTick++
+                email = ""
+                password = ""
             }
         }
     }
@@ -185,226 +151,311 @@ fun AccountScreen(
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Sync your watched history and progress.",
+                        "Optional. Log in to back up your data and use profiles.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
                         modifier = Modifier.padding(start = 56.dp, end = 8.dp)
                     )
                 }
             }
-            item(key = "trakt") {
-                val linked = remember(traktTick) { trakt.isLoggedIn }
-                val linkedName = remember(traktTick) { trakt.username }
-                SettingsStaticRow(
-                    icon = Icons.Filled.Sync,
-                    title = "Trakt",
-                    subtitle = if (linked) "Linked as ${linkedName ?: "Trakt user"}"
-                               else "Sync watched history and progress",
-                    trailing = {
-                        if (linked) {
-                            Text(
-                                "Linked",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = LocalPalette.current.accent
+
+            if (!isLoggedIn) {
+                // Login / signup form
+                item(key = "cloud_login") {
+                    GlassCard(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Filled.CloudUpload,
+                                    contentDescription = null,
+                                    tint = LocalPalette.current.accent,
+                                    modifier = Modifier.padding(end = 12.dp)
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "Plavio Cloud",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        "Back up watchlist, progress, settings & addons",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(16.dp))
+
+                            OutlinedTextField(
+                                value = email,
+                                onValueChange = { email = it.trim(); error = null },
+                                label = { Text("Email") },
+                                singleLine = true,
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(50),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = LocalPalette.current.accent,
+                                    focusedLabelColor = LocalPalette.current.accent
+                                )
                             )
-                        } else {
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = password,
+                                onValueChange = { password = it; error = null },
+                                label = { Text("Password") },
+                                singleLine = true,
+                                enabled = !busy,
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(50),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = LocalPalette.current.accent,
+                                    focusedLabelColor = LocalPalette.current.accent
+                                )
+                            )
+                            if (error != null) {
+                                Spacer(Modifier.height(8.dp))
+                                Text(error!!, color = Color(0xFFF87171), style = MaterialTheme.typography.bodySmall)
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            Button(
+                                onClick = { doAuth() },
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(50),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = LocalPalette.current.accent
+                                )
+                            ) {
+                                if (busy || syncing) {
+                                    CircularProgressIndicator(
+                                        color = Color.White,
+                                        modifier = Modifier.padding(end = 8.dp)
+                                    )
+                                }
+                                Text(
+                                    when {
+                                        syncing -> "Syncing..."
+                                        isLoginMode -> "Log in"
+                                        else -> "Create account"
+                                    },
+                                    color = Color.White
+                                )
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            TextButton(
+                                onClick = { isLoginMode = !isLoginMode; error = null },
+                                modifier = Modifier.align(Alignment.CenterHorizontally)
+                            ) {
+                                Text(
+                                    if (isLoginMode) "New here? Create an account"
+                                    else "Already have an account? Log in",
+                                    color = LocalPalette.current.accent
+                                )
+                            }
+                        }
+                    }
+                }
+
+                item(key = "cloud_note") {
+                    Text(
+                        "Your data stays on your device unless you log in. " +
+                            "Login is optional — the app works fully without it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(horizontal = 32.dp, vertical = 8.dp)
+                    )
+                }
+            } else {
+                // Logged in: show user + profiles + backup
+                item(key = "user_info") {
+                    GlassCard(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Row(
+                            Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Icon(
-                                Icons.Filled.ChevronRight,
-                                contentDescription = "Link Trakt",
-                                tint = TextSecondary
+                                Icons.Filled.AccountCircle,
+                                contentDescription = null,
+                                tint = LocalPalette.current.accent,
+                                modifier = Modifier.padding(end = 12.dp)
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    userEmail ?: "Plavio Cloud",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    "Logged in",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = LocalPalette.current.accent
+                                )
+                            }
+                            TextButton(onClick = {
+                                scope.launch {
+                                    cloud.signOut()
+                                    cloudTick++
+                                }
+                            }) {
+                                Text("Log out", color = TextSecondary)
+                            }
+                        }
+                    }
+                }
+
+                item(key = "profiles_header") {
+                    Row(
+                        Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Profiles",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = {
+                            scope.launch {
+                                cloud.createProfile("Profile ${profiles.size + 1}")
+                                cloudTick++
+                            }
+                        }) {
+                            Icon(Icons.Filled.Add, contentDescription = "Add profile", tint = LocalPalette.current.accent)
+                            Text("Add", color = LocalPalette.current.accent)
+                        }
+                    }
+                }
+
+                profiles.forEach { profile ->
+                    item(key = "profile_${profile.id}") {
+                        val isActive = profile.id == activeProfileId
+                        var showDeleteDialog by remember { mutableStateOf(false) }
+                        SettingsStaticRow(
+                            icon = Icons.Filled.AccountCircle,
+                            title = profile.name,
+                            subtitle = if (isActive) "Active profile" else "Tap to switch",
+                            trailing = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (isActive) {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            contentDescription = "Active",
+                                            tint = LocalPalette.current.accent
+                                        )
+                                    }
+                                    if (profiles.size > 1) {
+                                        IconButton(
+                                            onClick = { showDeleteDialog = true },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.Delete,
+                                                contentDescription = "Delete profile",
+                                                tint = TextSecondary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            onClick = {
+                                if (!isActive) {
+                                    scope.launch {
+                                        cloud.switchProfile(profile.id)
+                                        cloudTick++
+                                    }
+                                }
+                            }
+                        )
+                        if (showDeleteDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showDeleteDialog = false },
+                                title = { Text("Delete ${profile.name}?", color = TextPrimary) },
+                                text = {
+                                    Text(
+                                        "This will delete the profile and its cloud backup. This cannot be undone.",
+                                        color = TextSecondary
+                                    )
+                                },
+                                confirmButton = {
+                                    TextButton(
+                                        onClick = {
+                                            scope.launch {
+                                                cloud.deleteProfile(profile.id)
+                                                cloudTick++
+                                            }
+                                            showDeleteDialog = false
+                                        }
+                                    ) {
+                                        Text("Delete", color = Color.Red)
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showDeleteDialog = false }) {
+                                        Text("Cancel", color = TextSecondary)
+                                    }
+                                }
                             )
                         }
-                    },
-                    onClick = { if (linked) showTraktLogoutDialog = true else startTraktLogin() }
-                )
-            }
-            item(key = "simkl") {
-                val linked = remember(simklTick) { simkl.isLoggedIn }
-                val linkedName = remember(simklTick) { simkl.username }
-                SettingsStaticRow(
-                    icon = Icons.Filled.CloudQueue,
-                    title = "Simkl",
-                    subtitle = if (linked) "Linked as ${linkedName ?: "Simkl user"}"
-                               else "Sync watched history and progress",
-                    trailing = {
-                        if (linked) {
+                    }
+                }
+
+                item(key = "backup") {
+                    GlassCard(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
                             Text(
-                                "Linked",
-                                style = MaterialTheme.typography.labelMedium,
+                                "Backup",
+                                style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
-                                color = LocalPalette.current.accent
+                                color = TextPrimary
                             )
-                        } else {
-                            Icon(
-                                Icons.Filled.ChevronRight,
-                                contentDescription = "Link Simkl",
-                                tint = TextSecondary
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Automatically backs up watchlist, continue watching, custom lists, settings, and installed addons.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(
+                                    Icons.Filled.Sync,
+                                    contentDescription = null,
+                                    tint = LocalPalette.current.accent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Auto-sync is on",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary
+                                )
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            val lastBackup = remember(cloudTick) { cloud.lastBackupTime }
+                            Text(
+                                if (lastBackup != null) "Last synced: $lastBackup" else "Will sync automatically",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
                             )
                         }
-                    },
-                    onClick = { if (linked) showLogoutDialog = true else startPinLogin() }
-                )
+                    }
+                }
             }
         }
     }
-
-    if (showPinDialog) {
-        SimklPinDialog(
-            deviceData = deviceData,
-            error = pinError,
-            onOpenSite = {
-                val uri = deviceData?.verificationUriComplete
-                    ?: deviceData?.verificationUri
-                    ?: "https://simkl.com/pin"
-                context.startActivity(
-                    Intent(Intent.ACTION_VIEW, Uri.parse(uri))
-                )
-            },
-            onDismiss = {
-                showPinDialog = false
-                deviceData = null
-                pinError = null
-            }
-        )
-    }
-
-    if (showLogoutDialog) {
-        AlertDialog(
-            onDismissRequest = { showLogoutDialog = false },
-            title = { Text("Unlink Simkl?", color = TextPrimary) },
-            text = {
-                Text(
-                    "Pulse will stop syncing your watched history to Simkl.",
-                    color = TextSecondary
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    simkl.logout()
-                    simklTick++
-                    showLogoutDialog = false
-                }) { Text("Unlink", color = LocalPalette.current.accent) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showLogoutDialog = false }) {
-                    Text("Cancel", color = TextSecondary)
-                }
-            },
-            containerColor = Color(0xFF14141F)
-        )
-    }
-
-    if (showTraktDialog) {
-        TraktCodeDialog(
-            code = traktCode,
-            onCodeChange = { traktCode = it },
-            error = traktError,
-            busy = traktBusy,
-            onReopen = { traktPkce?.let { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(trakt.authorizeUrl(it)))) } },
-            onSubmit = { submitTraktCode() },
-            onDismiss = {
-                showTraktDialog = false
-                traktPkce = null
-                traktCode = ""
-                traktError = null
-            }
-        )
-    }
-
-    if (showTraktLogoutDialog) {
-        AlertDialog(
-            onDismissRequest = { showTraktLogoutDialog = false },
-            title = { Text("Unlink Trakt?", color = TextPrimary) },
-            text = {
-                Text(
-                    "Plavio will stop syncing your watched history to Trakt.",
-                    color = TextSecondary
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    trakt.logout()
-                    traktTick++
-                    showTraktLogoutDialog = false
-                }) { Text("Unlink", color = LocalPalette.current.accent) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showTraktLogoutDialog = false }) {
-                    Text("Cancel", color = TextSecondary)
-                }
-            },
-            containerColor = Color(0xFF14141F)
-        )
-    }
-}
-
-/** Dialog for pasting the Trakt authorization code shown on the callback page. */
-@Composable
-fun TraktCodeDialog(
-    code: String,
-    onCodeChange: (String) -> Unit,
-    error: String?,
-    busy: Boolean,
-    onReopen: () -> Unit,
-    onSubmit: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Link Trakt", color = TextPrimary) },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    "Approve Plavio in the browser, then paste the code shown on the page below.",
-                    color = TextSecondary,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = code,
-                    onValueChange = onCodeChange,
-                    label = { Text("Trakt code") },
-                    singleLine = true,
-                    enabled = !busy,
-                    colors = TextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedLabelColor = LocalPalette.current.accent,
-                        unfocusedLabelColor = TextSecondary,
-                        focusedIndicatorColor = LocalPalette.current.accent,
-                        unfocusedIndicatorColor = TextSecondary
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                if (error != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(error, color = Color(0xFFF87171), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                }
-                if (busy) {
-                    Spacer(Modifier.height(12.dp))
-                    Text("Linking…", color = TextSecondary)
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onSubmit, enabled = !busy) {
-                Text("Link", color = LocalPalette.current.accent)
-            }
-        },
-        dismissButton = {
-            Row {
-                TextButton(onClick = onReopen) {
-                    Text("Reopen page", color = TextSecondary)
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("Cancel", color = TextSecondary)
-                }
-            }
-        },
-        containerColor = Color(0xFF14141F)
-    )
 }

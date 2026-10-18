@@ -26,6 +26,13 @@
     <string name="settings_addons_sub">%1$d installed • %2$d enabled</string>
     <string name="settings_home_catalogs_title">Home catalogs</string>
     <string name="settings_home_catalogs_sub">Choose and arrange catalogs on the Home screen</string>
+    <string name="settings_episode_notif_title">New episode alerts</string>
+    <string name="settings_episode_notif_sub">Notify when shows in your watchlist release new episodes</string>
+
+    <string name="notif_channel_episodes">New episodes</string>
+    <string name="notif_channel_episodes_desc">Alerts when followed shows release new episodes</string>
+    <string name="notif_new_episode_text">New episode available: %1$s</string>
+    <string name="notif_new_episode_text_titled">New episode: %1$s — %2$s</string>
 
     <string name="settings_section_appearance">Appearance</string>
     <string name="settings_appearance_title">Appearance</string>
@@ -34,7 +41,7 @@
 
     <string name="settings_section_account">Account</string>
     <string name="settings_account_title">Account</string>
-    <string name="settings_account_sub">Trakt and Simkl sync</string>
+    <string name="settings_account_sub">Plavio Cloud login and profiles</string>
     <string name="settings_backup_title">Backup &amp; Restore</string>
     <string name="settings_backup_sub">Save or restore everything to a file</string>
 

@@ -16,6 +16,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -97,37 +99,138 @@ fun IntegrationsScreen(
             }
 
             item(key = "torbox") {
-                DebridCard(
+                var showTorboxDialog by remember { mutableStateOf(false) }
+                var torboxTick by remember { mutableIntStateOf(0) }
+                val torboxConfigured = remember(torboxTick) { !settings.torboxApiKey.isNullOrBlank() }
+                SettingsStaticRow(
+                    icon = Icons.Filled.Bolt,
                     title = "TorBox",
-                    badge = "Under testing",
-                    enabled = false,
-                    description = "Resolves cached torrent streams to instant HTTP links. " +
-                        "Currently under testing — coming soon.",
-                    keyLinkUrl = "https://torbox.app",
-                    keyLinkText = "Get your API key at torbox.app/settings",
-                    currentKey = { settings.torboxApiKey },
-                    onSaveKey = { settings.torboxApiKey = it },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    subtitle = if (torboxConfigured) "Connected" else "Under testing — coming soon",
+                    trailing = {
+                        if (torboxConfigured) {
+                            Text(
+                                "Connected",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = LocalPalette.current.accent
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.ChevronRight,
+                                contentDescription = "Configure TorBox",
+                                tint = TextSecondary
+                            )
+                        }
+                    },
+                    onClick = { showTorboxDialog = true }
                 )
+                if (showTorboxDialog) {
+                    ApiKeyDialog(
+                        title = "TorBox API Key",
+                        keyLinkText = "Get your API key at torbox.app/settings",
+                        keyLinkUrl = "https://torbox.app",
+                        currentKey = settings.torboxApiKey,
+                        enabled = false,
+                        onSave = { settings.torboxApiKey = it; torboxTick++ },
+                        onDismiss = { showTorboxDialog = false }
+                    )
+                }
             }
 
             item(key = "realdebrid") {
-                DebridCard(
+                var showRdDialog by remember { mutableStateOf(false) }
+                var rdTick by remember { mutableIntStateOf(0) }
+                val rdConfigured = remember(rdTick) { !settings.realDebridApiKey.isNullOrBlank() }
+                SettingsStaticRow(
+                    icon = Icons.Filled.Bolt,
                     title = "Real-Debrid",
-                    badge = "Under testing",
-                    enabled = false,
-                    description = "Resolves cached torrent streams to instant HTTP links. " +
-                        "Currently under testing — coming soon.",
-                    keyLinkUrl = "https://real-debrid.com",
-                    keyLinkText = "Get your API key at real-debrid.com/apitoken",
-                    currentKey = { settings.realDebridApiKey },
-                    onSaveKey = { settings.realDebridApiKey = it },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    subtitle = if (rdConfigured) "Connected" else "Under testing — coming soon",
+                    trailing = {
+                        if (rdConfigured) {
+                            Text(
+                                "Connected",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = LocalPalette.current.accent
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.ChevronRight,
+                                contentDescription = "Configure Real-Debrid",
+                                tint = TextSecondary
+                            )
+                        }
+                    },
+                    onClick = { showRdDialog = true }
                 )
+                if (showRdDialog) {
+                    ApiKeyDialog(
+                        title = "Real-Debrid API Key",
+                        keyLinkText = "Get your API key at real-debrid.com/apitoken",
+                        keyLinkUrl = "https://real-debrid.com",
+                        currentKey = settings.realDebridApiKey,
+                        enabled = false,
+                        onSave = { settings.realDebridApiKey = it; rdTick++ },
+                        onDismiss = { showRdDialog = false }
+                    )
+                }
             }
 
             item(key = "tmdb_key") {
-                TmdbApiKeyCard(settings = settings)
+                var showTmdbDialog by remember { mutableStateOf(false) }
+                var tmdbTick by remember { mutableIntStateOf(0) }
+                val tmdbConfigured = remember(tmdbTick) { settings.tmdbApiKey.isNotBlank() }
+                val maskedKey = remember(tmdbTick) {
+                    val k = settings.tmdbApiKey
+                    if (k.isBlank()) "" else if (k.length <= 4) "••••" else k.take(4) + "••••••••"
+                }
+                SettingsStaticRow(
+                    icon = Icons.Filled.VpnKey,
+                    title = "TMDB API Key",
+                    subtitle = if (tmdbConfigured) "Key saved: $maskedKey" else "Enables clickable actors and recommendations",
+                    trailing = {
+                        if (tmdbConfigured) {
+                            Text(
+                                "Set",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = LocalPalette.current.accent
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.ChevronRight,
+                                contentDescription = "Set TMDB API key",
+                                tint = TextSecondary
+                            )
+                        }
+                    },
+                    onClick = { showTmdbDialog = true }
+                )
+                if (showTmdbDialog) {
+                    ApiKeyDialog(
+                        title = "TMDB API Key",
+                        keyLinkText = "Get your free key",
+                        keyLinkUrl = "https://www.themoviedb.org/settings/api",
+                        currentKey = settings.tmdbApiKey,
+                        enabled = true,
+                        onSave = { settings.tmdbApiKey = it; tmdbTick++ },
+                        onDismiss = { showTmdbDialog = false }
+                    )
+                }
+            }
+
+            item(key = "watch_sync_header") {
+                Text(
+                    "Watch history sync",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)
+                )
+            }
+
+            item(key = "trakt_simkl") {
+                TraktSimklSection(settings = settings)
             }
 
             item(key = "note") {
@@ -307,4 +410,89 @@ private fun DebridCard(
             }
         }
     }
+}
+
+/**
+ * Simple API key input dialog, shown when tapping a service row.
+ */
+@Composable
+private fun ApiKeyDialog(
+    title: String,
+    keyLinkText: String,
+    keyLinkUrl: String,
+    currentKey: String?,
+    enabled: Boolean,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var keyInput by remember { mutableStateOf(currentKey ?: "") }
+    var showKey by remember { mutableStateOf(false) }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, color = TextPrimary) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = keyInput,
+                    onValueChange = { keyInput = it },
+                    label = { Text("API key") },
+                    singleLine = true,
+                    enabled = enabled,
+                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { showKey = !showKey }, enabled = enabled) {
+                            Icon(
+                                if (showKey) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showKey) "Hide key" else "Show key",
+                                tint = TextSecondary
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(
+                    onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(keyLinkUrl))
+                        )
+                    }
+                ) {
+                    Text(keyLinkText, color = LocalPalette.current.accent)
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        Icons.Filled.OpenInNew,
+                        contentDescription = null,
+                        tint = LocalPalette.current.accent
+                    )
+                }
+                if (!enabled) {
+                    Text(
+                        "Currently under testing — coming soon.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(keyInput.trim())
+                    onDismiss()
+                },
+                enabled = enabled
+            ) {
+                Text("Save", color = LocalPalette.current.accent)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextSecondary)
+            }
+        }
+    )
 }
