@@ -119,10 +119,12 @@ fun parseStreamInfo(stream: StreamItem): ParsedStreamInfo {
 
 /** Best one-line label for a stream card headline. */
 fun streamHeadline(stream: StreamItem): String {
+    // Prefer name (e.g. "2160p · HDHub") — it includes the provider.
+    // Fall back to title's first line, then URL host.
+    if (!stream.name.isNullOrBlank()) return stream.name!!
     val firstLine = stream.title?.lineSequence()
         ?.map { it.trim() }?.firstOrNull { it.isNotBlank() }
     if (!firstLine.isNullOrBlank()) return firstLine
-    if (!stream.name.isNullOrBlank()) return stream.name!!
     return stream.url.substringAfter("://").substringBefore("/").take(48)
 }
 
@@ -192,11 +194,14 @@ fun pickAutoplayStream(
     streams: List<StreamItem>,
     settings: com.pulsestream.app.data.SettingsStore
 ): StreamItem? {
-    if (streams.isEmpty()) return null
+    // Filter out unresolved infohash: placeholders - only pick playable URLs.
+    // Debrid resolution replaces these with real HTTP links asynchronously.
+    val playable = streams.filter { !it.url.startsWith("infohash:") }
+    if (playable.isEmpty()) return null
     val order = settings.qualityOrder
     val prefQ = settings.autoplayQuality
     val maxGb = settings.autoplayMaxSizeGb
-    val sorted = streams.sortedWith(compareBy { s ->
+    val sorted = playable.sortedWith(compareBy { s ->
         val q = canonicalStreamQuality(s)
         when {
             prefQ != "Auto" && q == prefQ -> -1
@@ -343,15 +348,10 @@ fun StreamCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 5.dp)
-            .clip(shape)
-            .background(
-                if (selected) palette.accent.copy(alpha = 0.14f)
-                else Color.White.copy(alpha = 0.05f)
-            )
-            .border(
-                if (selected) 1.5.dp else 1.dp,
-                if (selected) palette.accent else GlassBorder,
-                shape
+            .liquidGlass(shape)
+            .then(
+                if (selected) Modifier.border(1.5.dp, palette.accent, shape)
+                else Modifier
             )
             .clickable(onClick = onClick)
             .tvFocusRing(shape)

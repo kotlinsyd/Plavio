@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CustomList::class,
         CustomListItem::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -223,8 +223,24 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
                 PRIMARY KEY (listId, itemKey)
             )"""
         )
-        db.execSQL(
-            "CREATE INDEX index_custom_list_items_listId ON custom_list_items (listId)"
-        )
+        // NOTE: Do NOT create an index here — Room's schema validator does not
+        // expect one on custom_list_items, and creating it causes
+        // "Migration didn't properly handle: custom_list_items" crashes.
+    }
+}
+
+/**
+ * v10 → v11: Rebuild `custom_lists` + `custom_list_items` using Room's EXACT
+ * generated schema (no extra indices). The v9→10 migration created an index
+ * that Room's validator doesn't expect, causing "Migration didn't properly
+ * handle: custom_list_items" on devices where the old table survived.
+ * Data is dropped; custom lists can be re-added.
+ */
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("DROP TABLE IF EXISTS custom_list_items")
+        db.execSQL("DROP TABLE IF EXISTS custom_lists")
+        db.execSQL("CREATE TABLE IF NOT EXISTS `custom_lists` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS `custom_list_items` (`listId` TEXT NOT NULL, `itemKey` TEXT NOT NULL, `addonId` TEXT NOT NULL, `type` TEXT NOT NULL, `metaId` TEXT NOT NULL, `name` TEXT NOT NULL, `poster` TEXT, `addedAt` INTEGER NOT NULL, PRIMARY KEY(`listId`, `itemKey`))")
     }
 }

@@ -7,8 +7,6 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
-import com.pulsestream.app.data.AnalyticsPing
-import com.pulsestream.app.data.InstallCounter
 import com.pulsestream.app.data.SettingsStore
 import com.pulsestream.app.data.StremioApi
 import com.pulsestream.app.data.StreamRepository
@@ -78,7 +76,6 @@ class PulseApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         installCrashCatcher()
         super.onCreate()
-        initCrashReporting()
         val db = openDatabase()
         database = db
         settings = SettingsStore(this)
@@ -93,10 +90,6 @@ class PulseApp : Application(), ImageLoaderFactory {
         // would crash Home with SQLiteBlobTooBigException). Surgical — the
         // watchlist, addons and settings survive.
         appScope.launch { repository.pruneOversizedCache() }
-        // Count this install once for the About screen counter.
-        appScope.launch { InstallCounter.trackInstallOnce(this@PulseApp) }
-        // One-time install ping for the PlavioHD app-stats backend.
-        appScope.launch { AnalyticsPing.trackInstallOnce(this@PulseApp) }
     }
 
     /**
@@ -105,8 +98,8 @@ class PulseApp : Application(), ImageLoaderFactory {
      * A corrupt database file is renamed to a .corrupt.bak backup (never
      * silently deleted) before recreating empty, so user data can still be
      * recovered. Any other failure — failed migration, transient I/O error,
-     * programming bug — is rethrown to crash loudly and reach Crashlytics,
-     * instead of silently wiping the user's add-ons, watchlist and history.
+     * programming bug — is rethrown to crash loudly (and show up in the
+     * local crash dialog) instead of silently wiping the user's add-ons, watchlist and history.
      * The in-app updater keeps working, so a fix can always reach the phone.
      */
     private fun openDatabase(): AppDatabase {
@@ -118,8 +111,8 @@ class PulseApp : Application(), ImageLoaderFactory {
         } catch (e: Exception) {
             if (!isCorruption(e)) {
                 // Not corruption — do NOT delete user data. Crash loudly so
-                // the real bug is visible in Crashlytics instead of masking
-                // it as an empty database.
+                // the real bug is visible in the crash dialog instead of
+                // masking it as an empty database.
                 throw e
             }
             Log.e("PulseApp", "Database file corrupt, backing up and recreating", e)
@@ -192,25 +185,9 @@ class PulseApp : Application(), ImageLoaderFactory {
         }
     }
 
-    /**
-     * Firebase Crashlytics: automatic crash reports (stack trace, device info)
-     * sent silently in the background. No extra permissions needed — it uses
-     * the internet permission the app already has. Coexists with the local
-     * crash catcher above (that one chains to Crashlytics' handler).
-     */
-    private fun initCrashReporting() {
-        try {
-            val crashlytics = com.google.firebase.crashlytics.FirebaseCrashlytics.getInstance()
-            crashlytics.setCrashlyticsCollectionEnabled(true)
-            crashlytics.setCustomKey("app_version", com.pulsestream.app.BuildConfig.VERSION_NAME)
-        } catch (_: Exception) {
-            // Crash reporting must never break app startup (e.g. no network
-            // on first launch, Firebase not configured in dev builds).
-        }
-    }
-
     /** Crash log from the previous run, if the app died with an exception. */
-    fun readCrashReport(): String? {        val f = java.io.File(filesDir, "last_crash.txt")
+    fun readCrashReport(): String? {
+        val f = java.io.File(filesDir, "last_crash.txt")
         return if (f.exists()) f.readText().take(6000) else null
     }
 

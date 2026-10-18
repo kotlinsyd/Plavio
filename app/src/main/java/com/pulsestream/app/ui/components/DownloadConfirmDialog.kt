@@ -105,7 +105,11 @@ fun DownloadConfirmDialog(
             TextButton(
                 onClick = {
                     if (!alreadyDownloaded) {
-                        scope.launch {
+                        // Use NonCancellable so the download survives dialog dismissal.
+                        // The dialog's scope is cancelled on dismiss, which was
+                        // killing startDownload before launchDownload could run,
+                        // leaving the item stuck in QUEUED state.
+                        scope.launch(kotlinx.coroutines.NonCancellable) {
                             manager.startDownload(
                                 url = stream.url,
                                 title = displayTitle,

@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.SkipNext
@@ -54,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.AUDIO_LANGUAGE_OPTIONS
 import com.pulsestream.app.data.BUFFER_PRESETS
 import com.pulsestream.app.data.DISK_CACHE_OPTIONS
+import com.pulsestream.app.data.PlayerChoice
 import com.pulsestream.app.data.SettingsStore
 import com.pulsestream.app.data.audioLanguageName
 import com.pulsestream.app.data.bufferPresetName
@@ -89,6 +91,9 @@ fun PlaybackSettingsScreen(
     var audioLangPickerOpen by remember { mutableStateOf(false) }
     var bufferPresetOpen by remember { mutableStateOf(false) }
     var diskCacheOpen by remember { mutableStateOf(false) }
+    var playerPickerOpen by remember { mutableStateOf(false) }
+    // Refresh key so the preferred-player subtitle updates after the dialog closes.
+    var playerUiTick by remember { mutableStateOf(0) }
     // Refresh key so the buffer/disk-cache subtitles update after the dialogs close.
     var bufferUiTick by remember { mutableStateOf(0) }
 
@@ -184,6 +189,16 @@ fun PlaybackSettingsScreen(
                     }
                 )
             }
+            item(key = "preferredPlayer") {
+                // Read inside the item so recomposition picks up dialog changes.
+                playerUiTick
+                SettingsNavRow(
+                    icon = Icons.Filled.OpenInNew,
+                    title = "Preferred player",
+                    subtitle = "Currently: ${PlayerChoice.fromName(settings.preferredPlayer).label}",
+                    onClick = { playerPickerOpen = true }
+                )
+            }
             item(key = "audioLang") {
                 SettingsNavRow(
                     icon = Icons.Filled.Audiotrack,
@@ -243,6 +258,14 @@ fun PlaybackSettingsScreen(
             settings = settings,
             onDismiss = { diskCacheOpen = false },
             onDone = { diskCacheOpen = false; bufferUiTick++ }
+        )
+    }
+
+    if (playerPickerOpen) {
+        PlayerChoiceDialog(
+            settings = settings,
+            onDismiss = { playerPickerOpen = false },
+            onDone = { playerPickerOpen = false; playerUiTick++ }
         )
     }
 }
@@ -381,6 +404,78 @@ fun DiskCacheDialog(
         confirmButton = {
             TextButton(onClick = {
                 settings.diskCacheMb = selected
+                onDone()
+            }) {
+                Text("Done", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextSecondary)
+            }
+        }
+    )
+}
+
+/**
+ * Preferred-player picker (Settings > Playback): built-in Plavio player,
+ * an external app via the system chooser, or ask every time.
+ */
+@Composable
+fun PlayerChoiceDialog(
+    settings: SettingsStore,
+    onDismiss: () -> Unit,
+    onDone: () -> Unit
+) {
+    var selected by remember {
+        mutableStateOf(PlayerChoice.fromName(settings.preferredPlayer))
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Preferred player", color = TextPrimary) },
+        text = {
+            Column {
+                Text(
+                    "Which app plays your videos. External players open through Android's app chooser; some addons' streams may need their original headers, which only the built-in player guarantees.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                    items(PlayerChoice.values(), key = { it.name }) { choice ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selected = choice }
+                                .tvFocusRing(RoundedCornerShape(10.dp))
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.material3.RadioButton(
+                                selected = selected == choice,
+                                onClick = { selected = choice },
+                                colors = androidx.compose.material3.RadioButtonDefaults.colors(
+                                    selectedColor = LocalPalette.current.accent
+                                )
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(choice.label, color = TextPrimary)
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    choice.blurb,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                settings.preferredPlayer = selected.name
                 onDone()
             }) {
                 Text("Done", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)

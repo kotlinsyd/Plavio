@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -120,21 +121,20 @@ fun GlowBackground(content: @Composable BoxScope.() -> Unit) {
     }
 }
 
-/** Frosted-glass card: translucent fill, subtle border, big radius. */
+/** Liquid-glass card: gradient fill, top sheen, accent glow and a specular rim (see [liquidGlass]). */
 @Composable
 fun GlassCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
+    val shape = RoundedCornerShape(20.dp)
     val clickableMod = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Box(
         modifier = modifier
             .then(clickableMod)
-            .tvFocusRing(RoundedCornerShape(20.dp))
-            .clip(RoundedCornerShape(20.dp))
-            .background(GlassWhite)
-            .border(1.dp, GlassBorder, RoundedCornerShape(20.dp)),
+            .tvFocusRing(shape)
+            .liquidGlass(shape),
         content = content
     )
 }
@@ -172,9 +172,7 @@ fun PosterCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(180.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color.White.copy(alpha = 0.05f))
-                .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
+                .liquidGlass(RoundedCornerShape(16.dp))
         ) {
             SafePosterImage(
                 model = meta.poster,
@@ -272,7 +270,17 @@ fun GradientButton(
     ) {
         Box(
             modifier = Modifier
+                .clip(RoundedCornerShape(28.dp))
                 .background(LocalPalette.current.gradient, RoundedCornerShape(28.dp))
+                // Glossy top highlight + rim light, like a glass button.
+                .topSheen(alpha = 0.28f, fraction = 0.55f)
+                .border(
+                    1.dp,
+                    Brush.verticalGradient(
+                        listOf(Color.White.copy(alpha = 0.6f), Color.White.copy(alpha = 0.08f))
+                    ),
+                    RoundedCornerShape(28.dp)
+                )
                 .padding(horizontal = 28.dp, vertical = 12.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -457,31 +465,45 @@ fun DotsLoadingIndicator(message: String = "Loading…") {
 }
 
 /** Big gradient Play button with an icon, used on the detail screen. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PlayButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     text: String = "Play",
-    isLoading: Boolean = false
+    isLoading: Boolean = false,
+    onLongClick: (() -> Unit)? = null
 ) {
-    Button(
-        onClick = onClick,
-        enabled = enabled && !isLoading,
-        modifier = modifier.height(52.dp).tvFocusRing(RoundedCornerShape(28.dp)),
-        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues()
+    val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    Box(
+        modifier = modifier
+            .height(52.dp)
+            .tvFocusRing(RoundedCornerShape(28.dp))
+            .clip(RoundedCornerShape(28.dp))
+            .then(
+                if (enabled && !isLoading) {
+                    Modifier.combinedClickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = onClick,
+                        onLongClick = onLongClick
+                    )
+                } else Modifier
+            )
+            .alpha(if (enabled) 1f else 0.5f),
+        contentAlignment = Alignment.Center
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(LocalPalette.current.gradient, RoundedCornerShape(28.dp)),
+                .liquidGlass(RoundedCornerShape(28.dp)),
             contentAlignment = Alignment.Center
         ) {
             if (isLoading) {
                 androidx.compose.material3.CircularProgressIndicator(
                     modifier = Modifier.size(24.dp),
-                    color = Color(0xFF0A0A12),
+                    color = Color.White,
                     strokeWidth = 3.dp
                 )
             } else {
@@ -491,7 +513,7 @@ fun PlayButton(
                     Icon(
                         Icons.Filled.PlayArrow,
                         contentDescription = null,
-                        tint = Color(0xFF0A0A12),
+                        tint = Color.White,
                         modifier = Modifier.size(26.dp)
                     )
                     Spacer(Modifier.width(6.dp))
@@ -499,10 +521,37 @@ fun PlayButton(
                         text = text,
                         fontWeight = FontWeight.Bold,
                         style = MaterialTheme.typography.titleMedium,
-                        color = Color(0xFF0A0A12)
+                        color = Color.White
                     )
                 }
             }
         }
+    }
+}
+
+/**
+ * Liquid-glass secondary button. For primary actions use [PlayButton].
+ */
+@Composable
+fun GlassButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(28.dp)
+    Box(
+        modifier = modifier
+            .height(52.dp)
+            .tvFocusRing(shape)
+            .liquidGlass(shape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 18.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            content = content
+        )
     }
 }

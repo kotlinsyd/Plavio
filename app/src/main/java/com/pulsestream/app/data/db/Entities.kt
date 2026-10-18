@@ -181,6 +181,74 @@ interface WatchlistDao {
     suspend fun clearAll()
 }
 
+/** User-created custom lists — named collections beyond the flat watchlist. Added in DB v9. */
+@Entity(tableName = "custom_lists")
+data class CustomList(
+    @PrimaryKey val id: String,
+    val name: String,
+    val createdAt: Long
+)
+
+/**
+ * Items inside a custom list. itemKey mirrors the watchlist key format
+ * ("addonId|type|metaId"). addonId is stored (not in the original spec) so
+ * tapping an item can navigate back to its detail screen.
+ * Added in DB v9.
+ */
+@Entity(
+    tableName = "custom_list_items",
+    primaryKeys = ["listId", "itemKey"]
+)
+data class CustomListItem(
+    val listId: String,
+    val itemKey: String,
+    val addonId: String,
+    val type: String,
+    val metaId: String,
+    val name: String,
+    val poster: String?,
+    val addedAt: Long
+)
+
+@Dao
+interface CustomListDao {
+    @Query("SELECT * FROM custom_lists ORDER BY createdAt DESC")
+    fun observeLists(): Flow<List<CustomList>>
+
+    @Query("SELECT * FROM custom_lists ORDER BY createdAt DESC")
+    suspend fun getLists(): List<CustomList>
+
+    @Query("SELECT * FROM custom_lists WHERE id = :id LIMIT 1")
+    suspend fun getList(id: String): CustomList?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertList(list: CustomList)
+
+    @Query("UPDATE custom_lists SET name = :name WHERE id = :id")
+    suspend fun renameList(id: String, name: String)
+
+    @Query("DELETE FROM custom_lists WHERE id = :id")
+    suspend fun deleteList(id: String)
+
+    @Query("SELECT * FROM custom_list_items WHERE listId = :listId ORDER BY addedAt DESC")
+    fun observeItems(listId: String): Flow<List<CustomListItem>>
+
+    @Query("SELECT listId FROM custom_list_items WHERE itemKey = :itemKey")
+    fun observeListsContaining(itemKey: String): Flow<List<String>>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun addItem(item: CustomListItem)
+
+    @Query("DELETE FROM custom_list_items WHERE listId = :listId AND itemKey = :itemKey")
+    suspend fun removeItem(listId: String, itemKey: String)
+
+    @Query("DELETE FROM custom_list_items WHERE listId = :listId")
+    suspend fun deleteItemsByList(listId: String)
+
+    @Query("SELECT COUNT(*) FROM custom_list_items WHERE listId = :listId")
+    fun observeItemCount(listId: String): Flow<Int>
+}
+
 /** Briefly-cached subtitle search results (per type + IMDb id). Added in DB v3. */
 @Entity(tableName = "subtitle_cache")
 data class SubtitleCache(

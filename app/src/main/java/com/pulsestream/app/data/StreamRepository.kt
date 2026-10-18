@@ -1293,7 +1293,7 @@ class StreamRepository(
     suspend fun ensurePreinstalledAddons() = withContext(Dispatchers.IO) {
         val targets = listOf(
             "https://plaviometa.vercel.app/manifest.json",
-            "https://plaviohd.edon.workers.dev/manifest.json",
+            "https://plaviohd.vercel.app/manifest.json",
             "https://opensubtitles-v3.strem.io/manifest.json",
             "https://subsense.nepiraw.com/manifest.json"
         )
@@ -1302,7 +1302,7 @@ class StreamRepository(
                 val baseUrl = StremioApi.normalizeBaseUrl(url)
                 val manifest = api.fetchManifest(baseUrl)
                 // Migrate existing addon to the new baseUrl when the preinstalled
-                // host changes (e.g. PlavioHD Vercel -> Cloudflare). The manifest id
+                // host changes (e.g. PlavioHD Cloudflare -> Vercel). The manifest id
                 // stays the same, so without this the old baseUrl (and its
                 // /configure page) sticks around forever.
                 val existing = db.addonDao().getAll().firstOrNull { it.id == manifest.id }

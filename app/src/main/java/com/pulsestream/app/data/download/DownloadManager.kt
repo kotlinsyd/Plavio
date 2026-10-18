@@ -59,7 +59,9 @@ class DownloadManager private constructor(private val appContext: Context) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .connectionPool(okhttp3.ConnectionPool(5, 5, TimeUnit.MINUTES))
         .build()
 
     /** Active download jobs keyed by download id. */
@@ -205,7 +207,10 @@ class DownloadManager private constructor(private val appContext: Context) {
         jobs[item.id]?.cancel()
         val job = scope.launch {
             withContext(Dispatchers.IO) { dao.updateStatus(item.id, "DOWNLOADING") }
-            updateProgressFlow(item.id)
+            // Emit immediately so UI shows active state right away
+            _activeDownloads.value = _activeDownloads.value.toMutableMap().apply {
+                put(item.id, DownloadProgress(item.id, 0L, -1L, "DOWNLOADING"))
+            }
             try {
                 downloadFile(item)
             } catch (e: Exception) {
@@ -274,7 +279,8 @@ class DownloadManager private constructor(private val appContext: Context) {
 
             RandomAccessFile(file, "rw").use { raf ->
                 raf.seek(startByte)
-                val buffer = ByteArray(64 * 1024)
+                // 256KB buffer for faster throughput on modern networks
+                val buffer = ByteArray(256 * 1024)
                 body.byteStream().use { input ->
                     while (true) {
                         val read = input.read(buffer)

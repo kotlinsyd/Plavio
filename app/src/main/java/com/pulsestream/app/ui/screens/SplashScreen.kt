@@ -1,8 +1,9 @@
 package com.pulsestream.app.ui.screens
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pulsestream.app.ui.components.DotsLoader
+import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.theme.LocalPalette
 import kotlinx.coroutines.delay
 
@@ -60,7 +62,8 @@ fun SplashScreen(onDone: () -> Unit) {
     var wordWidthPx by remember { mutableStateOf(0f) }
     val t by animateFloatAsState(
         targetValue = if (started) 1f else 0f,
-        animationSpec = tween(durationMillis = SPLASH_TOTAL_MS, easing = LinearEasing),
+        // Liquid glass: spring physics for fluid, organic motion instead of linear.
+        animationSpec = tween(durationMillis = SPLASH_TOTAL_MS),
         label = "splashClock"
     )
     LaunchedEffect(Unit) {
@@ -69,13 +72,11 @@ fun SplashScreen(onDone: () -> Unit) {
         onDone()
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF0B0B16)),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    GlowBackground {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.align(Alignment.Center)
+        ) {
             Row(
                 horizontalArrangement = Arrangement.Center,
                 modifier = Modifier.onGloballyPositioned {
@@ -106,7 +107,13 @@ fun SplashScreen(onDone: () -> Unit) {
                         ),
                         modifier = Modifier
                             .alpha(lt)
-                            .graphicsLayer { translationY = (1f - lt) * 26f }
+                            .graphicsLayer {
+                                translationY = (1f - lt) * 26f
+                                // Liquid glass: subtle scale spring as letters land.
+                                val scale = 0.85f + 0.15f * lt
+                                scaleX = scale
+                                scaleY = scale
+                            }
                             .onGloballyPositioned {
                                 letterLeftPx = it.positionInParent().x
                             }

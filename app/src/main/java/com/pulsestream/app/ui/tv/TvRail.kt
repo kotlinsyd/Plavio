@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -55,15 +56,15 @@ val tvTabs = listOf(
 )
 
 /**
- * Bottom-center navigation bar (replaces the old left rail).
+ * Left-side, vertically-centered navigation bar (v0.8.36-tv; as requested,
+ * replaces the bottom-center bar).
  *
- * TV: D-pad Left/Right moves between items in row order (default 2D focus
- * search — first/last items wrap nowhere, focus simply stops, never lost).
- * Up from the bar reaches the content above; Down from content lands here.
- * The focused item gets the unmissable green tvFocusRing; the active page
- * gets the accent pill. On touch devices it behaves as a normal tab bar.
+ * TV: D-pad Up/Down moves between items; Right goes into the content, Left
+ * from the content comes back here (default 2D focus search, focus never
+ * lost). The focused item gets the unmissable green tvFocusRing; the active
+ * page gets the accent pill. On touch devices it behaves as a normal tab bar.
  *
- * [barFocus] lets the top-left Home button jump focus straight here.
+ * [barFocus] is attached to the first item so focus can be parked here.
  */
 @Composable
 fun TvBottomBar(
@@ -75,19 +76,20 @@ fun TvBottomBar(
     val palette = LocalPalette.current
     Box(
         modifier = modifier
-            .padding(bottom = 18.dp),
-        contentAlignment = Alignment.Center
+            .fillMaxHeight()
+            .padding(start = 12.dp, end = 8.dp),
+        contentAlignment = Alignment.CenterStart
     ) {
         Surface(
-            shape = RoundedCornerShape(50),
+            shape = RoundedCornerShape(32.dp),
             color = palette.panel.copy(alpha = 0.94f),
             border = BorderStroke(1.dp, GlassBorder),
             shadowElevation = 10.dp
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 tvTabs.forEachIndexed { index, tab ->
                     BottomBarItem(
@@ -118,8 +120,8 @@ private fun BottomBarItem(
                 if (selected) palette.accent.copy(alpha = 0.22f)
                 else Color.Transparent
             )
-            .clickable(onClick = onClick)
             .tvFocusRing(shape)
+            .clickable(onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {

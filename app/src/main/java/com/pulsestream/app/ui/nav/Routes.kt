@@ -11,6 +11,8 @@ object Routes {
     const val LIVE = "live"
     const val SEARCH = "search"
     const val WATCHLIST = "watchlist"
+    const val LISTS = "lists"
+    const val LIST_DETAIL = "list_detail/{listId}"
     const val ADDONS = "addons"
     const val HOME_CATALOGS = "home_catalogs"
     const val ACCOUNT = "account"
@@ -38,6 +40,9 @@ object Routes {
 
     fun catalog(addonId: String, type: String, catalogId: String): String =
         "catalog/${enc(addonId)}/${enc(type)}/${enc(catalogId)}"
+
+    /** List ids are UUIDs (URL-safe), no encoding needed. */
+    fun listDetail(listId: String): String = "list_detail/$listId"
 
     private fun enc(s: String): String =
         Base64.encodeToString(s.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)

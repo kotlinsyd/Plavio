@@ -55,6 +55,7 @@ import com.pulsestream.app.data.CachedMeta
 import com.pulsestream.app.data.SearchHistory
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.ui.components.GlowBackground
+import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.LocalPalette
@@ -119,22 +120,31 @@ fun SearchScreen(
                 color = TextPrimary,
                 modifier = Modifier.padding(16.dp)
             )
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                placeholder = { Text("Movies, shows…", color = TextSecondary) },
-                leadingIcon = { Icon(Icons.Filled.Search, null, tint = TextSecondary) },
-                singleLine = true,
-                shape = RoundedCornerShape(16.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = LocalPalette.current.accent,
-                    unfocusedBorderColor = GlassBorder,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary,
-                    cursorColor = LocalPalette.current.accent
-                ),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .liquidGlass(RoundedCornerShape(50))
+            ) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Movies, shows…", color = TextSecondary) },
+                    leadingIcon = { Icon(Icons.Filled.Search, null, tint = TextSecondary) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(50),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        cursorColor = LocalPalette.current.accent,
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             Spacer(Modifier.height(8.dp))
             // Category chips — filter the search by content type.
             LazyRow(
@@ -321,8 +331,8 @@ private val SEARCH_TYPES: List<Pair<String?, String>> = listOf(
 private fun GridPoster(item: CachedMeta, onClick: () -> Unit) {
     Column(
         Modifier
-            .clickable(onClick = onClick)
             .tvFocusRing(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
     ) {
         Box(
             modifier = Modifier

@@ -25,9 +25,15 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +75,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -96,6 +103,7 @@ import com.pulsestream.app.data.notifications.NotificationNav
 import com.pulsestream.app.util.ExternalPlayer
 import com.pulsestream.app.data.update.UpdateInfo
 import com.pulsestream.app.ui.components.CrashReportDialog
+import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.components.UpdatePrompt
 import com.pulsestream.app.ui.nav.Routes
 import com.pulsestream.app.ui.screens.LiveScreen
@@ -141,7 +149,6 @@ import com.pulsestream.app.ui.tv.rememberIsTv
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import com.pulsestream.app.ui.tv.tvFocusRing
-import com.pulsestream.app.data.AnalyticsPing
 
 class MainActivity : ComponentActivity() {
 
@@ -153,6 +160,13 @@ class MainActivity : ComponentActivity() {
          */
         @Volatile
         var isPlayerActive: Boolean = false
+
+        /**
+         * TV remote: Left/Right while the player is open. Value = seek delta
+         * in ms (negative = back). PlayerScreen should collect this and call
+         * player.seekTo(). (Play/pause reuses [pipToggleRequest].)
+         */
+        val playerSeekRequest = MutableSharedFlow<Long>(extraBufferCapacity = 4)
 
         /**
          * Current PiP mode, updated in onPictureInPictureModeChanged.
@@ -418,34 +432,65 @@ private data class Tab(val route: String, val label: String, val icon: ImageVect
 private fun DockItem(
     tab: Tab,
     selected: Boolean,
+    compact: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val palette = LocalPalette.current
+    // Material 3 standard: fixed-size indicator pill behind the icon only,
+    // equal width for all items (weight applied at call site). No rings,
+    // no label-dependent sizing.
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(
-                if (selected) palette.accent.copy(alpha = 0.18f) else Color.Transparent
+            // No ripple: the capsule highlight on the selected tab is the
+            // feedback; a square ripple clashes with the pill indicator.
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
             )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 9.dp),
+            .padding(vertical = if (compact) 8.dp else 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(
-            tab.icon,
-            contentDescription = tab.label,
-            tint = if (selected) palette.accent else TextSecondary,
-            modifier = Modifier.size(24.dp)
-        )
-        Spacer(Modifier.height(3.dp))
-        Text(
-            tab.label,
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            color = if (selected) palette.accent else TextSecondary.copy(alpha = 0.85f),
-            maxLines = 1
-        )
+        // Fixed-size indicator pill (64x32dp) behind the icon — same for every tab.
+        Box(
+            modifier = Modifier
+                .size(width = 64.dp, height = 32.dp)
+                .clip(RoundedCornerShape(50))
+                .then(
+                    if (selected) {
+                        Modifier.background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    palette.accent.copy(alpha = 0.32f),
+                                    palette.accent.copy(alpha = 0.12f)
+                                )
+                            ),
+                            RoundedCornerShape(50)
+                        )
+                    } else {
+                        Modifier
+                    }
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                tab.icon,
+                contentDescription = tab.label,
+                tint = if (selected) palette.accent else TextSecondary,
+                modifier = Modifier.size(if (compact) 22.dp else 24.dp)
+            )
+        }
+        if (!compact) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                tab.label,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = if (selected) palette.accent else TextSecondary.copy(alpha = 0.85f),
+                maxLines = 1
+            )
+        }
     }
 }
 
@@ -602,7 +647,22 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
     } else {
         val tabs = appTabs()
         val showBottomBar = tabs.any { it.route == currentDestination?.route }
-        Box(Modifier.fillMaxSize()) {
+        // Scroll-aware nav: compact (icons only) when scrolling down, like Nuvio.
+        var compactNav by remember { mutableStateOf(false) }
+        val nestedScrollConnection = remember {
+            object : NestedScrollConnection {
+                override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                    // available.y < 0 means scrolling down (content moving up).
+                    // Hysteresis: only collapse on a clear downward scroll,
+                    // only expand on a clear upward scroll — the nav stays
+                    // minimized until the user scrolls up (no dancing).
+                    if (available.y < -10) compactNav = true
+                    else if (available.y > 10) compactNav = false
+                    return Offset.Zero
+                }
+            }
+        }
+        Box(Modifier.fillMaxSize().nestedScroll(nestedScrollConnection)) {
             Scaffold(
                 containerColor = LocalPalette.current.background,
                 bottomBar = {
@@ -617,12 +677,14 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                     Surface(
                         shape = RoundedCornerShape(50),
                         color = LocalPalette.current.panel.copy(alpha = 0.94f),
-                        border = BorderStroke(1.dp, GlassBorder),
                         shadowElevation = 10.dp
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(0.dp),
+                            // Liquid-glass dock: sheen + accent glow + specular rim over the panel colour.
+                            modifier = Modifier
+                                .liquidGlass(RoundedCornerShape(50))
+                                .padding(horizontal = 6.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             tabs.forEach { tab ->
@@ -631,13 +693,15 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                                 DockItem(
                                     tab = tab,
                                     selected = selected,
+                                    compact = compactNav,
                                     onClick = {
                                         navController.navigate(tab.route) {
                                             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                                             launchSingleTop = true
                                             restoreState = true
                                         }
-                                    }
+                                    },
+                                    modifier = Modifier.weight(1f)
                                 )
                             }
                         }
@@ -789,6 +853,7 @@ private fun PulseNavGraph(
         composable(Routes.HOME) {
             HomeScreen(
                 repository = repository,
+                listsRepository = listsRepository,
                 onOpenDetail = { addonId, type, metaId ->
                     navController.navigate(Routes.detail(addonId, type, metaId))
                 },

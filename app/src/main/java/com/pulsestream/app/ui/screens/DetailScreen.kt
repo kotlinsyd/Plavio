@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -68,6 +69,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.pulsestream.app.ui.components.AddToListSheet
 import com.pulsestream.app.ui.components.PlayButton
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.data.MetaDetail
@@ -76,12 +78,15 @@ import com.pulsestream.app.data.TrailerResolver
 import com.pulsestream.app.data.RelatedSection
 import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.data.StreamProber
+import com.pulsestream.app.data.CustomListsRepository
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.Subtitle
 import com.pulsestream.app.data.Video
 import com.pulsestream.app.data.streamQualityLabel
 import com.pulsestream.app.ui.components.ErrorState
 import com.pulsestream.app.ui.components.GlassCard
+import com.pulsestream.app.ui.components.liquidGlass
+import androidx.compose.ui.draw.alpha
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.LoadingState
 import com.pulsestream.app.ui.components.AddonTabs
@@ -99,8 +104,10 @@ import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
+import androidx.compose.ui.focus.focusProperties
 import com.pulsestream.app.ui.tv.rememberIsTv
 import com.pulsestream.app.ui.tv.tvFocusRing
+import com.pulsestream.app.ui.tv.tvSheetFocus
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -320,17 +327,23 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
 
     private fun playBestOrFirst() {
         val s = streamsState as? StreamsUiState.Content ?: return
+        // Only consider playable streams - skip unresolved infohash: placeholders.
+        // Debrid resolution replaces these with real HTTP links asynchronously.
+        val playableStreams = s.streams.filter { !it.url.startsWith("infohash:") }
         // Settings > Streams autoplay: pick by the user's quality/size rule
         // instead of the probed fastest stream.
         if (repo.settings.streamAutoplay) {
-            val ruled = pickAutoplayStream(s.streams, repo.settings)
+            val ruled = pickAutoplayStream(playableStreams, repo.settings)
             if (ruled != null) {
                 autoPlayEvent = AutoPlay(ruled, s.subtitles)
                 return
             }
+            // No playable streams yet - wait for debrid resolution instead of
+            // playing an unresolvable placeholder.
+            return
         }
         val pick = pickState as? PickState.Found
-        if (pick != null) {
+        if (pick != null && !pick.stream.url.startsWith("infohash:")) {
             autoPlayEvent = AutoPlay(pick.stream, s.subtitles)
             return
         }
@@ -339,12 +352,13 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
                 withTimeoutOrNull(2500) { probeJob?.join() }
                 val best = pickState as? PickState.Found
                 val cur = streamsState as? StreamsUiState.Content ?: return@launch
-                if (best != null) autoPlayEvent = AutoPlay(best.stream, cur.subtitles)
-                else if (cur.streams.isNotEmpty()) autoPlayEvent = AutoPlay(cur.streams.first(), cur.subtitles)
+                val curPlayable = cur.streams.filter { !it.url.startsWith("infohash:") }
+                if (best != null && !best.stream.url.startsWith("infohash:")) autoPlayEvent = AutoPlay(best.stream, cur.subtitles)
+                else if (curPlayable.isNotEmpty()) autoPlayEvent = AutoPlay(curPlayable.first(), cur.subtitles)
             }
             return
         }
-        if (s.streams.isNotEmpty()) autoPlayEvent = AutoPlay(s.streams.first(), s.subtitles)
+        if (playableStreams.isNotEmpty()) autoPlayEvent = AutoPlay(playableStreams.first(), s.subtitles)
     }
 
     fun consumeAutoPlay(): AutoPlay? {
@@ -369,6 +383,7 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
 @Composable
 fun DetailScreen(
     repository: StreamRepository,
+    listsRepository: CustomListsRepository,
     addonId: String,
     type: String,
     metaId: String,
@@ -420,6 +435,7 @@ fun DetailScreen(
                 meta = state.meta,
                 addonId = addonId,
                 repository = repository,
+                listsRepository = listsRepository,
                 onBack = onBack,
                 onPlay = onPlay,
                 onPlayTrailer = onPlayTrailer,
@@ -488,6 +504,7 @@ private fun DetailContent(
     meta: MetaDetail,
     addonId: String,
     repository: StreamRepository,
+    listsRepository: CustomListsRepository,
     onBack: () -> Unit,
     onPlay: () -> Unit,
     onPlayTrailer: (PlaybackRequest) -> Unit = {},
@@ -496,6 +513,8 @@ private fun DetailContent(
 ) {
     val isSeries = meta.type == "series" && meta.videos.isNotEmpty()
     val seasons = rememberSeasonList(meta)
+    // "Add to list" bottom sheet state
+    var showAddToList by remember { mutableStateOf(false) }
     // Shared stream-browser state: addon tabs + filtered list stay in sync as
     // sources stream in progressively.
     val allStreams = (vm.streamsState as? StreamsUiState.Content)?.streams ?: emptyList()
@@ -503,6 +522,8 @@ private fun DetailContent(
     // Mini floating source-picker card (the button next to Play opens this
     // instead of scrolling to the sources section).
     var sourcePickerOpen by remember { mutableStateOf(false) }
+    // Full-page sources (long-press Play): title header + addon tabs + stream list.
+    var fullPageSourceOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     // On TV, land D-pad focus on the Play button when the detail screen opens.
     val isTvDetail = rememberIsTv()
@@ -575,7 +596,7 @@ private fun DetailContent(
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         itemsIndexed(meta.genres.take(5), key = { index, genre -> "${genre}_$index" }) { _, genre ->
                             Box(
-                                Modifier.border(1.dp, GlassBorder, RoundedCornerShape(50))
+                                Modifier.liquidGlass(RoundedCornerShape(50))
                                     .padding(horizontal = 12.dp, vertical = 6.dp)
                             ) {
                                 Text(genre, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
@@ -602,60 +623,62 @@ private fun DetailContent(
             val watchKey = "$addonId|${meta.type}|${meta.id}"
             val watchItem by repository.observeWatchlistItem(watchKey).collectAsState(initial = null)
             val scope = rememberCoroutineScope()
+            // Play button: full width capsule. Tap = play, long-press = open sources.
+            PlayButton(
+                onClick = { vm.onPlayPressed() },
+                onLongClick = { fullPageSourceOpen = true },
+                enabled = canPlay,
+                isLoading = vm.streamsState is StreamsUiState.Loading,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).focusRequester(playButtonFocus)
+            )
+            // Trailer + action buttons row below Play
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                PlayButton(
-                    onClick = { vm.onPlayPressed() },
-                    enabled = canPlay,
-                    text = if (vm.streamsState is StreamsUiState.Loading) "Loading…" else "Play",
-                    modifier = Modifier.weight(1f).focusRequester(playButtonFocus)
-                )
                 // Trailer button: plays this title's trailer through the
                 // trailer flow (full portrait floating player). Hidden when
                 // the addon provides no trailer — never a dead button.
+                // Liquid glass style.
                 if (meta.trailerStreams.isNotEmpty()) {
                     var resolvingTrailer by remember { mutableStateOf(false) }
-                    Spacer(Modifier.width(10.dp))
-                    Button(
-                        onClick = {
-                            if (resolvingTrailer) return@Button
-                            val ytId = meta.trailerStreams.firstOrNull()?.ytId ?: return@Button
-                            resolvingTrailer = true
-                            scope.launch {
-                                try {
-                                    val url = withTimeoutOrNull(30_000) {
-                                        TrailerResolver.resolveUrl(ytId)
-                                    }
-                                    if (url != null) {
-                                        onPlayTrailer(
-                                            PlaybackRequest(
-                                                streamUrl = url,
-                                                title = "${meta.name} — Trailer",
-                                                poster = meta.background ?: meta.poster,
-                                                videoId = "trailer_$ytId",
-                                                isMovie = meta.type == "movie",
-                                                type = meta.type,
-                                                streamLabel = "TRAILER",
-                                                metaId = meta.id,
-                                                isTrailer = true
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(52.dp)
+                            .liquidGlass(RoundedCornerShape(28.dp))
+                            .tvFocusRing(RoundedCornerShape(28.dp))
+                            .clickable(enabled = !resolvingTrailer) {
+                                if (resolvingTrailer) return@clickable
+                                val ytId = meta.trailerStreams.firstOrNull()?.ytId ?: return@clickable
+                                resolvingTrailer = true
+                                scope.launch {
+                                    try {
+                                        val url = withTimeoutOrNull(30_000) {
+                                            TrailerResolver.resolveUrl(ytId)
+                                        }
+                                        if (url != null) {
+                                            onPlayTrailer(
+                                                PlaybackRequest(
+                                                    streamUrl = url,
+                                                    title = "${meta.name} — Trailer",
+                                                    poster = meta.background ?: meta.poster,
+                                                    videoId = "trailer_$ytId",
+                                                    isMovie = meta.type == "movie",
+                                                    type = meta.type,
+                                                    streamLabel = "TRAILER",
+                                                    metaId = meta.id,
+                                                    isTrailer = true
+                                                )
                                             )
-                                        )
+                                        }
+                                    } finally {
+                                        resolvingTrailer = false
                                     }
-                                } finally {
-                                    resolvingTrailer = false
                                 }
                             }
-                        },
-                        enabled = !resolvingTrailer,
-                        modifier = Modifier.height(52.dp).tvFocusRing(RoundedCornerShape(28.dp)),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color.White.copy(alpha = 0.08f),
-                            disabledContainerColor = Color.White.copy(alpha = 0.04f)
-                        ),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
-                        contentPadding = PaddingValues(horizontal = 18.dp)
+                            .alpha(if (resolvingTrailer) 0.6f else 1f),
+                        contentAlignment = Alignment.Center
                     ) {
                         if (resolvingTrailer) {
                             androidx.compose.material3.CircularProgressIndicator(
@@ -664,21 +687,24 @@ private fun DetailContent(
                                 strokeWidth = 2.5.dp
                             )
                         } else {
-                            Icon(
-                                Icons.Filled.Movie,
-                                contentDescription = null,
-                                tint = TextPrimary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = "Trailer",
-                                fontWeight = FontWeight.SemiBold,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = TextPrimary
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Filled.Movie,
+                                    contentDescription = null,
+                                    tint = TextPrimary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "Trailer",
+                                    fontWeight = FontWeight.SemiBold,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = TextPrimary
+                                )
+                            }
                         }
                     }
+                    Spacer(Modifier.width(10.dp))
                 }
                 Spacer(Modifier.width(10.dp))
                 IconButton(
@@ -688,13 +714,25 @@ private fun DetailContent(
                         }
                     },
                     modifier = Modifier
-                        .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(50))
-                        .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                        .liquidGlass(RoundedCornerShape(50))
                         .tvFocusRing(RoundedCornerShape(50))
                 ) {
                     Icon(
                         if (watchItem != null) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
                         contentDescription = if (watchItem != null) "Remove from watchlist" else "Add to watchlist",
+                        tint = LocalPalette.current.accent
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                IconButton(
+                    onClick = { showAddToList = true },
+                    modifier = Modifier
+                        .liquidGlass(RoundedCornerShape(50))
+                        .tvFocusRing(RoundedCornerShape(50))
+                ) {
+                    Icon(
+                        Icons.Filled.PlaylistAdd,
+                        contentDescription = "Add to list",
                         tint = LocalPalette.current.accent
                     )
                 }
@@ -721,11 +759,11 @@ private fun DetailContent(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
                                 .width(72.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp))
                                 .then(
                                     if (clickable) Modifier.clickable { onOpenActor(actor.id) }
                                     else Modifier
                                 )
-                                .tvFocusRing(RoundedCornerShape(12.dp))
                         ) {
                             SafePosterImage(
                                 model = actor.photo,
@@ -733,7 +771,7 @@ private fun DetailContent(
                                 modifier = Modifier
                                     .size(64.dp)
                                     .clip(CircleShape)
-                                    .border(1.dp, GlassBorder, CircleShape)
+                                    .liquidGlass(CircleShape)
                             )
                             Spacer(Modifier.height(6.dp))
                             Text(
@@ -749,58 +787,87 @@ private fun DetailContent(
                 Spacer(Modifier.height(8.dp))
             }
         }
-        // "Available Streams" capsule button — directly below Play, before episodes.
-        item {
-            Spacer(Modifier.height(8.dp))
-            val palette = LocalPalette.current
-            val streamCount = when (val s = vm.streamsState) {
-                is StreamsUiState.Content -> s.streams.size
-                else -> null
+        // "You May Like" — TMDB recommendations (requires TMDB API key in Settings).
+        item(key = "you_may_like") {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val tmdbKey = remember {
+                context.getSharedPreferences("pulse_settings", android.content.Context.MODE_PRIVATE)
+                    .getString("tmdb_api_key", null)
             }
-            val isLoading = vm.streamsState is StreamsUiState.Loading
-            Button(
-                onClick = { sourcePickerOpen = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .height(56.dp)
-                    .tvFocusRing(RoundedCornerShape(28.dp)),
-                shape = RoundedCornerShape(28.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White.copy(alpha = 0.08f)
-                ),
-                border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
-                contentPadding = PaddingValues(horizontal = 20.dp)
-            ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.ic_bolt),
-                    contentDescription = null,
-                    tint = TextPrimary,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(Modifier.width(12.dp))
-                Text(
-                    text = "Available Streams",
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = TextPrimary,
-                    modifier = Modifier.weight(1f)
-                )
-                if (isLoading) {
-                    androidx.compose.material3.CircularProgressIndicator(
-                        color = TextPrimary,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(20.dp)
-                    )
-                } else {
+            if (!tmdbKey.isNullOrBlank()) {
+                var recommendations by remember { mutableStateOf<List<TmdbRecommendation>>(emptyList()) }
+                var loadingRecs by remember { mutableStateOf(false) }
+                LaunchedEffect(meta.id, tmdbKey) {
+                    loadingRecs = true
+                    try {
+                        recommendations = fetchTmdbRecommendations(meta.id, meta.type, tmdbKey)
+                    } catch (e: Exception) {
+                        // Silent fail — section just won't show
+                    } finally {
+                        loadingRecs = false
+                    }
+                }
+                if (loadingRecs || recommendations.isNotEmpty()) {
                     Text(
-                        text = streamCount?.toString() ?: "—",
+                        "You May Like",
+                        style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = palette.accent
+                        color = TextPrimary,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
+                    if (loadingRecs) {
+                        Box(
+                            Modifier.fillMaxWidth().height(160.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                color = LocalPalette.current.accent,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    } else {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(recommendations, key = { it.id }) { rec ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .width(110.dp)
+                                        .liquidGlass(RoundedCornerShape(16.dp))
+                                        .clickable {
+                                            // Navigate to the recommended title's detail
+                                            // (uses IMDb ID if available, else TMDB ID)
+                                        }
+                                        .padding(8.dp)
+                                ) {
+                                    SafePosterImage(
+                                        model = rec.posterPath?.let { "https://image.tmdb.org/t/p/w342$it" },
+                                        contentDescription = rec.title,
+                                        modifier = Modifier
+                                            .size(94.dp, 140.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        text = rec.title,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextPrimary,
+                                        maxLines = 2,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
                 }
             }
+        }
+        // (Available Streams button removed — long-press Play opens the source picker.)
+        item {
             if (vm.streamsState is StreamsUiState.Error) {
                 Text(
                     (vm.streamsState as StreamsUiState.Error).message,
@@ -809,7 +876,6 @@ private fun DetailContent(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
-            Spacer(Modifier.height(8.dp))
         }
         if (isSeries) {
             item {
@@ -951,12 +1017,44 @@ private fun DetailContent(
         onDownload = { stream -> downloadStream = stream }
     )
 
+    // Full-page source picker (long-press Play): title header + addon tabs + streams.
+    if (fullPageSourceOpen) {
+        FullPageSourcePicker(
+            meta = meta,
+            streams = allStreams,
+            loading = vm.streamsState is StreamsUiState.Loading,
+            errorMessage = (vm.streamsState as? StreamsUiState.Error)?.message,
+            onBack = { fullPageSourceOpen = false },
+            onRetry = { vm.loadStreams(meta.type, vm.selectedVideo?.id ?: meta.id) },
+            onPick = { stream ->
+                fullPageSourceOpen = false
+                if (streamsContent != null) {
+                    startPlayback(vm, repository, stream, streamsContent.subtitles, streamsContent.streams, onPlay)
+                }
+            },
+            onDownload = { stream -> downloadStream = stream }
+        )
+    }
+
     // Download confirmation dialog
     downloadStream?.let { stream ->
         DownloadConfirmDialog(
             stream = stream,
             title = meta.name ?: "Video",
             onDismiss = { downloadStream = null }
+        )
+    }
+
+    // "Add to list" bottom sheet
+    if (showAddToList) {
+        AddToListSheet(
+            listsRepository = listsRepository,
+            addonId = addonId,
+            type = meta.type,
+            metaId = meta.id,
+            name = meta.name ?: "Video",
+            poster = meta.poster,
+            onDismiss = { showAddToList = false }
         )
     }
     } // CompositionLocalProvider (badge style)
@@ -1046,6 +1144,37 @@ private fun SourcePickerPopup(
     onPick: (StreamItem) -> Unit,
     onDownload: ((StreamItem) -> Unit)? = null
 ) {
+    if (rememberIsTv()) {
+        // TV: show the picker in its OWN window (a Compose Dialog), exactly like
+        // Nuvio TV does. A same-window overlay leaves D-pad focus on the screen
+        // underneath; a dialog window keeps every key press inside the popup,
+        // Back dismisses it, and focus returns to the Source button afterwards.
+        if (visible) {
+            androidx.compose.ui.window.Dialog(
+                onDismissRequest = onDismiss,
+                properties = androidx.compose.ui.window.DialogProperties(
+                    usePlatformDefaultWidth = false
+                )
+            ) {
+                SourcePickerOverlay(true, streams, loading, errorMessage, onDismiss, onRetry, onPick, onDownload)
+            }
+        }
+    } else {
+        SourcePickerOverlay(visible, streams, loading, errorMessage, onDismiss, onRetry, onPick, onDownload)
+    }
+}
+
+@Composable
+private fun SourcePickerOverlay(
+    visible: Boolean,
+    streams: List<StreamItem>,
+    loading: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+    onPick: (StreamItem) -> Unit,
+    onDownload: ((StreamItem) -> Unit)? = null
+) {
     val springy = androidx.compose.animation.core.spring<Float>(
         dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
         stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
@@ -1063,6 +1192,7 @@ private fun SourcePickerPopup(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black.copy(alpha = 0.62f))
+                .focusProperties { canFocus = false } // scrim must never take D-pad focus
                 .clickable(
                     interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                     indication = null,
@@ -1095,6 +1225,7 @@ private fun SourcePickerPopup(
                         .clip(PickerShape)
                         .background(LocalPalette.current.panel)
                         .border(1.dp, GlassBorder, PickerShape)
+                        .focusProperties { canFocus = false } // only the rows inside are focus stops
                         .clickable(
                             interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                             indication = null,
@@ -1144,7 +1275,7 @@ private fun PickerCardBody(
         }
     }
 
-    Column(Modifier.fillMaxWidth()) {
+    Column(Modifier.fillMaxWidth().tvSheetFocus()) {
         Row(
             Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1249,5 +1380,237 @@ private fun PickerCardBody(
                 )
             }
         }
+    }
+}
+
+
+/**
+ * Full-screen source picker opened by long-pressing Play.
+ * Top: compact title header (poster, name, year, rating) with back button.
+ * Then per-addon tabs, then the filtered stream list.
+ */
+@Composable
+private fun FullPageSourcePicker(
+    meta: MetaDetail,
+    streams: List<StreamItem>,
+    loading: Boolean,
+    errorMessage: String?,
+    onBack: () -> Unit,
+    onRetry: () -> Unit,
+    onPick: (StreamItem) -> Unit,
+    onDownload: ((StreamItem) -> Unit)? = null
+) {
+    val palette = LocalPalette.current
+    val tabState = rememberPickerTabState(streams)
+    GlowBackground {
+        Column(Modifier.fillMaxSize()) {
+            // Top bar: back + title
+            Row(
+                Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                }
+                Text(
+                    "Sources",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            }
+            // Compact title header: poster + name + year/rating
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SafePosterImage(
+                    model = meta.poster,
+                    contentDescription = meta.name,
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        meta.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        maxLines = 2
+                    )
+                    val sub = listOfNotNull(
+                        meta.releaseInfo?.takeIf { it.isNotBlank() },
+                        meta.imdbRating?.takeIf { it.isNotBlank() }?.let { "★ $it" }
+                    ).joinToString(" · ")
+                    if (sub.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            sub,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                    }
+                }
+            }
+            // Addon tabs
+            if (tabState.tabs.isNotEmpty()) {
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    itemsIndexed(tabState.tabs, key = { _, tab -> tab.key }) { _, tab ->
+                        val selected = tab.key == tabState.selectedKey
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(
+                                    if (selected) palette.accent.copy(alpha = 0.22f)
+                                    else Color.White.copy(alpha = 0.06f)
+                                )
+                                .border(
+                                    1.dp,
+                                    if (selected) palette.accent else GlassBorder,
+                                    RoundedCornerShape(50)
+                                )
+                                .clickable { tabState.onSelect(tab.key) }
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                        ) {
+                            Text(
+                                text = "${tab.label} · ${tab.count}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (selected) TextPrimary else TextSecondary,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            // Stream list / states
+            when {
+                loading && streams.isEmpty() -> {
+                    Box(
+                        Modifier.fillMaxWidth().padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = palette.accent,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+                errorMessage != null && streams.isEmpty() -> {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
+                        Text(
+                            errorMessage,
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = onRetry,
+                            colors = ButtonDefaults.buttonColors(containerColor = palette.accent)
+                        ) {
+                            Text("Retry", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                streams.isEmpty() -> {
+                    Text(
+                        "No sources found yet — they appear here as each addon answers.",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
+                    )
+                }
+                else -> {
+                    StreamList(
+                        streams = tabState.filtered,
+                        onPick = onPick,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 24.dp),
+                        onDownload = onDownload
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** TMDB recommendation item. */
+private data class TmdbRecommendation(
+    val id: Int,
+    val title: String,
+    val posterPath: String?,
+    val mediaType: String
+)
+
+/**
+ * Fetch TMDB recommendations. Uses the find API to resolve IMDb ID to TMDB ID first,
+ * then fetches recommendations. Returns empty list on any failure.
+ */
+private suspend fun fetchTmdbRecommendations(
+    imdbId: String,
+    type: String,
+    apiKey: String
+): List<TmdbRecommendation> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    try {
+        val client = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+
+        // Step 1: Resolve IMDb ID to TMDB ID via find API
+        val findUrl = "https://api.themoviedb.org/3/find/$imdbId?api_key=$apiKey&external_source=imdb_id"
+        val findRequest = okhttp3.Request.Builder().url(findUrl).get().build()
+        val findResponse = client.newCall(findRequest).execute()
+        if (!findResponse.isSuccessful) return@withContext emptyList()
+        val findJson = org.json.JSONObject(findResponse.body?.string() ?: return@withContext emptyList())
+
+        // Get TMDB ID from movie_results or tv_results
+        val tmdbId: Int
+        val tmdbType: String
+        val movieResults = findJson.optJSONArray("movie_results")
+        val tvResults = findJson.optJSONArray("tv_results")
+        if (movieResults != null && movieResults.length() > 0) {
+            tmdbId = movieResults.getJSONObject(0).getInt("id")
+            tmdbType = "movie"
+        } else if (tvResults != null && tvResults.length() > 0) {
+            tmdbId = tvResults.getJSONObject(0).getInt("id")
+            tmdbType = "tv"
+        } else {
+            return@withContext emptyList()
+        }
+
+        // Step 2: Fetch recommendations
+        val recUrl = "https://api.themoviedb.org/3/$tmdbType/$tmdbId/recommendations?api_key=$apiKey&page=1"
+        val recRequest = okhttp3.Request.Builder().url(recUrl).get().build()
+        val recResponse = client.newCall(recRequest).execute()
+        if (!recResponse.isSuccessful) return@withContext emptyList()
+        val recJson = org.json.JSONObject(recResponse.body?.string() ?: return@withContext emptyList())
+        val results = recJson.optJSONArray("results") ?: return@withContext emptyList()
+
+        val recommendations = mutableListOf<TmdbRecommendation>()
+        for (i in 0 until minOf(results.length(), 20)) {
+            val obj = results.getJSONObject(i)
+            val title = obj.optString("title").ifBlank { obj.optString("name") }
+            if (title.isNotBlank()) {
+                recommendations.add(
+                    TmdbRecommendation(
+                        id = obj.getInt("id"),
+                        title = title,
+                        posterPath = obj.optString("poster_path").takeIf { it.isNotBlank() },
+                        mediaType = obj.optString("media_type").ifBlank { tmdbType }
+                    )
+                )
+            }
+        }
+        recommendations
+    } catch (e: Exception) {
+        emptyList()
     }
 }

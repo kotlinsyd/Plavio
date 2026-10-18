@@ -99,8 +99,10 @@ fun IntegrationsScreen(
             item(key = "torbox") {
                 DebridCard(
                     title = "TorBox",
+                    badge = "Under testing",
+                    enabled = false,
                     description = "Resolves cached torrent streams to instant HTTP links. " +
-                        "Debrid-only — nothing is downloaded in the app.",
+                        "Currently under testing — coming soon.",
                     keyLinkUrl = "https://torbox.app",
                     keyLinkText = "Get your API key at torbox.app/settings",
                     currentKey = { settings.torboxApiKey },
@@ -112,14 +114,20 @@ fun IntegrationsScreen(
             item(key = "realdebrid") {
                 DebridCard(
                     title = "Real-Debrid",
+                    badge = "Under testing",
+                    enabled = false,
                     description = "Resolves cached torrent streams to instant HTTP links. " +
-                        "Debrid-only — nothing is downloaded in the app.",
+                        "Currently under testing — coming soon.",
                     keyLinkUrl = "https://real-debrid.com",
                     keyLinkText = "Get your API key at real-debrid.com/apitoken",
                     currentKey = { settings.realDebridApiKey },
                     onSaveKey = { settings.realDebridApiKey = it },
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+            }
+
+            item(key = "tmdb_key") {
+                TmdbApiKeyCard(settings = settings)
             }
 
             item(key = "note") {
@@ -169,7 +177,9 @@ private fun DebridCard(
     keyLinkText: String,
     currentKey: () -> String?,
     onSaveKey: (String?) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    badge: String? = null,
+    enabled: Boolean = true
 ) {
     val context = LocalContext.current
     val palette = LocalPalette.current
@@ -197,6 +207,17 @@ private fun DebridCard(
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary
                 )
+                if (badge != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        badge,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.accent,
+                        modifier = Modifier
+                            .padding(start = 4.dp)
+                    )
+                }
                 Spacer(Modifier.weight(1f))
                 Text(
                     if (configured) "Connected" else "Not connected",
@@ -219,12 +240,13 @@ private fun DebridCard(
                     savedFlash = false
                 },
                 label = { Text("$title API key") },
-                placeholder = { Text("Paste your API key") },
+                placeholder = { Text(if (enabled) "Paste your API key" else "Under testing") },
                 singleLine = true,
+                enabled = enabled,
                 visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 trailingIcon = {
-                    IconButton(onClick = { showKey = !showKey }) {
+                    IconButton(onClick = { showKey = !showKey }, enabled = enabled) {
                         Icon(
                             if (showKey) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
                             contentDescription = if (showKey) "Hide key" else "Show key",
@@ -260,6 +282,7 @@ private fun DebridCard(
                         tick++
                         savedFlash = true
                     },
+                    enabled = enabled,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = palette.accent
                     ),

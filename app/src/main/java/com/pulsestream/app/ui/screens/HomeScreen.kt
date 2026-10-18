@@ -35,6 +35,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.window.Dialog
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -72,11 +74,14 @@ import com.pulsestream.app.data.db.PlaybackState
 import com.pulsestream.app.ui.components.EmptyState
 import com.pulsestream.app.ui.components.ErrorState
 import com.pulsestream.app.ui.components.GlowBackground
+import com.pulsestream.app.data.CustomListsRepository
+import com.pulsestream.app.ui.components.AddToListSheet
 import com.pulsestream.app.ui.components.LoadingState
 import com.pulsestream.app.ui.components.PosterCard
 import com.pulsestream.app.ui.components.DotsLoader
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.ui.components.SectionTitle
+import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.TextPrimary
@@ -153,6 +158,7 @@ class HomeViewModel(private val repo: StreamRepository) : ViewModel() {
 @Composable
 fun HomeScreen(
     repository: StreamRepository,
+    listsRepository: CustomListsRepository,
     onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit,
     onResumePlayback: () -> Unit,
     onGoToAddons: () -> Unit,
@@ -163,6 +169,10 @@ fun HomeScreen(
     val vm: HomeViewModel = viewModel(factory = vmFactory { HomeViewModel(repository) })
     val watching by repository.continueWatching.collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
+    // Long-press context menu target: (addonId, meta) for the pressed poster.
+    var contextMenuTarget by remember { mutableStateOf<Pair<String, MetaPreview>?>(null) }
+    // Add-to-list sheet target: (addonId, meta).
+    var addToListTarget by remember { mutableStateOf<Pair<String, MetaPreview>?>(null) }
     // Watchlist lives ONLY in the Watchlist tab (top-right bookmark) — it is
     // deliberately not shown on Home (v0.8.21 behavior fix).
     // Reload when Home catalog visibility changes in Settings.
@@ -360,7 +370,8 @@ fun HomeScreen(
                                     ) { _, meta ->
                                         PosterCard(
                                             meta = meta,
-                                            onClick = { onOpenDetail(row.addonId, meta.type, meta.id) }
+                                            onClick = { onOpenDetail(row.addonId, meta.type, meta.id) },
+                                            onLongClick = { contextMenuTarget = row.addonId to meta }
                                         )
                                     }
                                 }
@@ -372,6 +383,73 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    // Long-press context menu: Add to Watchlist / Add to My List.
+    contextMenuTarget?.let { (addonId, meta) ->
+        Dialog(onDismissRequest = { contextMenuTarget = null }) {
+            Column(
+                modifier = Modifier
+                    .liquidGlass(RoundedCornerShape(20.dp))
+                    .padding(vertical = 8.dp),
+                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = meta.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                    color = TextPrimary,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                )
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            repository.toggleWatchlist(addonId, meta.type, meta.id, meta.name, meta.poster)
+                        }
+                        contextMenuTarget = null
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Filled.Bookmark,
+                        contentDescription = null,
+                        tint = LocalPalette.current.accent,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Add to Watchlist", color = TextPrimary)
+                }
+                TextButton(
+                    onClick = {
+                        addToListTarget = addonId to meta
+                        contextMenuTarget = null
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Filled.FormatListBulleted,
+                        contentDescription = null,
+                        tint = LocalPalette.current.accent,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Add to My List", color = TextPrimary)
+                }
+            }
+        }
+    }
+
+    // Add-to-list bottom sheet.
+    addToListTarget?.let { (addonId, meta) ->
+        AddToListSheet(
+            listsRepository = listsRepository,
+            addonId = addonId,
+            type = meta.type,
+            metaId = meta.id,
+            name = meta.name,
+            poster = meta.poster,
+            onDismiss = { addToListTarget = null }
+        )
     }
 }
 
@@ -436,10 +514,10 @@ private fun HeroCarousel(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .tvFocusRing(RoundedCornerShape(22.dp))
                     .clickable { onOpenDetail(item.addonId, meta.type, meta.id) }
                     .then(if (heroFocus != null && index == 0) Modifier.focusRequester(heroFocus) else Modifier)
                     .focusable()
-                    .tvFocusRing(RoundedCornerShape(22.dp))
             ) {
                 SafePosterImage(
                     model = meta.background?.takeIf { it.isNotBlank() } ?: meta.poster,
@@ -527,16 +605,15 @@ private fun ContinueWatchingCard(
     Column(
         modifier = Modifier
             .width(200.dp)
+            .tvFocusRing(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .focusable()
-            .tvFocusRing(RoundedCornerShape(14.dp))
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(112.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color.White.copy(alpha = 0.05f))
+                .liquidGlass(RoundedCornerShape(14.dp))
         ) {
             SafePosterImage(
                 model = item.poster,

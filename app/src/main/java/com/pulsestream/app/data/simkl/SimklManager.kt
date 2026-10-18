@@ -3,6 +3,7 @@ package com.pulsestream.app.data.simkl
 import android.os.SystemClock
 import com.pulsestream.app.data.PlaybackRequest
 import com.pulsestream.app.data.SettingsStore
+import com.pulsestream.app.data.scrobble.ScrobbleProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -12,8 +13,14 @@ import org.json.JSONObject
  * Owns the Simkl link: token storage, PIN login, and scrobble calls.
  * All network work happens on the caller's thread (call from IO).
  * Failures are swallowed — sync must never break playback.
+ *
+ * Implements [ScrobbleProvider] so the player's unified [com.pulsestream.app.data.scrobble.ScrobbleManager]
+ * can fan scrobble events out to Simkl alongside other backends.
  */
-class SimklManager(private val settings: SettingsStore) {
+class SimklManager(private val settings: SettingsStore) : ScrobbleProvider {
+
+    override val name: String = "Simkl"
+    override val isEnabled: Boolean get() = isLoggedIn
 
     private val api = SimklApi()
     private val scrobbleMutex = Mutex()
@@ -45,13 +52,13 @@ class SimklManager(private val settings: SettingsStore) {
 
     // ---- Scrobble ----
 
-    suspend fun scrobbleStart(req: PlaybackRequest, posMs: Long, durMs: Long) =
+    override suspend fun scrobbleStart(req: PlaybackRequest, posMs: Long, durMs: Long) =
         throttled("start", req, posMs, durMs)
 
-    suspend fun scrobblePause(req: PlaybackRequest, posMs: Long, durMs: Long) =
+    override suspend fun scrobblePause(req: PlaybackRequest, posMs: Long, durMs: Long) =
         throttled("pause", req, posMs, durMs)
 
-    suspend fun scrobbleStop(req: PlaybackRequest, posMs: Long, durMs: Long) =
+    override suspend fun scrobbleStop(req: PlaybackRequest, posMs: Long, durMs: Long) =
         throttled("stop", req, posMs, durMs)
 
     /**

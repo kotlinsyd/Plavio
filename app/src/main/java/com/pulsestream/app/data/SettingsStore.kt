@@ -243,6 +243,27 @@ fun diskCacheName(mb: Int): String =
     DISK_CACHE_OPTIONS.find { it.first == mb }?.second
         ?: if (mb <= 0) "Off" else "$mb MB"
 
+/** Which app plays video streams. */
+enum class PlayerChoice(val label: String, val blurb: String) {
+    BUILT_IN(
+        "Built-in player",
+        "Plavio's own player — gestures, subtitles, PiP, skip intro"
+    ),
+    EXTERNAL(
+        "External player",
+        "Open streams in VLC, MX Player or another app you choose"
+    ),
+    ASK(
+        "Ask every time",
+        "Choose the player each time you press play"
+    );
+
+    companion object {
+        fun fromName(name: String?): PlayerChoice =
+            values().find { it.name == name } ?: BUILT_IN
+    }
+}
+
 /** Tiny SharedPreferences-backed store for user settings (no extra dependency). */
 class SettingsStore(context: Context) {
 
@@ -276,6 +297,34 @@ class SettingsStore(context: Context) {
     var pipEnabled: Boolean
         get() = prefs.getBoolean(KEY_PIP_ENABLED, true)
         set(value) = prefs.edit().putBoolean(KEY_PIP_ENABLED, value).apply()
+
+    /**
+     * New-episode alerts: a daily background check notifies when shows in
+     * the watchlist release new episodes. Default ON; the Settings toggle
+     * also requests the POST_NOTIFICATIONS runtime permission on Android 13+.
+     */
+    var episodeNotifications: Boolean
+        get() = prefs.getBoolean(KEY_EPISODE_NOTIFICATIONS, true)
+        set(value) = prefs.edit().putBoolean(KEY_EPISODE_NOTIFICATIONS, value).apply()
+
+    /**
+     * Which player opens streams: the built-in Plavio player, an external
+     * app chosen by the system chooser, or ask every time.
+     * Stored as [PlayerChoice.name]; defaults to built-in.
+     */
+    var preferredPlayer: String
+        get() = prefs.getString(KEY_PREFERRED_PLAYER, PlayerChoice.BUILT_IN.name)
+            ?: PlayerChoice.BUILT_IN.name
+        set(value) = prefs.edit().putString(KEY_PREFERRED_PLAYER, value).apply()
+
+    /**
+     * TMDB API key (user-supplied): enables clickable actors and in-app
+     * recommendations ("You May Like"). Get a free key at
+     * themoviedb.org/settings/api.
+     */
+    var tmdbApiKey: String
+        get() = prefs.getString(KEY_TMDB_API_KEY, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_TMDB_API_KEY, value).apply()
 
     // ------------------------------------------------------------------
     // Buffer & cache (v0.9.0+): player buffering + on-disk playback cache.
@@ -616,11 +665,14 @@ class SettingsStore(context: Context) {
         private const val KEY_AUTOPLAY_NEXT = "autoplay_next_episode"
         private const val KEY_SHUFFLE_EPISODES = "shuffle_episodes"
         private const val KEY_PIP_ENABLED = "pip_enabled"
+        private const val KEY_EPISODE_NOTIFICATIONS = "episode_notifications"
+        private const val KEY_PREFERRED_PLAYER = "preferred_player"
         private const val KEY_BUFFER_MIN_MS = "buffer_min_ms"
         private const val KEY_BUFFER_MAX_MS = "buffer_max_ms"
         private const val KEY_BUFFER_FOR_PLAYBACK_MS = "buffer_for_playback_ms"
         private const val KEY_DISK_CACHE_MB = "disk_cache_mb"
         private const val KEY_ONBOARDING_DONE = "onboarding_done"
+        private const val KEY_TMDB_API_KEY = "tmdb_api_key"
         private const val KEY_AUDIO_LANG = "preferred_audio_language"
         private const val KEY_SUB_COLOR = "subtitle_text_color"
         private const val KEY_SUB_SIZE = "subtitle_text_size_scale"

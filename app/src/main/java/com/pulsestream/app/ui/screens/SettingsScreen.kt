@@ -34,7 +34,7 @@ import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Contrast
@@ -94,12 +94,12 @@ import androidx.compose.ui.unit.sp
 import com.pulsestream.app.BuildConfig
 import com.pulsestream.app.R
 import com.pulsestream.app.data.BadgePacks
-import com.pulsestream.app.data.InstallCounter
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.simkl.SimklApi
 import com.pulsestream.app.data.update.UpdateChecker
 import com.pulsestream.app.data.update.UpdateInfo
 import com.pulsestream.app.ui.components.GlassCard
+import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.components.UpdatePrompt
 import com.pulsestream.app.ui.components.BadgePackPreview
 import com.pulsestream.app.ui.components.GlowBackground
@@ -125,7 +125,6 @@ fun SettingsScreen(
     onGoToAbout: () -> Unit = {},
     onGoToFeedback: () -> Unit = {},
     onGoToFeaturesGuide: () -> Unit = {},
-    onGoToDownloads: () -> Unit = {},
     onGoToAccount: () -> Unit = {},
     onGoToBackup: () -> Unit = {},
     onGoToIntegrations: () -> Unit = {}
@@ -293,21 +292,8 @@ fun SettingsScreen(
                     onClick = onGoToFeaturesGuide
                 )
             }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.CloudDownload,
-                    title = "Downloads",
-                    subtitle = "Watch your downloaded videos offline",
-                    onClick = onGoToDownloads
-                )
-            }
 
             item(key = "credit") {
-                val context = LocalContext.current
-                var installCount by remember { mutableStateOf<Int?>(null) }
-                LaunchedEffect(Unit) {
-                    installCount = InstallCounter.getInstallCount(context)
-                }
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -322,35 +308,16 @@ fun SettingsScreen(
                         color = TextPrimary,
                         textAlign = TextAlign.Center
                     )
-                    if (installCount != null) {
-                        Spacer(Modifier.height(8.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                Icons.Filled.Download,
-                                contentDescription = null,
-                                tint = LocalPalette.current.accent,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            val n = installCount!!
-                            Text(
-                                text = stringResource(
-                                    if (n == 1) R.string.settings_installs_one
-                                    else R.string.settings_installs_many,
-                                    "%,d".format(n)
-                                ),
-                                style = MaterialTheme.typography.labelLarge.copy(
-                                    fontWeight = FontWeight.SemiBold
-                                ),
-                                color = TextSecondary
-                            )
-                        }
-                    }
                     Spacer(Modifier.height(12.dp))
                     SocialIconRow()
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = "Made with 💜 by Kotlinsyd",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                        color = TextPrimary,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(24.dp))
                 }
             }
         }
@@ -454,9 +421,7 @@ fun SettingsIconTile(icon: ImageVector, contentDescription: String?) {
     Box(
         modifier = Modifier
             .size(44.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(GlassWhite)
-            .border(1.dp, GlassBorder, RoundedCornerShape(14.dp)),
+            .liquidGlass(RoundedCornerShape(14.dp)),
         contentAlignment = Alignment.Center
     ) {
         Icon(icon, contentDescription, tint = LocalPalette.current.accent, modifier = Modifier.size(24.dp))
@@ -593,6 +558,124 @@ fun SettingsStaticRow(
     }
 }
 
+/**
+ * TMDB API key input card (Settings > Account).
+ * User pastes their free TMDB API key; enables clickable actors and
+ * in-app "You May Like" recommendations. Key is masked in the UI.
+ */
+@Composable
+fun TmdbApiKeyCard(settings: com.pulsestream.app.data.SettingsStore) {
+    val palette = LocalPalette.current
+    var keyInput by remember { mutableStateOf(settings.tmdbApiKey) }
+    var saved by remember { mutableStateOf(settings.tmdbApiKey.isNotBlank()) }
+    var showSavedTick by remember { mutableStateOf(false) }
+
+    // Masked display: first 4 chars + "..." or "Not set"
+    val maskedKey = remember(keyInput, saved) {
+        val k = if (saved) settings.tmdbApiKey else keyInput
+        if (k.isBlank()) "Not set"
+        else if (k.length <= 4) "••••"
+        else k.take(4) + "••••••••"
+    }
+
+    GlassCard(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SettingsIconTile(Icons.Filled.VpnKey, "TMDB API Key")
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "TMDB API Key",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        if (saved) "Key saved: $maskedKey" else "Not set",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (saved) palette.accent else TextSecondary
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = keyInput,
+                onValueChange = {
+                    keyInput = it.trim()
+                    // Auto-save on change (debounced by the Save button state)
+                    if (showSavedTick) showSavedTick = false
+                },
+                label = { Text("Paste your TMDB API key") },
+                placeholder = { Text("e.g. a1b2c3d4...") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(50),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = palette.accent,
+                    focusedLabelColor = palette.accent,
+                    unfocusedBorderColor = GlassBorder,
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent
+                )
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Get a free key at themoviedb.org/settings/api — enables clickable actors and recommendations.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Save button (capsule)
+                Button(
+                    onClick = {
+                        settings.tmdbApiKey = keyInput.trim()
+                        saved = keyInput.isNotBlank()
+                        showSavedTick = true
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = palette.accent.copy(alpha = 0.18f),
+                        contentColor = palette.accent
+                    )
+                ) {
+                    if (showSavedTick) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Saved")
+                    } else {
+                        Text("Save Key")
+                    }
+                }
+                // Clear button (capsule, ghost)
+                OutlinedButton(
+                    onClick = {
+                        keyInput = ""
+                        settings.tmdbApiKey = ""
+                        saved = false
+                        showSavedTick = false
+                    },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Clear", color = TextSecondary)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun ComingSoonChip() {
     Box(
@@ -698,13 +781,6 @@ fun AboutCard() {
                     textAlign = TextAlign.Center
                 )
             }
-            Spacer(Modifier.height(12.dp))
-            Text(
-                text = "Made With ❤️ By KotlinSyyd",
-                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
-                color = TextPrimary,
-                textAlign = TextAlign.Center
-            )
             Spacer(Modifier.height(20.dp))
         }
     }
@@ -799,6 +875,7 @@ fun AppUpdaterCard() {
                 },
                 enabled = !checking,
                 modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(50),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = LocalPalette.current.accent.copy(alpha = 0.18f),
                     contentColor = LocalPalette.current.accent,
@@ -987,7 +1064,8 @@ private fun BadgeStyleDialog(
                     item(key = "import-file") {
                         OutlinedButton(
                             onClick = { pickJson.launch("application/json") },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(50)
                         ) {
                             Icon(
                                 Icons.Filled.Upload,
@@ -1009,6 +1087,7 @@ private fun BadgeStyleDialog(
                                 singleLine = true,
                                 enabled = !isDownloading,
                                 modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(50),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = accent,
                                     focusedLabelColor = accent
@@ -1037,7 +1116,8 @@ private fun BadgeStyleDialog(
                                     }
                                 },
                                 enabled = !isDownloading,
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(50)
                             ) {
                                 if (isDownloading) {
                                     CircularProgressIndicator(

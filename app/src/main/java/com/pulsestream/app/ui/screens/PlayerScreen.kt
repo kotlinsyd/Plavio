@@ -118,6 +118,7 @@ import androidx.compose.ui.res.stringResource
 import com.pulsestream.app.MainActivity
 import com.pulsestream.app.R
 import com.pulsestream.app.ui.tv.rememberIsTv
+import com.pulsestream.app.ui.tv.tvSheetFocus
 import com.pulsestream.app.ui.tv.tvFocusRing
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -178,6 +179,7 @@ import com.pulsestream.app.ui.components.ErrorState
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.DotsLoadingIndicator
 import com.pulsestream.app.ui.components.SafePosterImage
+import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.components.StreamCard
 import com.pulsestream.app.ui.components.LocalBadgeStyleKey
 import com.pulsestream.app.ui.components.StreamList
@@ -566,16 +568,21 @@ fun PlayerScreen(
             if (probed != null && !disposed.get()) {
                 val req = latestRequest.value
                 val old = latestPlayer.value
-                val fresh = buildExo(req, resolvedSubs, forcedMime = probed)
-                    .also { it.addListener(errorListener) }
-                old.release()
-                player = fresh
-                playerError = null
-                fresh.prepare()
-                fresh.play()
+                // ExoPlayer must be created and accessed on the Main thread.
+                withContext(Dispatchers.Main) {
+                    val fresh = buildExo(req, resolvedSubs, forcedMime = probed)
+                        .also { it.addListener(errorListener) }
+                    old.release()
+                    player = fresh
+                    playerError = null
+                    fresh.prepare()
+                    fresh.play()
+                }
             } else if (!disposed.get()) {
-                playerError = error.message?.takeIf { it.isNotBlank() }
-                    ?: "Playback failed (code ${error.errorCode})"
+                withContext(Dispatchers.Main) {
+                    playerError = error.message?.takeIf { it.isNotBlank() }
+                        ?: "Playback failed (code ${error.errorCode})"
+                }
             }
         }
     }
@@ -738,6 +745,12 @@ fun PlayerScreen(
     fun togglePlay() {
         val c = player
         if (c.isPlaying) c.pause() else c.play()
+    }
+
+    // TV remote fallback: MainActivity.onKeyDown forwards Left/Right/FF/RW
+    // here ONLY when Compose didn't consume the key (e.g. focus was lost).
+    LaunchedEffect(Unit) {
+        MainActivity.playerSeekRequest.collect { seekByWithFeedback(it) }
     }
 
     fun cycleAspect() {
@@ -1088,7 +1101,7 @@ fun PlayerScreen(
         ioScope.launch {
             val type = currentRequest.type
             val result = withTimeoutOrNull(20_000) {
-                repository.streamResultsFlow(type, video.id).first { it.streams.isNotEmpty() }
+                repository.streamResultsFlow(type, video.id).firstOrNull { it.streams.isNotEmpty() }
             }
             // Back to the main thread: everything below touches Compose state.
             withContext(Dispatchers.Main) {
@@ -1331,7 +1344,7 @@ fun PlayerScreen(
                     c.playbackState == Player.STATE_ENDED
                 )
             }
-            delay(500)
+            delay(if (isTv) 1000 else 500) // low-end TVs: half the recompositions
         }
     }
 
@@ -1531,6 +1544,17 @@ fun PlayerScreen(
             runCatching { containerFocus.requestFocus() }
         }
     }
+    // Focus bookkeeping: overlay flag resets when controls are hidden, and the
+    // currently focused transport button registers its action so OK always
+    // fires it (even if the button's own click handling misses the key).
+    LaunchedEffect(showControls) { if (!showControls) transportFocused = false }
+    var focusedKey by remember { mutableStateOf<String?>(null) }
+    var focusedAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    fun act(key: String, action: () -> Unit): Modifier =
+        Modifier.onFocusChanged {
+            if (it.isFocused || it.hasFocus) { focusedKey = key; focusedAction = action }
+            else if (focusedKey == key) { focusedKey = null; focusedAction = null }
+        }
     val tvKeys = if (isTv) {
         // A settings sheet/dialog is up: the D-pad must drive the dialog's
         // own focus ( Up/Down through rows, OK to pick ), not the player.
@@ -1539,6 +1563,9 @@ fun PlayerScreen(
             speedMenuOpen || resumeOfferMs != null || playerError != null
         Modifier.onPreviewKeyEvent { event ->
             if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            // Any remote activity keeps the controls on screen (they used to
+            // auto-hide after 3.5s MID-navigation, so focus "vanished").
+            if (showControls) controlsTick++
             // Remote channel rocker zaps while watching live TV.
             when (event.nativeKeyEvent.keyCode) {
                 android.view.KeyEvent.KEYCODE_CHANNEL_UP -> {
@@ -1569,6 +1596,10 @@ fun PlayerScreen(
                 }
                 Key.DirectionCenter, Key.Enter, Key.NumPadEnter ->
                     if (dialogOpen) false
+                    else if (showControls && focusedAction != null) {
+                        if (event.nativeKeyEvent.repeatCount == 0) focusedAction?.invoke()
+                        true
+                    }
                     else if (showControls && !transportFocused) {
                         runCatching { playPauseFocus.requestFocus() }; true
                     } else if (showControls) false else { toggleControls(); true }
@@ -1594,7 +1625,23 @@ fun PlayerScreen(
             .focusRequester(containerFocus)
             .focusable()
     } else Modifier
-    Box(tvKeys.fillMaxSize().background(Color.Black).then(tvContainerModifier)) {
+    // TV watchdog: if D-pad focus is lost for any reason (a focused button was
+    // removed, a sheet closed, an overlay faded out) park it back on the player
+    // container, so the remote can never stay dead. Skipped while a sheet or
+    // dialog (separate window) legitimately owns focus.
+    var rootHasFocus by remember { mutableStateOf(true) }
+    val sheetUp = tracksOpen || subSearchOpen || sourcesOpen || episodesOpen ||
+        speedMenuOpen || resumeOfferMs != null || downloadStream != null
+    LaunchedEffect(rootHasFocus, isTv, sheetUp, showControls, playerError) {
+        if (isTv && !rootHasFocus && !sheetUp && playerError == null) {
+            delay(400)
+            runCatching { if (showControls && !locked) playPauseFocus.requestFocus() else containerFocus.requestFocus() }
+                .onFailure { runCatching { containerFocus.requestFocus() } }
+        }
+    }
+    Box(tvKeys.fillMaxSize().background(Color.Black)
+        .then(if (isTv) Modifier.onFocusChanged { rootHasFocus = it.hasFocus } else Modifier)
+        .then(tvContainerModifier)) {
         // Video surface with the full gesture set (gestures off while floating —
         // taps on the PiP window belong to the system's PiP controls).
         Box(Modifier.fillMaxSize().then(if (inPip) Modifier else Modifier.videoGestures())) {
@@ -1603,6 +1650,9 @@ fun PlayerScreen(
                     PlayerView(ctx).also { pv ->
                         pv.player = player
                         pv.useController = false
+                        pv.isFocusable = false
+                        pv.isFocusableInTouchMode = false
+                        pv.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                         pv.keepScreenOn = settings.keepScreenOn
                         pv.resizeMode = aspectMode
                         pv.layoutParams = ViewGroup.LayoutParams(
@@ -1796,16 +1846,13 @@ fun PlayerScreen(
             enter = fadeIn(),
             exit = fadeOut()
         ) {
-            Box(Modifier.fillMaxSize().tapGestures()) {
+            Box(Modifier.fillMaxSize().tapGestures()
+                .then(if (isTv) Modifier.onFocusChanged { transportFocused = it.hasFocus } else Modifier)) {
                 // ---- Top: title block + icon cluster ----
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)
-                            )
-                        )
+                        .liquidGlass(RoundedCornerShape(20.dp))
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.Top
                 ) {
@@ -1843,7 +1890,8 @@ fun PlayerScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
                             onClick = onBack,
-                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
+                            modifier = Modifier.then(act("back") { onBack() })
+                            .tvFocusRing(RoundedCornerShape(50))
                         ) {
                             Icon(Icons.Filled.ArrowBack, "Back", tint = TextPrimary)
                         }
@@ -1852,8 +1900,7 @@ fun PlayerScreen(
 
                 // ---- Center transport ----
                 Row(
-                    Modifier.align(Alignment.Center)
-                        .onFocusChanged { transportFocused = it.hasFocus },
+                    Modifier.align(Alignment.Center),
                     horizontalArrangement = Arrangement.spacedBy(36.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1871,28 +1918,38 @@ fun PlayerScreen(
                     }
                     IconButton(
                         onClick = { seekByWithFeedback(-10_000) },
-                        modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
+                        modifier = Modifier.then(act("rew") { seekByWithFeedback(-10_000) })
+                            .tvFocusRing(RoundedCornerShape(50))
                     ) {
                         Icon(
                             Icons.Filled.Replay10, "Back 10 seconds",
                             tint = TextPrimary, modifier = Modifier.size(56.dp)
                         )
                     }
-                    IconButton(
-                        onClick = { togglePlay() },
+                    Box(
                         modifier = Modifier
-                            .focusRequester(playPauseFocus)
-                            .tvFocusRing(RoundedCornerShape(50))
+                            .liquidGlass(RoundedCornerShape(50))
+                            .padding(8.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            if (isPlaying) "Pause" else "Play",
-                            tint = TextPrimary, modifier = Modifier.size(76.dp)
-                        )
+                        IconButton(
+                            onClick = { togglePlay() },
+                            modifier = Modifier
+                                .focusRequester(playPauseFocus)
+                                .then(act("play") { togglePlay() })
+                                .tvFocusRing(RoundedCornerShape(50))
+                        ) {
+                            Icon(
+                                if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                if (isPlaying) "Pause" else "Play",
+                                tint = TextPrimary, modifier = Modifier.size(76.dp)
+                            )
+                        }
                     }
                     IconButton(
                         onClick = { seekByWithFeedback(10_000) },
-                        modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
+                        modifier = Modifier.then(act("fwd") { seekByWithFeedback(10_000) })
+                            .tvFocusRing(RoundedCornerShape(50))
                     ) {
                         Icon(
                             Icons.Filled.Forward10, "Forward 10 seconds",
@@ -1918,11 +1975,7 @@ fun PlayerScreen(
                     Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.75f))
-                            )
-                        )
+                        .liquidGlass(RoundedCornerShape(20.dp))
                         .padding(horizontal = 20.dp)
                         .padding(bottom = 14.dp)
                 ) {
@@ -1944,12 +1997,8 @@ fun PlayerScreen(
                     }
                     Spacer(Modifier.height(10.dp))
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Surface(
-                            color = Color.Black.copy(alpha = 0.6f),
-                            shape = RoundedCornerShape(50),
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp, GlassBorder
-                            )
+                        Box(
+                            modifier = Modifier.liquidGlass(RoundedCornerShape(50))
                         ) {
                             Row(
                                 Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
@@ -2282,12 +2331,12 @@ fun PlayerScreen(
                             Row(
                                 Modifier
                                     .fillMaxWidth()
+                                    .tvFocusRing(RoundedCornerShape(10.dp))
                                     .then(
                                         if (index == 0) Modifier.focusRequester(firstResultFocus)
                                         else Modifier
                                     )
                                     .clickable { addExternalSubtitle(sub) }
-                                    .tvFocusRing(RoundedCornerShape(10.dp))
                                     .padding(vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -2320,6 +2369,7 @@ fun PlayerScreen(
                 sheetState = rememberModalBottomSheetState(),
                 containerColor = Color(0xFF14141F)
             ) {
+                Column(Modifier.tvSheetFocus()) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
                     Text(
                         "Sources",
@@ -2397,6 +2447,7 @@ fun PlayerScreen(
                         }
                     }
                 }
+                            }
             }
         }
 
@@ -2419,6 +2470,7 @@ fun PlayerScreen(
                 sheetState = rememberModalBottomSheetState(),
                 containerColor = Color(0xFF14141F)
             ) {
+                Column(Modifier.tvSheetFocus()) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
                     Text(
                         "Episodes",
@@ -2516,6 +2568,7 @@ fun PlayerScreen(
                         Spacer(Modifier.height(8.dp))
                     }
                 }
+                            }
             }
         }
     }
