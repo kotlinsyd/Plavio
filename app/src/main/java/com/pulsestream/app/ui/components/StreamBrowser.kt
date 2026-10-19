@@ -7,6 +7,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -30,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.ui.unit.sp
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -226,7 +229,11 @@ class StreamBrowserState(
     val tabs: List<StreamTab>,
     val selectedTab: String,
     val filtered: List<StreamItem>,
-    val onSelectTab: (String) -> Unit
+    val onSelectTab: (String) -> Unit,
+    // Quality filter (user's order): dynamic pills, only shown qualities.
+    val qualities: List<String>,
+    val selectedQuality: String?,
+    val onSelectQuality: (String?) -> Unit
 )
 
 @Composable
@@ -242,6 +249,9 @@ fun rememberStreamBrowserState(
     // Saveable: the addon tab the user picked survives rotation. A stale
     // key (tab gone after the stream list changed) falls back to "All".
     var selectedTab by rememberSaveable { mutableStateOf(STREAM_TAB_ALL) }
+    // Quality filter: null = All qualities. Dynamic — only qualities present
+    // in the current stream list get a pill (user's order).
+    var selectedQuality by rememberSaveable { mutableStateOf<String?>(null) }
     val tabs = remember(ordered) {
         val groups = ordered.groupBy { it.addonKey() }
         buildList {
@@ -251,13 +261,31 @@ fun rememberStreamBrowserState(
             }
         }
     }
-    val safeTab = if (tabs.any { it.key == selectedTab }) selectedTab else STREAM_TAB_ALL
-    val filtered = remember(ordered, safeTab) {
-        if (safeTab == STREAM_TAB_ALL) ordered
-        else ordered.filter { it.addonKey() == safeTab }
+    // Available qualities, ordered 4K first then descending resolution.
+    val qualities = remember(ordered) {
+        val found = ordered.mapNotNull { parseStreamInfo(it).quality }
+            .map { q -> if (q.equals("4K", ignoreCase = true)) "4K" else q.lowercase() }
+            .toSet()
+        val order = listOf("4k", "2160p", "1440p", "1080p", "720p", "480p", "360p")
+        found.sortedBy { q ->
+            val idx = order.indexOf(q.lowercase())
+            if (idx >= 0) idx else 99
+        }.map { q -> if (q == "4k") "4K" else q }
     }
-    return remember(tabs, safeTab, filtered) {
-        StreamBrowserState(tabs, safeTab, filtered) { selectedTab = it }
+    val safeTab = if (tabs.any { it.key == selectedTab }) selectedTab else STREAM_TAB_ALL
+    val safeQuality = if (selectedQuality == null || qualities.any { it.equals(selectedQuality, ignoreCase = true) }) selectedQuality else null
+    val filtered = remember(ordered, safeTab, safeQuality) {
+        var list = if (safeTab == STREAM_TAB_ALL) ordered
+        else ordered.filter { it.addonKey() == safeTab }
+        if (safeQuality != null) {
+            list = list.filter { s ->
+                parseStreamInfo(s).quality?.equals(safeQuality, ignoreCase = true) == true
+            }
+        }
+        list
+    }
+    return remember(tabs, safeTab, filtered, qualities, safeQuality) {
+        StreamBrowserState(tabs, safeTab, filtered, { selectedTab = it }, qualities, safeQuality, { selectedQuality = it })
     }
 }
 
@@ -300,6 +328,77 @@ fun AddonTabs(state: StreamBrowserState, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * Quality filter pills (user's order): only qualities present in the stream
+ * list get a pill. Tapping one filters across ALL addons.
+ */
+@Composable
+fun QualityPills(state: StreamBrowserState, modifier: Modifier = Modifier) {
+    if (state.qualities.size <= 1) return // Nothing to filter.
+    val palette = LocalPalette.current
+    LazyRow(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // "All" pill
+        item(key = "quality_all") {
+            val selected = state.selectedQuality == null
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        if (selected) palette.accent.copy(alpha = 0.22f)
+                        else Color.White.copy(alpha = 0.06f)
+                    )
+                    .border(
+                        1.dp,
+                        if (selected) palette.accent else GlassBorder,
+                        RoundedCornerShape(50)
+                    )
+                    .clickable { state.onSelectQuality(null) }
+                    .tvFocusRing(RoundedCornerShape(50))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "All",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (selected) TextPrimary else TextSecondary,
+                    maxLines = 1
+                )
+            }
+        }
+        items(state.qualities, key = { "quality_$it" }) { quality ->
+            val selected = state.selectedQuality?.equals(quality, ignoreCase = true) == true
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        if (selected) palette.accent.copy(alpha = 0.22f)
+                        else Color.White.copy(alpha = 0.06f)
+                    )
+                    .border(
+                        1.dp,
+                        if (selected) palette.accent else GlassBorder,
+                        RoundedCornerShape(50)
+                    )
+                    .clickable { state.onSelectQuality(if (selected) null else quality) }
+                    .tvFocusRing(RoundedCornerShape(50))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = quality.uppercase(),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    color = if (selected) TextPrimary else TextSecondary,
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Stream badge packs — user-selectable in Appearance settings (v0.8.31+)
@@ -329,6 +428,7 @@ val LocalBadgeStyleKey: androidx.compose.runtime.ProvidableCompositionLocal<Stri
  * badges don't cover everything (e.g. exact file size).
  */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun StreamCard(
     stream: StreamItem,
     selected: Boolean = false,
@@ -341,82 +441,166 @@ fun StreamCard(
         if (pack != null) BadgePacks.match(pack, stream) else emptyList()
     }
     val info = remember(stream) { parseStreamInfo(stream) }
-    val headline = remember(stream) { streamHeadline(stream) }
-    val shape = RoundedCornerShape(14.dp)
+    // Full filename display (user's order): show the complete title/name,
+    // never truncated. Prefer title (usually the full filename).
+    val fullName = remember(stream) {
+        val t = stream.title?.trim().orEmpty()
+        val n = stream.name?.trim().orEmpty()
+        when {
+            t.isNotBlank() && n.isNotBlank() && t != n -> "$t\n$n"
+            t.isNotBlank() -> t
+            n.isNotBlank() -> n
+            else -> stream.url.substringAfter("://").substringBefore("/").take(48)
+        }
+    }
+    // Language tags from title (Hindi, English, etc.)
+    val languages = remember(stream) {
+        val haystack = listOfNotNull(stream.title, stream.name).joinToString(" ")
+        val found = mutableListOf<String>()
+        val langRe = Regex("""\b(Hindi|English|Tamil|Telugu|Malayalam|Kannada|Punjabi|Bengali|Marathi|Gujarati|Urdu|Arabic|Spanish|French|German|Italian|Portuguese|Russian|Japanese|Korean|Chinese|Turkish)\b""", RegexOption.IGNORE_CASE)
+        langRe.findAll(haystack).forEach { m ->
+            val lang = m.value.lowercase().replaceFirstChar { it.uppercase() }
+            if (!found.contains(lang)) found.add(lang)
+        }
+        found.take(3)
+    }
+    val shape = RoundedCornerShape(20.dp)
+    val is4K = info.quality?.contains("4K", ignoreCase = true) == true ||
+            info.quality?.contains("2160", ignoreCase = true) == true
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 5.dp)
-            .liquidGlass(shape)
-            .then(
-                if (selected) Modifier.border(1.5.dp, palette.accent, shape)
-                else Modifier
-            )
-            .clickable(onClick = onClick)
-            .tvFocusRing(shape)
-            .padding(12.dp)
+            .padding(horizontal = 16.dp, vertical = 6.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.Top
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .liquidGlass(shape)
+                .then(
+                    if (selected) Modifier.border(1.5.dp, palette.accent, shape)
+                    else Modifier
+                )
+                .clickable(onClick = onClick)
+                .tvFocusRing(shape)
+                .padding(20.dp)
         ) {
-            Text(
-                text = headline,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = TextPrimary,
-                maxLines = 2,
-                modifier = Modifier.weight(1f)
-            )
-            if (onDownload != null) {
-                IconButton(
-                    onClick = { onDownload(stream) },
-                    modifier = Modifier.size(36.dp)
+            // Title row with 4K ribbon — full name, bigger text (user's order).
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = fullName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                    lineHeight = 24.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(end = if (is4K) 52.dp else 0.dp)
+                )
+                if (is4K) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .background(
+                                palette.accent,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "4K",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.Black
+                        )
+                    }
+                }
+            }
+
+            // Spec chips
+            val chips = buildList {
+                info.quality?.let { add(it.uppercase() to true) }
+                info.codec?.let { add(it.uppercase() to true) }
+                info.audio?.let { add(it to true) }
+                info.source?.let { add(it to false) }
+                if (languages.isNotEmpty()) add(languages.joinToString(" + ") to false)
+                info.size?.let { add(it to false) }
+            }
+            if (chips.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                androidx.compose.foundation.layout.FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Icon(
-                        Icons.Filled.Download,
-                        contentDescription = "Download",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    chips.forEach { (label, highlighted) ->
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    if (highlighted) palette.accent.copy(alpha = 0.15f)
+                                    else Color.White.copy(alpha = 0.06f),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .border(
+                                    1.dp,
+                                    if (highlighted) palette.accent.copy(alpha = 0.3f)
+                                    else Color.White.copy(alpha = 0.08f),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (highlighted) palette.accent else TextSecondary
+                            )
+                        }
+                    }
                 }
             }
-        }
-        if (badges.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                badges.forEach { badge ->
-                    AsyncImage(
-                        model = badge.imageUrl,
-                        contentDescription = badge.name,
-                        modifier = Modifier.height(15.dp),
-                        contentScale = ContentScale.FillHeight
-                    )
+
+            // Badges (provider logos)
+            if (badges.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    badges.forEach { badge ->
+                        AsyncImage(
+                            model = badge.imageUrl,
+                            contentDescription = badge.name,
+                            modifier = Modifier.height(15.dp),
+                            contentScale = ContentScale.FillHeight
+                        )
+                    }
                 }
             }
-        }
-        val infoLine = buildString {
-            info.quality?.let { append(it.uppercase()) }
-            info.source?.let { if (isNotEmpty()) append(" · "); append(it) }
-            info.codec?.let { if (isNotEmpty()) append(" · "); append(it) }
-            info.audio?.let { if (isNotEmpty()) append(" · "); append(it) }
-            info.size?.let { if (isNotEmpty()) append(" · "); append(it) }
-        }
-        if (infoLine.isNotEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = infoLine,
-                style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary,
-                maxLines = 1
-            )
+
+            // Bottom row: download button only (no URLs — user's order).
+            if (onDownload != null) {
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    IconButton(
+                        onClick = { onDownload(stream) },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Download,
+                            contentDescription = "Download",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }

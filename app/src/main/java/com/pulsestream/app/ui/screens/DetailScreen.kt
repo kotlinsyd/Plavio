@@ -1467,7 +1467,7 @@ private fun FullPageSourcePicker(
     onDownload: ((StreamItem) -> Unit)? = null
 ) {
     val palette = LocalPalette.current
-    val tabState = rememberPickerTabState(streams)
+    val browserState = com.pulsestream.app.ui.components.rememberStreamBrowserState(streams)
     GlowBackground {
         Column(Modifier.fillMaxSize()) {
             // Top bar: back + title
@@ -1485,77 +1485,63 @@ private fun FullPageSourcePicker(
                     color = TextPrimary
                 )
             }
-            // Compact title header: poster + name + year/rating
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
+            // Full-width poster banner (user's order — matches player Sources sheet).
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
             ) {
-                SafePosterImage(
+                com.pulsestream.app.ui.components.SafePosterImage(
                     model = meta.poster,
-                    contentDescription = meta.name,
-                    modifier = Modifier
-                        .size(72.dp)
-                        .clip(RoundedCornerShape(12.dp))
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize()
                 )
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            androidx.compose.ui.graphics.Brush.verticalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    Color(0xFF14141F).copy(alpha = 0.7f),
+                                    Color(0xFF14141F)
+                                )
+                            )
+                        )
+                )
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(horizontal = 20.dp, vertical = 12.dp)
+                ) {
                     Text(
-                        meta.name,
-                        style = MaterialTheme.typography.titleMedium,
+                        text = meta.name,
+                        style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary,
                         maxLines = 2
                     )
+                    Spacer(Modifier.height(2.dp))
                     val sub = listOfNotNull(
                         meta.releaseInfo?.takeIf { it.isNotBlank() },
                         meta.imdbRating?.takeIf { it.isNotBlank() }?.let { "★ $it" }
                     ).joinToString(" · ")
-                    if (sub.isNotBlank()) {
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            sub,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-                    }
+                    Text(
+                        text = if (sub.isNotBlank()) sub else "${streams.size} sources",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
                 }
             }
-            // Addon tabs
-            if (tabState.tabs.isNotEmpty()) {
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    itemsIndexed(tabState.tabs, key = { _, tab -> tab.key }) { _, tab ->
-                        val selected = tab.key == tabState.selectedKey
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(50))
-                                .background(
-                                    if (selected) palette.accent.copy(alpha = 0.22f)
-                                    else Color.White.copy(alpha = 0.06f)
-                                )
-                                .border(
-                                    1.dp,
-                                    if (selected) palette.accent else GlassBorder,
-                                    RoundedCornerShape(50)
-                                )
-                                .clickable { tabState.onSelect(tab.key) }
-                                .padding(horizontal = 14.dp, vertical = 10.dp)
-                        ) {
-                            Text(
-                                text = "${tab.label} · ${tab.count}",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (selected) TextPrimary else TextSecondary,
-                                maxLines = 1
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
+            // Addon tabs + quality pills (user's order).
+            com.pulsestream.app.ui.components.AddonTabs(
+                browserState,
+                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+            )
+            com.pulsestream.app.ui.components.QualityPills(
+                browserState,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
             // Stream list / states
             when {
                 loading && streams.isEmpty() -> {
@@ -1595,7 +1581,7 @@ private fun FullPageSourcePicker(
                 }
                 else -> {
                     StreamList(
-                        streams = tabState.filtered,
+                        streams = browserState.filtered,
                         onPick = onPick,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 24.dp),

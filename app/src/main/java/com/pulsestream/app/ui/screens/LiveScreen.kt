@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -264,12 +265,6 @@ fun LiveScreen(
                 )
             }
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = { showM3uDialog = true }) {
-                Icon(
-                    Icons.Filled.PlaylistAdd, "Import M3U playlist",
-                    tint = TextSecondary
-                )
-            }
             IconButton(onClick = { showSearch = !showSearch }) {
                 Icon(
                     if (showSearch) Icons.Filled.Close else Icons.Filled.Search,

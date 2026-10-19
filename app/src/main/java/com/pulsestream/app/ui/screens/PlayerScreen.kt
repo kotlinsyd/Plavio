@@ -2428,20 +2428,54 @@ fun PlayerScreen(
                 containerColor = Color(0xFF14141F)
             ) {
                 Column(Modifier.tvSheetFocus()) {
+                // Movie banner: full-width backdrop with title overlay (user's order).
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp)
+                ) {
+                    // Backdrop image (poster, blurred to fill width)
+                    com.pulsestream.app.ui.components.SafePosterImage(
+                        model = currentRequest.poster,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    // Dark gradient for text readability
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                androidx.compose.ui.graphics.Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color.Transparent,
+                                        Color(0xFF14141F).copy(alpha = 0.7f),
+                                        Color(0xFF14141F)
+                                    )
+                                )
+                            )
+                    )
+                    // Title + count at the bottom
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(horizontal = 20.dp, vertical = 12.dp)
+                    ) {
+                        Text(
+                            text = currentRequest.title,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            maxLines = 2
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "${availableStreams.size} sources available",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                    }
+                }
                 Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
-                    Text(
-                        "Sources",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary,
-                        modifier = Modifier.padding(bottom = 4.dp)
-                    )
-                    Text(
-                        "${availableStreams.size} available",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                        modifier = Modifier.padding(bottom = if (hiddenIncompatibleCount > 0) 4.dp else 12.dp)
-                    )
                     if (hiddenIncompatibleCount > 0) {
                         Text(
                             "$hiddenIncompatibleCount 4K stream${if (hiddenIncompatibleCount > 1) "s" else ""} hidden — your device doesn't support 4K playback",
@@ -2452,6 +2486,11 @@ fun PlayerScreen(
                     }
                 }
                 AddonTabs(browserState, modifier = Modifier.padding(bottom = 4.dp))
+                // Quality filter pills (user's order): dynamic, only available qualities.
+                com.pulsestream.app.ui.components.QualityPills(
+                    browserState,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
                 when {
                     availableStreams.isEmpty() && streamsLoading -> {
                         Box(
