@@ -30,9 +30,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.ui.unit.sp
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,6 +55,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,7 +87,7 @@ data class ParsedStreamInfo(
 )
 
 private val QUALITY_RE = Regex("""\b(2160p|1440p|1080p|720p|480p|360p)\b""", RegexOption.IGNORE_CASE)
-private val FOUR_K_RE = Regex("""\b(4K|UHD)\b""")
+private val FOUR_K_RE = Regex("""\b(4K|UHD)\b""", RegexOption.IGNORE_CASE)
 private val SOURCE_RE =
     Regex("""\b(Blu[-\s]?Ray|BRRip|WEB[-\s]?DL|WEBRip|HDRip|HDCAM|HDTS|\bTS\b|CAM)\b""", RegexOption.IGNORE_CASE)
 private val CODEC_RE = Regex("""\b(x265|HEVC|x264|AVC|AV1|VP9)\b""", RegexOption.IGNORE_CASE)
@@ -120,6 +123,81 @@ fun parseStreamInfo(stream: StreamItem): ParsedStreamInfo {
     return ParsedStreamInfo(quality, source, codec, audio, size)
 }
 
+/** Canonical filter bucket for a parsed quality label; unknown labels have no filter bucket. */
+fun normalizeStreamQuality(quality: String?): String? {
+    val value = quality?.trim()?.lowercase()?.replace(" ", "") ?: return null
+    return when (value) {
+        "4k", "uhd", "2160p" -> "4K"
+        "1440p", "1080p", "720p", "480p", "360p" -> value
+        else -> null
+    }
+}
+
+private val STREAM_QUALITY_ORDER = listOf("4K", "1440p", "1080p", "720p", "480p", "360p")
+
+/** Qualities currently represented in [streams], regardless of source or preference caps. */
+fun availableStreamQualities(streams: List<StreamItem>): List<String> =
+    streams.mapNotNull { normalizeStreamQuality(parseStreamInfo(it).quality) }
+        .distinct()
+        .sortedBy { STREAM_QUALITY_ORDER.indexOf(it).let { index -> if (index < 0) Int.MAX_VALUE else index } }
+
+/** Applies a canonical quality bucket across the whole combined list, retaining every matching addon. */
+fun filterStreamsByQuality(streams: List<StreamItem>, quality: String?): List<StreamItem> {
+    val bucket = normalizeStreamQuality(quality) ?: return streams
+    return streams.filter { normalizeStreamQuality(parseStreamInfo(it).quality) == bucket }
+}
+
+/** Compare display labels after case/spacing/punctuation normalization, retaining original text. */
+private fun comparableStreamLabel(value: String): String =
+    value.lowercase().filter { it.isLetterOrDigit() }
+
+private fun streamLinesEquivalent(first: String, second: String): Boolean {
+    val firstLabel = comparableStreamLabel(first)
+    val secondLabel = comparableStreamLabel(second)
+    if (firstLabel == secondLabel) return true
+    val firstQuality = normalizeStreamQuality(first)
+    val secondQuality = normalizeStreamQuality(second)
+    return firstQuality != null && firstQuality == secondQuality
+}
+
+/** Combine addon title/name while removing repeated and less-informative overlapping lines. */
+fun streamDisplayName(title: String?, name: String?, fallbackUrl: String = ""): String {
+    val t = title?.trim().orEmpty()
+    val n = name?.trim().orEmpty()
+    if (t.isBlank() && n.isBlank()) {
+        return fallbackUrl.substringAfter("://").substringBefore("/").take(48)
+    }
+
+    val lines = mutableListOf<String>()
+    (listOf(t, n).filter { it.isNotBlank() }.flatMap { field ->
+        field.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+    }).forEach { candidate ->
+        val candidateLabel = comparableStreamLabel(candidate)
+        if (candidateLabel.isEmpty()) return@forEach
+        val overlaps = lines.indices.filter { index ->
+            val existingLabel = comparableStreamLabel(lines[index])
+            streamLinesEquivalent(lines[index], candidate) ||
+                (existingLabel.isNotEmpty() &&
+                    (existingLabel.contains(candidateLabel) || candidateLabel.contains(existingLabel)))
+        }
+        if (overlaps.isEmpty()) {
+            lines += candidate
+        } else {
+            val richer = overlaps.filter { index ->
+                comparableStreamLabel(lines[index]).length < candidateLabel.length
+            }
+            if (richer.isNotEmpty()) {
+                val insertionIndex = richer.minOrNull()!!
+                richer.asReversed().forEach { index -> lines.removeAt(index) }
+                lines.add(insertionIndex.coerceAtMost(lines.size), candidate)
+            }
+        }
+    }
+    return lines.joinToString("\n").ifBlank {
+        fallbackUrl.substringAfter("://").substringBefore("/").take(48)
+    }
+}
+
 /** Best one-line label for a stream card headline. */
 fun streamHeadline(stream: StreamItem): String {
     // Prefer name (e.g. "2160p · HDHub") — it includes the provider.
@@ -129,6 +207,35 @@ fun streamHeadline(stream: StreamItem): String {
         ?.map { it.trim() }?.firstOrNull { it.isNotBlank() }
     if (!firstLine.isNullOrBlank()) return firstLine
     return stream.url.substringAfter("://").substringBefore("/").take(48)
+}
+
+/** One authoritative set of labels for a compact source-picker card. */
+data class StreamDisplayModel(
+    val headline: String,
+    val provider: String?,
+    val metadata: List<String>
+)
+
+/** Keeps parsed details out of the chips when the full filename already shows them. */
+fun streamDisplayModel(stream: StreamItem): StreamDisplayModel {
+    val headline = streamDisplayName(stream.title, stream.name, stream.url)
+    val normalizedHeadline = comparableStreamLabel(headline)
+    val providerLabel = stream.sourceName?.takeIf { it.isNotBlank() } ?: stream.addonKey()
+    val visibleProvider = providerLabel.takeUnless {
+        normalizedHeadline.contains(comparableStreamLabel(it))
+    }
+    val info = parseStreamInfo(stream)
+    val headlineQuality = FOUR_K_RE.find(headline)?.value
+        ?: QUALITY_RE.find(headline)?.value
+    val representedQuality = normalizeStreamQuality(headlineQuality)
+    val details = listOfNotNull(
+        info.quality?.uppercase(), info.codec?.uppercase(), info.audio, info.size, info.source
+    ).distinct()
+    val visibleDetails = details.filterNot {
+        (normalizeStreamQuality(it) != null && normalizeStreamQuality(it) == representedQuality) ||
+            normalizedHeadline.contains(comparableStreamLabel(it))
+    }
+    return StreamDisplayModel(headline, visibleProvider, visibleDetails)
 }
 
 /** Addon grouping key for tabs. */
@@ -175,13 +282,20 @@ fun streamSizeGb(stream: StreamItem): Double? {
  */
 fun applyStreamPreferences(
     streams: List<StreamItem>,
-    settings: com.pulsestream.app.data.SettingsStore
+    settings: com.pulsestream.app.data.SettingsStore,
+    limitPerSource: Boolean = true
 ): List<StreamItem> {
     val perSource = settings.streamsPerSource
     val order = settings.qualityOrder
-    val capped = streams.groupBy { it.addonKey() }
-        .flatMap { (_, list) -> list.take(perSource) }
-    return capped.sortedWith(compareBy { s ->
+    val capped = if (limitPerSource) streams.groupBy { it.addonKey() }
+        .flatMap { (_, list) -> list.take(perSource) } else streams
+    // TorBox priority (user's order): when TorBox is linked, its instant ⚡ streams
+    // sort first so they play first.
+    val torboxLinked = !settings.torboxApiKey.isNullOrBlank()
+    return capped.sortedWith(compareByDescending<StreamItem> { s ->
+        // TorBox cached streams first (identified by ⚡ in title/name or TorBox in source name)
+        if (torboxLinked && ((s.title?.contains("⚡") == true) || (s.name?.contains("⚡") == true) || (s.sourceName?.contains("TorBox", ignoreCase = true) == true))) 1 else 0
+    }.thenBy { s ->
         val idx = order.indexOf(canonicalStreamQuality(s))
         if (idx >= 0) idx else Int.MAX_VALUE
     })
@@ -204,13 +318,35 @@ fun pickAutoplayStream(
     val order = settings.qualityOrder
     val prefQ = settings.autoplayQuality
     val maxGb = settings.autoplayMaxSizeGb
-    val sorted = playable.sortedWith(compareBy { s ->
-        val q = canonicalStreamQuality(s)
-        when {
-            prefQ != "Auto" && q == prefQ -> -1
-            else -> order.indexOf(q).takeIf { it >= 0 } ?: Int.MAX_VALUE
+
+    // Adaptive mode (user's order 2026-10-20): when quality is "Auto", cap the
+    // pick at what the device screen + network can handle (Netflix/YouTube style)
+    // instead of always grabbing the highest quality. Prefer the highest quality
+    // AT or BELOW the cap; if everything is above the cap, take the lowest above.
+    val adaptiveCap = if (prefQ == "Auto") settings.adaptiveQualityCap() else null
+    val sorted = if (adaptiveCap != null) {
+        fun rank(q: String): Int = when (q) {
+            "2160p" -> 4; "1080p" -> 3; "720p" -> 2; "480p" -> 1; else -> 0
         }
-    })
+        val capRank = rank(adaptiveCap)
+        playable.sortedWith(
+            compareBy<StreamItem> { s ->
+                val r = rank(canonicalStreamQuality(s))
+                if (r <= capRank) 0 else 1 // under cap first
+            }.thenByDescending { s ->
+                val r = rank(canonicalStreamQuality(s))
+                if (r <= capRank) r else -r // highest under cap / lowest over cap
+            }
+        )
+    } else {
+        playable.sortedWith(compareBy { s ->
+            val q = canonicalStreamQuality(s)
+            when {
+                prefQ != "Auto" && q == prefQ -> -1
+                else -> order.indexOf(q).takeIf { it >= 0 } ?: Int.MAX_VALUE
+            }
+        })
+    }
     return sorted.firstOrNull { s ->
         maxGb <= 0 || (streamSizeGb(s)?.let { it <= maxGb } ?: true)
     } ?: sorted.firstOrNull()
@@ -239,12 +375,12 @@ class StreamBrowserState(
 @Composable
 fun rememberStreamBrowserState(
     streams: List<StreamItem>,
-    settings: com.pulsestream.app.data.SettingsStore? = null
+    settings: com.pulsestream.app.data.SettingsStore? = null,
+    limitPerSource: Boolean = true
 ): StreamBrowserState {
-    // User stream preferences (per-source cap + quality order) apply to the
-    // displayed list everywhere this state is used (detail + player).
-    val ordered = remember(streams, settings?.streamsPerSource, settings?.qualityOrder) {
-        if (settings != null) applyStreamPreferences(streams, settings) else streams
+    // The player shows the complete loaded set; other pickers retain the user's cap.
+    val ordered = remember(streams, settings?.streamsPerSource, settings?.qualityOrder, limitPerSource) {
+        if (settings != null) applyStreamPreferences(streams, settings, limitPerSource) else streams
     }
     // Saveable: the addon tab the user picked survives rotation. A stale
     // key (tab gone after the stream list changed) falls back to "All".
@@ -261,50 +397,52 @@ fun rememberStreamBrowserState(
             }
         }
     }
-    // Available qualities, ordered 4K first then descending resolution.
-    val qualities = remember(ordered) {
-        val found = ordered.mapNotNull { parseStreamInfo(it).quality }
-            .map { q -> if (q.equals("4K", ignoreCase = true)) "4K" else q.lowercase() }
-            .toSet()
-        val order = listOf("4k", "2160p", "1440p", "1080p", "720p", "480p", "360p")
-        found.sortedBy { q ->
-            val idx = order.indexOf(q.lowercase())
-            if (idx >= 0) idx else 99
-        }.map { q -> if (q == "4k") "4K" else q }
-    }
+    // Base choices on all fresh combined results, not the possibly capped
+    // display list. This keeps every quality discoverable in the picker.
+    val qualities = remember(streams) { availableStreamQualities(streams) }
     val safeTab = if (tabs.any { it.key == selectedTab }) selectedTab else STREAM_TAB_ALL
-    val safeQuality = if (selectedQuality == null || qualities.any { it.equals(selectedQuality, ignoreCase = true) }) selectedQuality else null
+    val normalizedSelection = normalizeStreamQuality(selectedQuality)
+    val safeQuality = normalizedSelection?.takeIf { it in qualities }
     val filtered = remember(ordered, safeTab, safeQuality) {
         var list = if (safeTab == STREAM_TAB_ALL) ordered
         else ordered.filter { it.addonKey() == safeTab }
-        if (safeQuality != null) {
-            list = list.filter { s ->
-                parseStreamInfo(s).quality?.equals(safeQuality, ignoreCase = true) == true
-            }
-        }
+        list = filterStreamsByQuality(list, safeQuality)
         list
     }
     return remember(tabs, safeTab, filtered, qualities, safeQuality) {
-        StreamBrowserState(tabs, safeTab, filtered, { selectedTab = it }, qualities, safeQuality, { selectedQuality = it })
+        StreamBrowserState(
+            tabs, safeTab, filtered, { selectedTab = it }, qualities, safeQuality,
+            { selectedQuality = normalizeStreamQuality(it) }
+        )
     }
 }
 
 @Composable
-fun AddonTabs(state: StreamBrowserState, modifier: Modifier = Modifier) {
-    if (state.tabs.size <= 2) return // "All" + one addon: tabs add nothing.
+fun AddonTabs(state: StreamBrowserState, modifier: Modifier = Modifier, compact: Boolean = false) {
+    if (!compact && state.tabs.size <= 2) return // Preserve the original non-compact behavior.
     val palette = LocalPalette.current
+    val tabs = if (compact) state.tabs.sortedBy { tab ->
+        when {
+            tab.key == STREAM_TAB_ALL -> 0
+            tab.label.equals("PlavioHD", ignoreCase = true) -> 1
+            tab.label.equals("TMAddon", ignoreCase = true) -> 2
+            tab.label.equals("StAddon", ignoreCase = true) -> 3
+            else -> 4
+        }
+    } else state.tabs
     LazyRow(
         modifier = modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        contentPadding = PaddingValues(horizontal = if (compact) 8.dp else 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 8.dp)
     ) {
-        items(state.tabs, key = { it.key }) { tab ->
+        items(tabs, key = { it.key }) { tab ->
             val selected = tab.key == state.selectedTab
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
                     .background(
-                        if (selected) palette.accent.copy(alpha = 0.22f)
+                        if (selected && compact) palette.accent
+                        else if (selected) palette.accent.copy(alpha = 0.22f)
                         else Color.White.copy(alpha = 0.06f)
                     )
                     .border(
@@ -312,15 +450,16 @@ fun AddonTabs(state: StreamBrowserState, modifier: Modifier = Modifier) {
                         if (selected) palette.accent else GlassBorder,
                         RoundedCornerShape(50)
                     )
-                    .clickable { state.onSelectTab(tab.key) }
+                    .clickable(role = Role.Tab) { state.onSelectTab(tab.key) }
+                    .semantics { this.selected = selected }
                     .tvFocusRing(RoundedCornerShape(50))
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .padding(horizontal = if (compact) 11.dp else 14.dp, vertical = if (compact) 6.dp else 8.dp)
             ) {
                 Text(
-                    text = "${tab.label} • ${tab.count}",
+                    text = if (compact) tab.label else "${tab.label} • ${tab.count}",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (selected) TextPrimary else TextSecondary,
+                    color = if (selected && compact) Color.Black else if (selected) TextPrimary else TextSecondary,
                     maxLines = 1
                 )
             }
@@ -333,22 +472,22 @@ fun AddonTabs(state: StreamBrowserState, modifier: Modifier = Modifier) {
  * list get a pill. Tapping one filters across ALL addons.
  */
 @Composable
-fun QualityPills(state: StreamBrowserState, modifier: Modifier = Modifier) {
-    if (state.qualities.size <= 1) return // Nothing to filter.
+fun QualityPills(state: StreamBrowserState, modifier: Modifier = Modifier, compact: Boolean = false) {
+    if (state.qualities.isEmpty() || (!compact && state.qualities.size <= 1)) return // Nothing useful to filter.
     val palette = LocalPalette.current
     LazyRow(
         modifier = modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        contentPadding = PaddingValues(horizontal = if (compact) 8.dp else 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 8.dp)
     ) {
-        // "All" pill
         item(key = "quality_all") {
             val selected = state.selectedQuality == null
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
                     .background(
-                        if (selected) palette.accent.copy(alpha = 0.22f)
+                        if (selected && compact) palette.accent
+                        else if (selected) palette.accent.copy(alpha = 0.22f)
                         else Color.White.copy(alpha = 0.06f)
                     )
                     .border(
@@ -356,26 +495,28 @@ fun QualityPills(state: StreamBrowserState, modifier: Modifier = Modifier) {
                         if (selected) palette.accent else GlassBorder,
                         RoundedCornerShape(50)
                     )
-                    .clickable { state.onSelectQuality(null) }
+                    .clickable(role = Role.RadioButton) { state.onSelectQuality(null) }
+                    .semantics { this.selected = selected }
                     .tvFocusRing(RoundedCornerShape(50))
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .padding(horizontal = if (compact) 11.dp else 14.dp, vertical = if (compact) 6.dp else 8.dp)
             ) {
                 Text(
-                    text = "All",
+                    text = if (compact) "Any" else "All",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (selected) TextPrimary else TextSecondary,
+                    color = if (selected && compact) Color.Black else if (selected) TextPrimary else TextSecondary,
                     maxLines = 1
                 )
             }
         }
         items(state.qualities, key = { "quality_$it" }) { quality ->
-            val selected = state.selectedQuality?.equals(quality, ignoreCase = true) == true
+            val selected = state.selectedQuality == quality
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
                     .background(
-                        if (selected) palette.accent.copy(alpha = 0.22f)
+                        if (selected && compact) palette.accent
+                        else if (selected) palette.accent.copy(alpha = 0.22f)
                         else Color.White.copy(alpha = 0.06f)
                     )
                     .border(
@@ -383,15 +524,16 @@ fun QualityPills(state: StreamBrowserState, modifier: Modifier = Modifier) {
                         if (selected) palette.accent else GlassBorder,
                         RoundedCornerShape(50)
                     )
-                    .clickable { state.onSelectQuality(if (selected) null else quality) }
+                    .clickable(role = Role.RadioButton) { state.onSelectQuality(if (selected) null else quality) }
+                    .semantics { this.selected = selected }
                     .tvFocusRing(RoundedCornerShape(50))
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .padding(horizontal = if (compact) 11.dp else 14.dp, vertical = if (compact) 6.dp else 8.dp)
             ) {
                 Text(
                     text = quality.uppercase(),
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (selected) TextPrimary else TextSecondary,
+                    color = if (selected && compact) Color.Black else if (selected) TextPrimary else TextSecondary,
                     maxLines = 1
                 )
             }
@@ -433,26 +575,20 @@ fun StreamCard(
     stream: StreamItem,
     selected: Boolean = false,
     onClick: () -> Unit,
-    onDownload: ((StreamItem) -> Unit)? = null
+    onDownload: ((StreamItem) -> Unit)? = null,
+    compact: Boolean = false
 ) {
     val palette = LocalPalette.current
     val pack = rememberBadgePack()
+    val unresolvedTorrent = stream.url.startsWith("infohash:", true) || stream.url.startsWith("magnet:", true)
     val badges = remember(stream, pack) {
         if (pack != null) BadgePacks.match(pack, stream) else emptyList()
     }
     val info = remember(stream) { parseStreamInfo(stream) }
     // Full filename display (user's order): show the complete title/name,
     // never truncated. Prefer title (usually the full filename).
-    val fullName = remember(stream) {
-        val t = stream.title?.trim().orEmpty()
-        val n = stream.name?.trim().orEmpty()
-        when {
-            t.isNotBlank() && n.isNotBlank() && t != n -> "$t\n$n"
-            t.isNotBlank() -> t
-            n.isNotBlank() -> n
-            else -> stream.url.substringAfter("://").substringBefore("/").take(48)
-        }
-    }
+    val display = remember(stream) { streamDisplayModel(stream) }
+    val fullName = display.headline
     // Language tags from title (Hindi, English, etc.)
     val languages = remember(stream) {
         val haystack = listOfNotNull(stream.title, stream.name).joinToString(" ")
@@ -465,8 +601,18 @@ fun StreamCard(
         found.take(3)
     }
     val shape = RoundedCornerShape(20.dp)
-    val is4K = info.quality?.contains("4K", ignoreCase = true) == true ||
-            info.quality?.contains("2160", ignoreCase = true) == true
+    val is4K = display.metadata.any { normalizeStreamQuality(it) == "4K" }
+
+    if (compact) {
+        CompactStreamCard(
+            stream = stream,
+            selected = selected,
+            display = display,
+            onClick = onClick,
+            onDownload = onDownload
+        )
+        return
+    }
 
     Box(
         modifier = Modifier
@@ -481,7 +627,7 @@ fun StreamCard(
                     if (selected) Modifier.border(1.5.dp, palette.accent, shape)
                     else Modifier
                 )
-                .clickable(onClick = onClick)
+                .clickable(enabled = !unresolvedTorrent, onClick = onClick)
                 .tvFocusRing(shape)
                 .padding(20.dp)
         ) {
@@ -519,12 +665,12 @@ fun StreamCard(
 
             // Spec chips
             val chips = buildList {
-                info.quality?.let { add(it.uppercase() to true) }
-                info.codec?.let { add(it.uppercase() to true) }
-                info.audio?.let { add(it to true) }
-                info.source?.let { add(it to false) }
-                if (languages.isNotEmpty()) add(languages.joinToString(" + ") to false)
-                info.size?.let { add(it to false) }
+                display.provider?.let { add(it to false) }
+                display.metadata.forEach { add(it to true) }
+                val missingLanguages = languages.filterNot {
+                    comparableStreamLabel(fullName).contains(comparableStreamLabel(it))
+                }
+                if (missingLanguages.isNotEmpty()) add(missingLanguages.joinToString(" + ") to false)
             }
             if (chips.isNotEmpty()) {
                 Spacer(Modifier.height(10.dp))
@@ -590,6 +736,7 @@ fun StreamCard(
                 ) {
                     IconButton(
                         onClick = { onDownload(stream) },
+                        enabled = !unresolvedTorrent,
                         modifier = Modifier.size(36.dp)
                     ) {
                         Icon(
@@ -601,6 +748,100 @@ fun StreamCard(
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CompactStreamCard(
+    stream: StreamItem,
+    selected: Boolean,
+    display: StreamDisplayModel,
+    onClick: () -> Unit,
+    onDownload: ((StreamItem) -> Unit)?
+) {
+    val palette = LocalPalette.current
+    val shape = RoundedCornerShape(14.dp)
+    val unresolvedTorrent = stream.url.startsWith("infohash:", true) || stream.url.startsWith("magnet:", true)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 3.dp)
+            .border(1.dp, if (selected) palette.accent else GlassBorder, shape)
+            .background(Color.White.copy(alpha = 0.025f), shape)
+            .semantics { this.selected = selected }
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).clickable(enabled = !unresolvedTorrent, onClick = onClick).tvFocusRing(shape)) {
+            Text(
+                text = display.headline,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = TextPrimary,
+                lineHeight = 19.sp
+            )
+            if (unresolvedTorrent) {
+                Text("Torrent source · cached debrid link required", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+            }
+            if (selected || display.provider != null || display.metadata.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (selected) {
+                        Text(
+                            text = "Playing",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            modifier = Modifier.background(palette.accent.copy(alpha = 0.24f), RoundedCornerShape(6.dp))
+                                .border(1.dp, palette.accent.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    display.provider?.let { provider ->
+                        Text(
+                            text = provider,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary,
+                            modifier = Modifier.border(1.dp, GlassBorder, RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    display.metadata.forEach { detail ->
+                        Text(
+                            text = detail,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary,
+                            modifier = Modifier.border(1.dp, GlassBorder, RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+        }
+        if (onDownload != null) {
+            IconButton(onClick = { onDownload(stream) }, enabled = !unresolvedTorrent, modifier = Modifier.size(48.dp)) {
+                Icon(
+                    Icons.Filled.Download,
+                    contentDescription = "Download",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+        IconButton(onClick = onClick, enabled = !unresolvedTorrent, modifier = Modifier.size(48.dp)) {
+            Icon(
+                Icons.Filled.PlayArrow,
+                contentDescription = "Play stream",
+                tint = TextPrimary,
+                modifier = Modifier.size(24.dp)
+            )
         }
     }
 }
@@ -661,7 +902,8 @@ fun StreamList(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     selectedUrl: String? = null,
-    onDownload: ((StreamItem) -> Unit)? = null
+    onDownload: ((StreamItem) -> Unit)? = null,
+    compact: Boolean = false
 ) {
     LazyColumn(
         modifier = modifier,
@@ -672,7 +914,8 @@ fun StreamList(
                 stream = stream,
                 selected = stream.url == selectedUrl,
                 onClick = { onPick(stream) },
-                onDownload = onDownload
+                onDownload = onDownload,
+                compact = compact
             )
         }
     }
@@ -686,14 +929,16 @@ fun LazyListScope.streamListItems(
     streams: List<StreamItem>,
     onPick: (StreamItem) -> Unit,
     selectedUrl: String? = null,
-    onDownload: ((StreamItem) -> Unit)? = null
+    onDownload: ((StreamItem) -> Unit)? = null,
+    compact: Boolean = false
 ) {
     itemsIndexed(streams, key = { index, s -> "${index}_${s.url}" }) { _, stream ->
         StreamCard(
             stream = stream,
             selected = stream.url == selectedUrl,
             onClick = { onPick(stream) },
-            onDownload = onDownload
+            onDownload = onDownload,
+            compact = compact
         )
     }
 }

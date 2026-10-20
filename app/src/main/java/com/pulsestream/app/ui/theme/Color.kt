@@ -3,14 +3,21 @@ package com.pulsestream.app.ui.theme
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 
-val BgDeep = Color(0xFF0A0A12)
-val BgPanel = Color(0xFF12121C)
-val TextPrimary = Color(0xFFF4F4F8)
-val TextSecondary = Color(0xFFA8A8B8)
+// Smoky slate, rather than near-black, is the default Liquid Glass canvas.
+// AMOLED remains a separate opt-in palette in [paletteFor].
+val BgDeep = Color(0xFF202630)
+val BgPanel = Color(0xFF303A47)
+val TextPrimary = Color(0xFFF6F7FA)
+val TextSecondary = Color(0xFFC5CDD7)
 
-val GlassWhite = Color.White.copy(alpha = 0.08f)
-val GlassBorder = Color.White.copy(alpha = 0.14f)
+val GlassWhite = Color.White.copy(alpha = 0.10f)
+val GlassBorder = Color.White.copy(alpha = 0.18f)
+
+/** Opaque neutral fills used by the shared liquid-glass surface treatment. */
+fun liquidGlassTopSurface(background: Color): Color = lerp(background, Color.White, 0.19f)
+fun liquidGlassBottomSurface(background: Color): Color = lerp(background, Color.White, 0.11f)
 
 /**
  * Accent color themes. PULSE is the default neon cyan/magenta identity;

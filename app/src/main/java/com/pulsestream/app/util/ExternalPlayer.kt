@@ -27,6 +27,13 @@ object ExternalPlayer {
      * fall back to the built-in player.
      */
     fun play(context: Context, request: PlaybackRequest): Boolean {
+        if (PlaybackHeaders.buildPlaybackHeaders(request.headers, false).keys.any {
+                it.lowercase() !in setOf("user-agent", "accept", "accept-language") }) {
+            Toast.makeText(context,
+                "This source needs protected headers. Using the built-in player instead of sharing them with another app.",
+                Toast.LENGTH_LONG).show()
+            return false
+        }
         val (uri, mime) = resolveUri(context, request.streamUrl)
         if (uri == null) {
             Toast.makeText(
@@ -45,11 +52,10 @@ object ExternalPlayer {
             }
             // Title shown by players that support it (VLC, MX Player).
             putExtra("title", request.title)
-            // Request headers for players that accept them: VLC for Android
-            // reads a String[] "headers" extra of "Name: value" entries.
-            // Players that don't understand extras simply ignore them.
-            val headers = request.headers
-                .filter { (k, v) -> k.isNotBlank() && v.isNotBlank() }
+            // VLC reads a String[] "headers" extra. Normalize headers and
+            // deliberately omit credentials/cookies: the receiving app and
+            // any redirects it follows are outside our origin boundary.
+            val headers = PlaybackHeaders.externalPlayerHeaders(request.headers)
             if (headers.isNotEmpty()) {
                 putExtra(
                     "headers",

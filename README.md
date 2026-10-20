@@ -1,8 +1,10 @@
 # Plavio
 
-A beautiful open-source streaming app for Android with a built-in player. Install addons to browse movies, series, and live TV — no account, no tracking.
+🌐 **Website:** https://plaviomedia.vercel.app
 
-> 📺 **Plavio for Android TV is in the works — coming soon.**
+A beautiful open-source streaming app for Android with a built-in player. Install addons to browse movies, series, and live TV. An account is optional; the app also offers optional cloud sync and opt-in telemetry.
+
+> This source package targets Android mobile only; Android TV flavor builds are excluded.
 
 ## Preview
 
@@ -47,13 +49,23 @@ Requirements: JDK 17, Android SDK (compileSdk 35), Gradle 8.10+.
 
 ```bash
 chmod +x gradlew   # the executable bit isn't preserved by all push methods
-./gradlew assembleDebug
-# APK: app/build/outputs/apk/debug/app-debug.apk
+./gradlew :app:assembleMobileDebug :app:testMobileDebugUnitTest
+# APK: app/build/outputs/apk/mobile/debug/app-mobile-debug.apk
 ```
 
-> Note: `gradle/wrapper/gradle-wrapper.jar` is not stored in this repo — either
-> run with an installed Gradle 8.10+ (`gradle assembleDebug`), or download the
-> wrapper jar for Gradle 8.10.2 into `gradle/wrapper/` to use `./gradlew`.
+The complete Gradle 8.10.2 wrapper is included. Set `ANDROID_HOME` to your SDK
+or create an untracked `local.properties` with `sdk.dir=/path/to/android-sdk`.
+Install Android SDK Platform 35 and Build Tools 35.0.0. The first build needs
+internet access to download dependencies.
+
+Debug builds use Android's local debug key by default. To sign with the existing
+owner key, set `PLAVIO_SIGNING_STORE`, `PLAVIO_SIGNING_STORE_PASSWORD`,
+`PLAVIO_SIGNING_KEY_ALIAS`, and `PLAVIO_SIGNING_KEY_PASSWORD` in your private
+`~/.gradle/gradle.properties`. Release builds are unsigned unless that key is
+configured. No private keystore is included. A build with a different signing
+key cannot update an already-installed owner-signed app; do not uninstall it
+without backing up your data. See `FIXES-AND-TESTING.md` for this ZIP's changes
+and verification results.
 
 ## Tech
 
@@ -77,7 +89,13 @@ app/src/main/java/com/pulsestream/app/
 
 - **Multi-addon merging** — each addon declares its capabilities (catalog / metadata / stream). Catalogs aggregate across addons, metadata is tried across addons until one answers, streams are fetched concurrently from all stream addons and merged.
 - **Player** — Media3 ExoPlayer: gesture controls (seek / volume / brightness), double-tap ±10s, speed 0.5x–2x, external subtitles, resume playback.
-- **Offline-first** — addons and watch progress persist in Room. No backend, no account, no tracking.
+- **Offline-first** — core library data persists in Room, but addon, metadata, playback, integration, updater and optional sync features make network requests.
+
+## Data use and privacy
+
+Plavio can be used without a Plavio Cloud account. Signing in enables profile restore and automatic versioned backups of portable settings, watchlist, Continue Watching, custom lists/membership and addon metadata to its Supabase-backed service. Ordinary snapshots omit supported integration secrets and protect configured addon URL components. You can separately enable passphrase-protected, end-to-end encrypted sync of supported integration keys and full configured addon URLs; another device needs the same passphrase to unlock them after profile restore. Ordinary library metadata is not covered by that credential encryption. Downloads, device permissions and cloud-login sessions are not portable backup content. Profile switching uses replace-and-restore with local recovery, but is not a parental-control or device-security boundary; real multi-device conflicts and backend authorization remain to be verified. Optional telemetry is disabled by default; enabling it allows Firebase Analytics/Crashlytics collection and optional install-statistics requests. See the [Privacy Policy](site/privacy.html) for data fields, third-party requests, retention uncertainties and controls. Bundled policy changes are source-only until separately published.
+
+The app ships with configured addons. Addon URLs and requests can contain credentials or viewing/search identifiers; addon operators receive the requests sent to their servers. Do not publicly share an addon URL containing a key or token. Addon bundle sharing blocks URLs that appear to contain credentials, but detection is heuristic and not exhaustive.
 
 ## License
 

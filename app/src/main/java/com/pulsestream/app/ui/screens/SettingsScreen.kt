@@ -31,7 +31,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrightnessHigh
-import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.VpnKey
@@ -39,7 +38,6 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.ClosedCaption
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Favorite
@@ -126,15 +124,43 @@ fun SettingsScreen(
     onGoToFeedback: () -> Unit = {},
     onGoToFeaturesGuide: () -> Unit = {},
     onGoToAccount: () -> Unit = {},
-    onGoToBackup: () -> Unit = {},
-    onGoToIntegrations: () -> Unit = {},
-    onGoToDownloads: () -> Unit = {}
+    onGoToIntegrations: () -> Unit = {}
 ) {
     val settings = repository.settings
     val context = LocalContext.current
     var badgeStyleKey by remember { mutableStateOf(settings.streamCardStyle) }
     val badgeStyleLabel = BadgePacks.labelForKey(context, badgeStyleKey)
     var showBadgeStyleDialog by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
+    var telemetryEnabled by remember { mutableStateOf(com.pulsestream.app.data.TelemetryConsent.enabled(context)) }
+
+    if (showDiagnostics) {
+        val entries by com.pulsestream.app.data.SourceDiagnostics.entries.collectAsState()
+        AlertDialog(
+            onDismissRequest = { showDiagnostics = false },
+            title = { Text("Source health") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                    item { Text("This session only. Hashed source IDs, status and request time; no URLs, credentials or viewing history.") }
+                    if (entries.isEmpty()) item { Text("No source requests recorded yet.") }
+                    items(entries.reversed()) { entry ->
+                        Text("${entry.provider}: ${entry.outcome.replace('_', ' ')} · ${entry.durationMs} ms",
+                            modifier = Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Plavio source diagnostics",
+                        com.pulsestream.app.data.SourceDiagnostics.export()))
+                }) { Text("Copy safe report") }
+            },
+            dismissButton = {
+                TextButton(onClick = { com.pulsestream.app.data.SourceDiagnostics.clear(); showDiagnostics = false }) { Text("Clear & close") }
+            }
+        )
+    }
 
     if (showBadgeStyleDialog) {
         BadgeStyleDialog(
@@ -169,14 +195,6 @@ fun SettingsScreen(
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
-                    // TEST: icon-only downloads shortcut.
-                    IconButton(onClick = onGoToDownloads) {
-                        Icon(
-                            Icons.Filled.Download,
-                            contentDescription = "Downloads",
-                            tint = TextSecondary
-                        )
-                    }
                 }
             }
 
@@ -197,14 +215,6 @@ fun SettingsScreen(
                     title = "Integrations",
                     subtitle = "TorBox debrid and more",
                     onClick = onGoToIntegrations
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Backup,
-                    title = stringResource(R.string.settings_backup_title),
-                    subtitle = stringResource(R.string.settings_backup_sub),
-                    onClick = onGoToBackup
                 )
             }
             // ---- Playback: everything that affects how video plays ----
@@ -276,6 +286,12 @@ fun SettingsScreen(
                     onClick = onGoToAppearance
                 )
             }
+            item {
+                val reduced by com.pulsestream.app.data.MotionPreferences.reduced.collectAsState()
+                SettingsToggleRow(icon = Icons.Filled.Contrast, title = "Reduced motion",
+                    subtitle = "Pause automatic hero slides and decorative pulses; also respects Android animation settings.",
+                    checked = reduced, onCheckedChange = { com.pulsestream.app.data.MotionPreferences.setReduced(context, it) })
+            }
             item(key = "badgestyle") {
                 SettingsNavRow(
                     icon = Icons.Filled.Style,
@@ -287,6 +303,18 @@ fun SettingsScreen(
 
             // ---- Help & About ----
             item { SettingsSectionHeader("Help & About") }
+            item {
+                SettingsNavRow(icon = Icons.Filled.Info, title = "Source health",
+                    subtitle = "Redacted status and timing for this session", onClick = { showDiagnostics = true })
+            }
+            item {
+                SettingsToggleRow(icon = Icons.Filled.Info, title = "Optional analytics & crash reports",
+                    subtitle = "Off by default. Share usage and crash data with Firebase.",
+                    checked = telemetryEnabled, onCheckedChange = {
+                        com.pulsestream.app.data.TelemetryConsent.setEnabled(context, it)
+                        telemetryEnabled = it
+                    })
+            }
             item {
                 SettingsNavRow(
                     icon = Icons.Filled.Book,

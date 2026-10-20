@@ -15,6 +15,7 @@ import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.spring
@@ -72,6 +73,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -284,12 +286,7 @@ class MainActivity : ComponentActivity() {
         EpisodeNotifications.ensureScheduled(this)
         // PiP play/pause RemoteAction receiver (explicit intent, not exported).
         val pipFilter = IntentFilter(ACTION_PIP_TOGGLE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(pipReceiver, pipFilter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(pipReceiver, pipFilter)
-        }
+        ContextCompat.registerReceiver(this, pipReceiver, pipFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
         setContent {
             val app = applicationContext as PulseApp
             // If the last run crashed, show the log with a Copy button.
@@ -317,7 +314,8 @@ class MainActivity : ComponentActivity() {
                     app.settings.amoledBlack
                 )
             }
-            PulseStreamTheme(palette = palette) {
+            val isLight = remember(themeTick) { app.settings.themeMode == "light" }
+            PulseStreamTheme(palette = palette, isLight = isLight) {
                 PulseNav(onThemeChanged = { themeTick++ })
             }
         }
@@ -521,6 +519,7 @@ private fun appTabs() = listOf(
 
 @Composable
 private fun PulseNav(onThemeChanged: () -> Unit) {
+    val systemMotionEnabled = remember { com.pulsestream.app.ui.screens.systemAnimationsEnabled() }
     val navController = rememberNavController()
     val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
     val app = appContext as PulseApp
@@ -702,7 +701,9 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                 ) {
                     Surface(
                         shape = RoundedCornerShape(50),
-                        color = LocalPalette.current.panel.copy(alpha = 0.94f),
+                        // Sample F "Frosted" dock (user's pick 2026-10-20): frosted glass
+                        // reads more solid — 0.70 backing under the glass layer.
+                        color = LocalPalette.current.panel.copy(alpha = 0.70f),
                         shadowElevation = 10.dp
                     ) {
                         Row(
@@ -745,14 +746,12 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         // into the mini player on swipe-down/back.
         AnimatedVisibility(
             visible = trailerMini.playerState == TrailerPlayerState.Full,
-            enter = slideInVertically(
-                initialOffsetY = { it },
-                animationSpec = spring(dampingRatio = 0.88f, stiffness = 450f)
-            ) + fadeIn(tween(280)),
-            exit = slideOutVertically(
-                targetOffsetY = { it },
-                animationSpec = tween(380, easing = FastOutSlowInEasing)
-            ) + fadeOut(tween(300))
+            enter = if (systemMotionEnabled) slideInVertically(
+                initialOffsetY = { it }, animationSpec = spring(dampingRatio = 0.88f, stiffness = 450f)
+            ) + fadeIn(tween(280)) else androidx.compose.animation.EnterTransition.None,
+            exit = if (systemMotionEnabled) slideOutVertically(
+                targetOffsetY = { it }, animationSpec = tween(380, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(300)) else androidx.compose.animation.ExitTransition.None
         ) {
             val req = trailerMini.request
             val player = trailerMini.player
@@ -769,16 +768,14 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         // Mini floating trailer player, above content and dock.
         AnimatedVisibility(
             visible = trailerMini.playerState == TrailerPlayerState.Mini,
-            enter = fadeIn(tween(220, delayMillis = 120)) + scaleIn(
-                initialScale = 0.6f,
-                transformOrigin = TransformOrigin(1f, 1f),
+            enter = if (systemMotionEnabled) fadeIn(tween(220, delayMillis = 120)) + scaleIn(
+                initialScale = 0.6f, transformOrigin = TransformOrigin(1f, 1f),
                 animationSpec = tween(300, delayMillis = 120, easing = FastOutSlowInEasing)
-            ),
-            exit = fadeOut(tween(200)) + scaleOut(
-                targetScale = 0.6f,
-                transformOrigin = TransformOrigin(1f, 1f),
+            ) else androidx.compose.animation.EnterTransition.None,
+            exit = if (systemMotionEnabled) fadeOut(tween(200)) + scaleOut(
+                targetScale = 0.6f, transformOrigin = TransformOrigin(1f, 1f),
                 animationSpec = tween(200, easing = FastOutSlowInEasing)
-            )
+            ) else androidx.compose.animation.ExitTransition.None
         ) {
             MiniTrailerOverlay(
                 controller = trailerMini,
@@ -805,6 +802,14 @@ private fun PulseNavGraph(
 ) {
     val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
     val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+
+    val navScope = rememberCoroutineScope()
+    fun openResolvedDetail(addonId: String, type: String, metaId: String) {
+        navScope.launch {
+            val target = com.pulsestream.app.ui.screens.resolveDetailTarget(repository, addonId, type, metaId)
+            navController.navigate(Routes.detail(target.addonId, target.type, target.metaId))
+        }
+    }
 
     /**
      * Single choke point for all playback. Honors Settings > Playback >
@@ -881,7 +886,7 @@ private fun PulseNavGraph(
                 repository = repository,
                 listsRepository = listsRepository,
                 onOpenDetail = { addonId, type, metaId ->
-                    navController.navigate(Routes.detail(addonId, type, metaId))
+                    openResolvedDetail(addonId, type, metaId)
                 },
                 onResumePlayback = {
                     repository.pendingPlayback?.let { playRequest(it) }
@@ -921,44 +926,18 @@ private fun PulseNavGraph(
             )
         }
         composable(Routes.SEARCH) {
-            SearchScreen(
-                repository = repository,
-                onOpenDetail = { addonId, type, metaId ->
-                    if (addonId == "tmdb" && metaId.startsWith("tmdb:")) {
-                        val parts = metaId.split(":")
-                        if (parts.size == 3) {
-                            val tmdbType = parts[1]; val tmdbId = parts[2]
-                            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                                try {
-                                    val key = repository.settings.tmdbApiKey ?: return@launch
-                                    val client = okhttp3.OkHttpClient()
-                                    val url = "https://api.themoviedb.org/3/$tmdbType/$tmdbId/external_ids?api_key=$key"
-                                    val resp = client.newCall(okhttp3.Request.Builder().url(url).get().build()).execute()
-                                    if (resp.isSuccessful) {
-                                        val imdbId = org.json.JSONObject(resp.body?.string() ?: "").optString("imdb_id", "")
-                                        if (imdbId.isNotBlank()) {
-                                            val dt = if (tmdbType == "movie") "movie" else "series"
-                                            val ma = repository.metaAddonsFor(dt)
-                                            val useId = (ma.firstOrNull { it.id.contains("cinemeta", ignoreCase = true) } ?: ma.firstOrNull())?.id ?: addonId
-                                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                                navController.navigate(Routes.detail(useId, dt, imdbId))
-                                            }
-                                        }
-                                    }
-                                } catch (e: Exception) { }
-                            }
-                        }
-                    } else {
-                        navController.navigate(Routes.detail(addonId, type, metaId))
-                    }
-                }
-            )
+        SearchScreen(
+            repository = repository,
+            onOpenDetail = { addonId, type, metaId ->
+                openResolvedDetail(addonId, type, metaId)
+            }
+        )
         }
         composable(Routes.WATCHLIST) {
             WatchlistScreen(
                 repository = repository,
                 onOpenDetail = { addonId, type, metaId ->
-                    navController.navigate(Routes.detail(addonId, type, metaId))
+                    openResolvedDetail(addonId, type, metaId)
                 }
             )
         }
@@ -981,7 +960,7 @@ private fun PulseNavGraph(
                 listId = entry.arguments!!.getString("listId")!!,
                 onBack = { navController.popBackStack() },
                 onOpenDetail = { addonId, type, metaId ->
-                    navController.navigate(Routes.detail(addonId, type, metaId))
+                    openResolvedDetail(addonId, type, metaId)
                 }
             )
         }
@@ -1018,19 +997,11 @@ private fun PulseNavGraph(
                 onGoToFeedback = { navController.navigate(Routes.FEEDBACK) },
                 onGoToFeaturesGuide = { navController.navigate(Routes.FEATURES_GUIDE) },
                 onGoToAccount = { navController.navigate(Routes.ACCOUNT) },
-                onGoToBackup = { navController.navigate(Routes.BACKUP) },
-                onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) },
-                onGoToDownloads = { navController.navigate(Routes.DOWNLOADS) }
+                onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) }
             )
         }
         composable(Routes.INTEGRATIONS) {
             IntegrationsScreen(
-                repository = repository,
-                onBack = { navController.popBackStack() }
-            )
-        }
-        composable(Routes.BACKUP) {
-            BackupScreen(
                 repository = repository,
                 onBack = { navController.popBackStack() }
             )
@@ -1147,7 +1118,7 @@ private fun PulseNavGraph(
                     }
                 },
                 onOpenDetail = { relatedAddonId, relatedType, relatedMetaId ->
-                    navController.navigate(Routes.detail(relatedAddonId, relatedType, relatedMetaId))
+                    openResolvedDetail(relatedAddonId, relatedType, relatedMetaId)
                 },
                 onOpenActor = { personId ->
                     navController.navigate("actor/$personId")
@@ -1169,7 +1140,7 @@ private fun PulseNavGraph(
                 onOpenDetail = { type, metaId ->
                     // PlavioMeta addon id — detail resolves meta/streams from
                     // any capable addon via the base-URL hint chain.
-                    navController.navigate(Routes.detail("community.plaviometa", type, metaId))
+                    openResolvedDetail("community.plaviometa", type, metaId)
                 }
             )
         }
@@ -1191,10 +1162,9 @@ private fun PulseNavGraph(
                 repository = repository,
                 onBack = { navController.popBackStack() },
                 onOpenDetail = { addonId, type, metaId ->
-                    navController.navigate(Routes.detail(addonId, type, metaId))
+                    openResolvedDetail(addonId, type, metaId)
                 }
             )
         }
     }
 }
-

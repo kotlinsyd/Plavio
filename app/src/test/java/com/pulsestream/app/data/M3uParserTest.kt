@@ -43,11 +43,13 @@ class M3uParserTest {
 
         assertEquals(2, channels.size)
         assertEquals("Good Channel", channels[0].name)
-        assertEquals("Another", channels[1].name)
+        // Like the first channel, tvg-name takes precedence over the display name.
+        assertEquals("Another Good", channels[1].name)
+        assertEquals("https://example.com/another.m3u8", channels[1].url)
     }
 
     @Test
-    fun `parse deduplicates same stream with different URL forms`() {
+    fun `parse preserves slash-sensitive URLs as distinct channels`() {
         val text = """
             #EXTM3U
             #EXTINF:-1 tvg-name="Channel",Channel
@@ -57,9 +59,27 @@ class M3uParserTest {
         """.trimIndent()
 
         val channels = M3uParser.parse(text)
+        assertEquals(2, channels.size)
+        assertEquals("http://example.com/stream/", channels[1].url)
+    }
 
-        // Trailing slash normalized → deduped
-        assertEquals(1, channels.size)
+    @Test
+    fun `comparison key preserves authentication IPv6 and request-sensitive path`() {
+        assertEquals(
+            "http://user:pass@[::1]:8080/live/",
+            M3uParser.comparisonKey("HTTP://user:pass@[::1]:8080/live/")
+        )
+        assertEquals(
+            "https://example.com/playlist/",
+            M3uParser.comparisonKey("https://EXAMPLE.com:443/playlist/")
+        )
+    }
+
+    @Test
+    fun `parse retains exact playlist stream URL for the request`() {
+        val url = "http://user:pass@[::1]:8080/live/"
+        val channels = M3uParser.parse("#EXTM3U\n#EXTINF:-1,Channel\n$url")
+        assertEquals(url, channels.single().url)
     }
 
     @Test
@@ -111,9 +131,9 @@ class M3uParserTest {
     }
 
     @Test
-    fun `normalizeUrl strips trailing slash but keeps path case`() {
+    fun `normalizeUrl keeps trailing slash and path case`() {
         assertEquals(
-            "http://example.com/Stream/Path",
+            "http://example.com/Stream/Path/",
             M3uParser.normalizeUrl("http://example.com/Stream/Path/")
         )
     }

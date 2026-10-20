@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.pulsestream.app.ui.screens
 
 import com.pulsestream.app.ui.screens.player.*
@@ -161,11 +163,6 @@ import com.pulsestream.app.util.ExternalPlayer
 import com.pulsestream.app.data.TvChannelRef
 import com.pulsestream.app.data.ResolvedSubtitle
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.TrustManagerFactory
-import javax.net.ssl.X509TrustManager
 import com.pulsestream.app.data.SkipSegment
 import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.data.StreamRepository
@@ -261,10 +258,16 @@ fun PlayerScreen(
      * created on disposed state (#9).
      */
     val disposed = remember { AtomicBoolean(false) }
+    /** Monotonic generation: a stale subtitle transform may never overwrite a newer selection/offset. */
+    val subtitleShiftGeneration = remember { AtomicInteger(0) }
     /** Non-null while the current stream is in a failed state (#4). */
     var playerError by remember { mutableStateOf<String?>(null) }
-    /** Auto-failover: counts consecutive auto-advance attempts (max 3). */
+    /** Auto-failover count; generic playback caps at 3, mobile Live uses its policy cap. */
     var autoFailoverCount by remember { mutableStateOf(0) }
+    /** Bounded recovery budget for streams that play and later stall, per channel session. */
+    var liveRebufferRecoveries by remember { mutableIntStateOf(0) }
+    /** Invalidates callbacks from listeners attached to released/replaced players. */
+    val activePlayerListenerGeneration = remember { AtomicInteger(0) }
     /** Nuvio parity: self-heal — probe Content-Type and retry once on format errors. */
     var mimeHealAttempted by remember { mutableStateOf(false) }
     /**
@@ -295,8 +298,8 @@ fun PlayerScreen(
                     healOnFormatError?.invoke(error)
                     return
                 }
-                // Auto-failover: on source error, automatically try the next stream
-                // (across all addons) up to 3 times before showing the error UI.
+                // Auto-failover: generic playback tries 3 sources; mobile Live
+                // uses its separate bounded forward-only policy.
                 // Also covers decoder errors (e.g. 4K on phones that can't decode it).
                 val isSourceError = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
                     error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ||
@@ -304,10 +307,23 @@ fun PlayerScreen(
                     error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
                     error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
                     error.errorCode == PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED
-                if (isSourceError && autoFailoverCount < 3) {
+                val mobileLiveFallback = com.pulsestream.app.data.LivePlaybackPolicy.shouldRetry(
+                    isLive = initialRequest.isLive,
+                    isTv = isTv,
+                    errorCode = error.errorCode,
+                    attemptsSoFar = autoFailoverCount
+                )
+                if ((isSourceError && autoFailoverCount < 3) || mobileLiveFallback) {
                     autoFailoverCount++
+                    if (initialRequest.isLive && !isTv) {
+                        com.pulsestream.app.data.SourceDiagnostics.record("Live playback", "fallback_attempt", 0)
+                    }
                     failoverToNextSource?.invoke(autoFailoverCount)
                     return
+                }
+                if (initialRequest.isLive && !isTv &&
+                    com.pulsestream.app.data.LivePlaybackPolicy.isRecoverableSourceError(error.errorCode)) {
+                    com.pulsestream.app.data.SourceDiagnostics.record("Live playback", "fallback_exhausted", 0)
                 }
                 autoFailoverCount = 0
                 playerError = error.message?.takeIf { it.isNotBlank() }
@@ -328,6 +344,23 @@ fun PlayerScreen(
                     MainActivity.pipVideoW = videoSize.width
                     MainActivity.pipVideoH = videoSize.height
                 }
+            }
+        }
+    }
+
+    /** Each player gets its own listener wrapper; stale instances become inert immediately. */
+    fun guardedPlayerListener(): Player.Listener {
+        val generation = activePlayerListenerGeneration.incrementAndGet()
+        return object : Player.Listener {
+            private fun isCurrent() = !disposed.get() && activePlayerListenerGeneration.get() == generation
+            override fun onPlayerError(error: PlaybackException) {
+                if (isCurrent()) errorListener.onPlayerError(error)
+            }
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isCurrent()) errorListener.onIsPlayingChanged(isPlaying)
+            }
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (isCurrent()) errorListener.onVideoSizeChanged(videoSize)
             }
         }
     }
@@ -369,23 +402,12 @@ fun PlayerScreen(
      * still-unresolved subtitle lists are resolved in the background and
      * attached via [attachResolvedSubtitles].
      */
-    /**
-     * Builds an OkHttp-backed data source factory for stream playback with
-     * Nuvio-parity networking: trust-all TLS (scoped to this client only),
-     * 15s timeouts, redirect following. The trust-all socket factory lives
-     * on this OkHttpClient instance — the addon API client and updater are
-     * untouched.
-     */
+    /** Builds the playback HTTP data source using platform TLS validation. */
     fun buildPlaybackDataSourceFactory(
-        headers: Map<String, String>
+        headers: Map<String, String>,
+        originUrl: String
     ): androidx.media3.datasource.DataSource.Factory {
-        ensurePlaybackTlsInstalled()
-        val httpFactory = DefaultHttpDataSource.Factory().apply {
-            setDefaultRequestProperties(headers)
-            setConnectTimeoutMs(15_000)
-            setReadTimeoutMs(15_000)
-            setAllowCrossProtocolRedirects(true)
-        }
+        val httpFactory = com.pulsestream.app.data.PlaybackHttp.factory(originUrl, headers)
         // DefaultDataSource delegates per URI scheme: FileDataSource for
         // file:// (downloads), HttpDataSource for http(s):// (streams).
         return DefaultDataSource.Factory(context, httpFactory)
@@ -398,7 +420,7 @@ fun PlayerScreen(
      */
     fun playbackMediaSourceFactory(req: PlaybackRequest): MediaSource.Factory {
         val playbackHeaders = PlaybackHeaders.buildPlaybackHeaders(req.headers, isTv)
-        val dataSourceFactory = buildPlaybackDataSourceFactory(playbackHeaders)
+        val dataSourceFactory = buildPlaybackDataSourceFactory(playbackHeaders, req.streamUrl)
         val cacheMb = settings.diskCacheMb
         return if (cacheMb > 0) {
             val cacheDataSourceFactory = CacheDataSource.Factory()
@@ -424,7 +446,9 @@ fun PlayerScreen(
         // Nuvio parity: infer HLS/DASH from the FULL URL (path + query) so
         // proxied URLs like /api/manifest?url=<encoded ...m3u8> play as HLS
         // instead of being misidentified as progressive.
-        val inferredMime = forcedMime ?: PlaybackHeaders.inferMimeType(req.streamUrl)
+        val inferredMime = forcedMime
+            ?: com.pulsestream.app.data.PlaybackContentProbe.recognizedMime(req.mimeType)
+            ?: PlaybackHeaders.inferMimeType(req.streamUrl)
         val videoItem = MediaItem.Builder()
             .setUri(req.streamUrl)
             .apply { inferredMime?.let { setMimeType(it) } }
@@ -533,8 +557,11 @@ fun PlayerScreen(
 
 
     var currentRequest by remember { mutableStateOf(initialRequest) }
+    LaunchedEffect(currentRequest.videoId, currentRequest.liveChannel) {
+        liveRebufferRecoveries = 0
+    }
     var player by remember {
-        mutableStateOf(buildExo(initialRequest).also { it.addListener(errorListener) })
+        mutableStateOf(buildExo(initialRequest).also { it.addListener(guardedPlayerListener()) })
     }
     val latestPlayer = rememberUpdatedState(player)
     val latestRequest = rememberUpdatedState(currentRequest)
@@ -584,33 +611,54 @@ fun PlayerScreen(
         val raw = rawResolvedSubs
         if (raw.isEmpty()) return
         val offset = effectiveSubOffsetMs()
+        val generation = subtitleShiftGeneration.incrementAndGet()
         ioScope.launch {
-            val shifted = shiftSubtitles(raw, offset, context.cacheDir)
-            if (!disposed.get()) resolvedSubs = shifted
+            val shifted = withContext(Dispatchers.IO) { shiftSubtitles(raw, offset, context.cacheDir) }
+            if (!disposed.get() && subtitleShiftGeneration.get() == generation) resolvedSubs = shifted
         }
     }
     // Self-heal handler: probe Content-Type, rebuild once with probed MIME.
     healOnFormatError = { error ->
+        val req = latestRequest.value
+        val old = latestPlayer.value
         ioScope.launch {
             val probed = probePlaybackContentType(
-                latestRequest.value.streamUrl,
-                PlaybackHeaders.buildPlaybackHeaders(latestRequest.value.headers, isTv)
+                req.streamUrl,
+                PlaybackHeaders.buildPlaybackHeaders(req.headers, isTv)
             )
-            if (probed != null && !disposed.get()) {
-                val req = latestRequest.value
-                val old = latestPlayer.value
-                // ExoPlayer must be created and accessed on the Main thread.
-                withContext(Dispatchers.Main) {
+            // A source switch/zap can finish while the probe is in flight.
+            // Never apply the old source's MIME (or release its replacement).
+            withContext(Dispatchers.Main) {
+                if (disposed.get() || latestRequest.value != req || latestPlayer.value !== old) return@withContext
+                if (probed != null) {
+                    val playWhenReady = old.playWhenReady
+                    val position = old.currentPosition
+                    val playbackSpeed = old.playbackParameters.speed
                     val fresh = buildExo(req, resolvedSubs, forcedMime = probed)
-                        .also { it.addListener(errorListener) }
+                        .also { it.addListener(guardedPlayerListener()) }
+                    playerView?.player = null
                     old.release()
                     player = fresh
                     playerError = null
+                    fresh.setPlaybackSpeed(playbackSpeed)
+                    fresh.seekTo(position)
                     fresh.prepare()
-                    fresh.play()
-                }
-            } else if (!disposed.get()) {
-                withContext(Dispatchers.Main) {
+                    fresh.playWhenReady = playWhenReady
+                } else if (com.pulsestream.app.data.LivePlaybackPolicy.shouldRetry(
+                        isLive = req.isLive,
+                        isTv = isTv,
+                        errorCode = error.errorCode,
+                        attemptsSoFar = autoFailoverCount
+                    )) {
+                    autoFailoverCount++
+                    com.pulsestream.app.data.SourceDiagnostics.record("Live playback", "fallback_attempt", 0)
+                    playerError = null
+                    failoverToNextSource?.invoke(autoFailoverCount)
+                } else {
+                    if (req.isLive && !isTv &&
+                        com.pulsestream.app.data.LivePlaybackPolicy.isRecoverableSourceError(error.errorCode)) {
+                        com.pulsestream.app.data.SourceDiagnostics.record("Live playback", "fallback_exhausted", 0)
+                    }
                     playerError = error.message?.takeIf { it.isNotBlank() }
                         ?: "Playback failed (code ${error.errorCode})"
                 }
@@ -689,6 +737,10 @@ fun PlayerScreen(
             player.setMediaItem(
                 MediaItem.Builder()
                     .setUri(currentRequest.streamUrl)
+                    .apply {
+                        (com.pulsestream.app.data.PlaybackContentProbe.recognizedMime(currentRequest.mimeType)
+                            ?: PlaybackHeaders.inferMimeType(currentRequest.streamUrl))?.let { setMimeType(it) }
+                    }
                     .setSubtitleConfigurations(subtitleConfigs(resolved, defaultUrl))
                     .build(),
                 pos
@@ -705,11 +757,26 @@ fun PlayerScreen(
     var episodesOpen by remember { mutableStateOf(false) }
     var downloadStream by remember { mutableStateOf<com.pulsestream.app.data.StreamItem?>(null) }
     var zapping by remember { mutableStateOf(false) }
-    var availableStreams by remember { mutableStateOf(initialRequest.streams) }
+    var availableStreams by remember {
+        mutableStateOf(com.pulsestream.app.ui.screens.player.mergePlayerSourceSet(
+            emptyList(), initialRequest.streams, includeHeadersInIdentity = initialRequest.isLive && !isTv
+        ))
+    }
+    /** Live fallback never retries the same URL/header tuple during this channel session. */
+    var attemptedLiveSourceIds by remember { mutableStateOf(emptySet<String>()) }
     /** Count of streams hidden because the device can't decode them (e.g. 4K on budget phones). */
     var hiddenIncompatibleCount by remember { mutableStateOf(0) }
     var streamsLoading by remember { mutableStateOf(false) }
     var streamsJob by remember { mutableStateOf<Job?>(null) }
+    /** A bounded late-source wait is invalidated by manual navigation and disposal. */
+    val liveFallbackGeneration = remember { AtomicInteger(0) }
+    var pendingLiveFallbackJob by remember { mutableStateOf<Job?>(null) }
+
+    fun preemptPendingLiveFallback() {
+        liveFallbackGeneration.incrementAndGet()
+        pendingLiveFallbackJob?.cancel()
+        pendingLiveFallbackJob = null
+    }
 
     // Resume prompt
     var resumeOfferMs by remember { mutableStateOf<Long?>(null) }
@@ -893,9 +960,13 @@ fun PlayerScreen(
         subLoadError = false
         resolvedSubs = emptyList()
         rawResolvedSubs = emptyList()
-        subOffsetOverrideMs = 0L
         if (all.isEmpty() || disposed.get()) return@LaunchedEffect
-        val resolved = resolveSubtitleFiles(all, context.cacheDir)
+        val resolved = resolveSubtitleFiles(
+            all, context.cacheDir,
+            requestHeaders = reqAtStart.headers,
+            streamOriginUrl = reqAtStart.streamUrl,
+            isTv = isTv
+        )
         // Superseded while resolving (source/episode/zap switch) — the newer
         // effect run owns the result.
         if (currentRequest != reqAtStart || disposed.get()) return@LaunchedEffect
@@ -903,7 +974,19 @@ fun PlayerScreen(
         // Store the raw files, then publish the timing-shifted list. The
         // separate attach effect picks up resolvedSubs.
         rawResolvedSubs = resolved
-        resolvedSubs = shiftSubtitles(resolved, effectiveSubOffsetMs(), context.cacheDir)
+        val generation = subtitleShiftGeneration.incrementAndGet()
+        val shifted = withContext(Dispatchers.IO) {
+            shiftSubtitles(resolved, effectiveSubOffsetMs(), context.cacheDir)
+        }
+        if (currentRequest == reqAtStart && subtitleShiftGeneration.get() == generation && !disposed.get()) {
+            resolvedSubs = shifted
+        }
+    }
+
+    // Reset per-title adjustment only when the actual title/episode changes;
+    // adding a subtitle or switching source does not discard the user's offset.
+    LaunchedEffect(currentRequest.metaId, currentRequest.videoId, currentRequest.season, currentRequest.episode) {
+        subOffsetOverrideMs = 0L
     }
 
     // Attach resolved subtitles to the player. Skips silently when the fresh
@@ -927,6 +1010,7 @@ fun PlayerScreen(
     /** Rebuilds the ExoPlayer around a new stream, preserving position. */
     fun replaceStream(newReq: PlaybackRequest, startAtMs: Long, autoplay: Boolean) {
         if (disposed.get()) return
+        preemptPendingLiveFallback()
         val gen = replaceGen.incrementAndGet()
         val old = player
         val oldReq = currentRequest
@@ -938,7 +1022,7 @@ fun PlayerScreen(
             replaceMutex.withLock {
                 if (gen != replaceGen.get() || disposed.get()) return@withLock
                 // #8: live TV never enters Continue Watching.
-                if (oldReq.type != "tv") {
+                if (!oldReq.isLive) {
                     repository.savePlayback(
                         title = oldReq.title,
                         poster = oldReq.poster,
@@ -959,6 +1043,13 @@ fun PlayerScreen(
                     if (gen != replaceGen.get() || disposed.get()) return@withContext
                     playerError = null
                     mimeHealAttempted = false
+                    if (oldReq.type != newReq.type || oldReq.videoId != newReq.videoId || oldReq.liveChannel != newReq.liveChannel) {
+                        streamsJob?.cancel()
+                        availableStreams = com.pulsestream.app.ui.screens.player.mergePlayerSourceSet(
+                            emptyList(), newReq.streams, includeHeadersInIdentity = newReq.isLive && !isTv
+                        )
+                        attemptedLiveSourceIds = emptySet()
+                    }
                     currentRequest = newReq
                     repository.pendingPlayback = newReq
                     resumeOfferMs = null
@@ -968,7 +1059,7 @@ fun PlayerScreen(
                     val carrySubs =
                         newReq.subtitles == oldReq.subtitles && resolvedSubs.isNotEmpty()
                     val carried = if (carrySubs) resolvedSubs else emptyList()
-                    val fresh = buildExo(newReq, carried).also { it.addListener(errorListener) }
+                    val fresh = buildExo(newReq, carried).also { it.addListener(guardedPlayerListener()) }
                     // #16: a fresh player defaults to 1x — re-apply the pill.
                     fresh.setPlaybackSpeed(speed)
                     subsAttached =
@@ -977,7 +1068,12 @@ fun PlayerScreen(
                     playerView?.player = null
                     player = fresh
                     old.release()
-                    fresh.seekTo(startAtMs)
+                    seekToPlaybackStart(
+                        isMobileLive = newReq.isLive && !isTv,
+                        startAtMs = startAtMs,
+                        seekToPosition = { fresh.seekTo(it) },
+                        seekToDefaultPosition = { fresh.seekToDefaultPosition() }
+                    )
                     fresh.prepare()
                     fresh.playWhenReady = autoplay
                     showControls = true
@@ -988,7 +1084,15 @@ fun PlayerScreen(
     }
 
     fun switchSource(stream: StreamItem) {
-        if (stream.url == currentRequest.streamUrl) return
+        if (!com.pulsestream.app.data.isPlayableLiveStreamUrl(stream.url)) return
+        preemptPendingLiveFallback()
+        val mobileLive = currentRequest.isLive && !isTv
+        val sameCandidate = if (mobileLive) {
+            com.pulsestream.app.data.LivePlaybackPolicy.isSameMobileLiveCandidate(
+                currentRequest.streamUrl, currentRequest.headers, stream.url, stream.headers
+            )
+        } else stream.url == currentRequest.streamUrl
+        if (sameCandidate) return
         sourcesOpen = false
         pokeIndicator(
             PlayerIndicator.Message("Source: ${streamQualityLabel(stream) ?: stream.sourceName ?: "switched"}")
@@ -997,6 +1101,7 @@ fun PlayerScreen(
             currentRequest.copy(
                 streamUrl = stream.url,
                 headers = stream.headers,
+                mimeType = stream.mimeType,
                 streamLabel = streamQualityLabel(stream),
                 sourceName = stream.sourceName
             ),
@@ -1014,7 +1119,7 @@ fun PlayerScreen(
     val zapChannels: List<TvChannelRef> = repository.pendingTvChannels
 
     fun canZap(): Boolean =
-        currentRequest.type == "tv" && zapChannels.size > 1
+        currentRequest.isLive && zapChannels.size > 1
 
     fun zapTo(index: Int) {
         // #9: never start zap work on disposed state (ghost audio).
@@ -1025,41 +1130,46 @@ fun PlayerScreen(
         // Same channel tapped twice — nothing to do. M3U ids are URLs and
         // videoId holds the URL too, so this covers addon AND M3U channels:
         // double-tap CH+ must not rebuild the player (#19).
-        if (target.metaId == currentRequest.videoId) return
+        if (target.metaId == currentRequest.videoId &&
+            (currentRequest.liveChannel == null || currentRequest.liveChannel == target)) return
+        preemptPendingLiveFallback()
         zapping = true
         ioScope.launch {
             try {
-                val zapTarget: Pair<String, Map<String, String>> = if (target.addonId == "m3u") {
-                    Pair(target.metaId, emptyMap())
+                val result = if (target.addonId == "m3u") {
+                    com.pulsestream.app.data.StreamResult(
+                        listOf(com.pulsestream.app.data.StreamItem(url = target.metaId)), emptyList())
                 } else {
-                    val result = withTimeoutOrNull(20_000) {
-                        repository.streamResultsFlow("tv", target.metaId)
-                            .firstOrNull { it.streams.isNotEmpty() }
+                    withTimeoutOrNull(20_000) {
+                        repository.liveStreamResultsFlow(target)
+                            .firstOrNull { it.streams.any { s -> com.pulsestream.app.data.isPlayableLiveStreamUrl(s.url) } }
                     }
-                    val stream = result?.streams?.firstOrNull()
-                    if (stream == null) {
-                        withContext(Dispatchers.Main) {
-                            pokeIndicator(PlayerIndicator.Message("No stream for ${target.name}"))
-                        }
-                        return@launch
-                    }
-                    Pair(stream.url, stream.headers)
                 }
-                val url = zapTarget.first
-                val headers = zapTarget.second
+                val playable = result?.streams.orEmpty().filter { com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url) }
+                val stream = playable.firstOrNull()
+                if (stream == null) {
+                    withContext(Dispatchers.Main) {
+                        pokeIndicator(PlayerIndicator.Message("No stream for ${target.name}"))
+                    }
+                    return@launch
+                }
                 repository.pendingTvIndex = list.indexOf(target)
                 withContext(Dispatchers.Main) {
                     pokeIndicator(PlayerIndicator.Message(target.name))
                     replaceStream(
                         currentRequest.copy(
-                            streamUrl = url,
-                            headers = headers,
+                            streamUrl = stream.url,
+                            headers = stream.headers,
+                            mimeType = stream.mimeType,
                             title = target.name,
                             poster = target.poster,
                             videoId = target.metaId,
+                            type = target.type,
+                            liveChannel = target,
                             streamLabel = "LIVE",
-                            sourceName = null,
-                            streams = emptyList()
+                            sourceName = stream.sourceName,
+                            streams = playable,
+                            subtitles = result?.subtitles.orEmpty()
                         ),
                         startAtMs = 0L,
                         autoplay = true
@@ -1080,17 +1190,29 @@ fun PlayerScreen(
     /** Quietly (re)fills the Sources list in the background, progressively. */
     fun refreshStreamsBackground(type: String, videoId: String) {
         streamsJob?.cancel()
+        val requestAtStart = currentRequest
+        val liveChannel = requestAtStart.liveChannel
         streamsJob = ioScope.launch {
             streamsLoading = true
             try {
-                repository.streamResultsFlow(type, videoId).collect { result ->
+                val results = if (liveChannel != null) repository.liveStreamResultsFlow(liveChannel)
+                    else repository.streamResultsFlow(type, videoId)
+                results.collect { result ->
                     if (result.streams.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
-                            val (playable, hidden) = ( result.streams to 0 )
-                            // Debounce: only update if list grew (avoids chunky recompositions)
-                            if (playable.size > availableStreams.size) {
-                                availableStreams = playable
-                                hiddenIncompatibleCount = hidden
+                            if (disposed.get() || currentRequest.type != type || currentRequest.videoId != videoId ||
+                                currentRequest.liveChannel != liveChannel) return@withContext
+                            val incoming = if (requestAtStart.isLive) result.streams.filter {
+                                com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url)
+                            } else result.streams
+                            val complete = com.pulsestream.app.ui.screens.player.mergePlayerSourceSet(
+                                availableStreams, incoming,
+                                includeHeadersInIdentity = requestAtStart.isLive && !isTv
+                            )
+                            // Preserve the original handoff while slow addons and debrid finish.
+                            if (complete != availableStreams) {
+                                availableStreams = complete
+                                hiddenIncompatibleCount = 0
                             }
                         }
                     }
@@ -1100,6 +1222,62 @@ fun PlayerScreen(
                 withContext(Dispatchers.Main + NonCancellable) { streamsLoading = false }
             }
         }
+    }
+
+    /** Awaits late Live candidates instead of abandoning fallback after an empty first emission. */
+    fun awaitMobileLiveFallbackCandidate() {
+        if (pendingLiveFallbackJob?.isActive == true) return
+        val requestAtStart = currentRequest
+        val playerAtStart = player
+        val generation = liveFallbackGeneration.incrementAndGet()
+        val liveChannel = requestAtStart.liveChannel
+        val current = StreamItem(url = requestAtStart.streamUrl, headers = requestAtStart.headers)
+        val job = ioScope.launch {
+            var selected: StreamItem? = null
+            try {
+                withTimeoutOrNull(20_000L) {
+                    val results = if (liveChannel != null) repository.liveStreamResultsFlow(liveChannel)
+                        else repository.streamResultsFlow(requestAtStart.type, requestAtStart.videoId)
+                    results.firstOrNull { result ->
+                        selected = withContext(Dispatchers.Main) {
+                            if (disposed.get() || liveFallbackGeneration.get() != generation ||
+                                currentRequest != requestAtStart || player !== playerAtStart) return@withContext null
+                            val incoming = result.streams.filter {
+                                com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url)
+                            }
+                            if (incoming.isEmpty()) return@withContext null
+                            val merged = com.pulsestream.app.ui.screens.player.mergePlayerSourceSet(
+                                availableStreams, incoming, includeHeadersInIdentity = true
+                            )
+                            if (merged != availableStreams) availableStreams = merged
+                            com.pulsestream.app.data.LivePlaybackPolicy.nextUntriedCandidate(
+                                merged, current, attemptedLiveSourceIds
+                            )?.also { candidate ->
+                                attemptedLiveSourceIds = attemptedLiveSourceIds +
+                                    com.pulsestream.app.data.LivePlaybackPolicy.candidateIdentity(candidate)
+                            }
+                        }
+                        selected != null
+                    }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A failed or completed source flow is equivalent to the bounded wait expiring.
+            }
+            withContext(Dispatchers.Main) {
+                if (disposed.get() || liveFallbackGeneration.get() != generation ||
+                    currentRequest != requestAtStart || player !== playerAtStart) return@withContext
+                if (selected != null) {
+                    switchSource(selected!!)
+                } else {
+                    playerError = "No other sources available"
+                    pokeIndicator(PlayerIndicator.Message("No other sources available"))
+                }
+                pendingLiveFallbackJob = null
+            }
+        }
+        pendingLiveFallbackJob = job
     }
 
     /** Re-prepares the current stream after a fatal error (#4). */
@@ -1117,11 +1295,30 @@ fun PlayerScreen(
      * Advances to the next available stream for this title (#4). When there is
      * nothing to advance to, says so and quietly refreshes the Sources list.
      */
-    fun nextSource() {
-        val streams = availableStreams
-        val cur = streams.indexOfFirst { it.url == currentRequest.streamUrl }
-        val next = if (streams.size < 2) null else streams[(cur + 1).mod(streams.size)]
+    fun nextSource(automaticLiveFallback: Boolean = false) {
+        val streams = availableStreams.filter { com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url) }
+        val mobileLive = currentRequest.isLive && !isTv
+        val next = if (automaticLiveFallback && mobileLive) {
+            val current = StreamItem(url = currentRequest.streamUrl, headers = currentRequest.headers)
+            attemptedLiveSourceIds = attemptedLiveSourceIds +
+                com.pulsestream.app.data.LivePlaybackPolicy.candidateIdentity(current)
+            com.pulsestream.app.data.LivePlaybackPolicy.nextUntriedCandidate(
+                streams, current, attemptedLiveSourceIds
+            )?.also { candidate ->
+                attemptedLiveSourceIds = attemptedLiveSourceIds +
+                    com.pulsestream.app.data.LivePlaybackPolicy.candidateIdentity(candidate)
+            }
+        } else {
+            val cur = streams.indexOfFirst {
+                it.url == currentRequest.streamUrl && it.headers == currentRequest.headers
+            }
+            if (streams.size < 2) null else streams[(cur + 1).mod(streams.size)]
+        }
         if (next == null) {
+            if (automaticLiveFallback && mobileLive) {
+                awaitMobileLiveFallbackCandidate()
+                return
+            }
             pokeIndicator(PlayerIndicator.Message("No other sources available"))
             refreshStreamsBackground(currentRequest.type, currentRequest.videoId)
             return
@@ -1131,8 +1328,102 @@ fun PlayerScreen(
 
     // Wire the auto-failover path now that the helpers exist.
     failoverToNextSource = { attempt ->
-        pokeIndicator(PlayerIndicator.Message("Trying next source… ($attempt/3)"))
-        nextSource()
+        val maxAttempts = if (currentRequest.isLive && !isTv)
+            com.pulsestream.app.data.LivePlaybackPolicy.MAX_MOBILE_LIVE_FAILOVERS else 3
+        pokeIndicator(PlayerIndicator.Message("Trying next source… ($attempt/$maxAttempts)"))
+        nextSource(automaticLiveFallback = currentRequest.isLive && !isTv)
+    }
+
+    // A mobile Live source can stall in BUFFERING forever without producing a
+    // Media3 error. Bound only first-start recovery: a source that has played
+    // once, VOD, TV, or an intentionally paused player is never interrupted.
+    LaunchedEffect(player, currentRequest, isTv) {
+        if (!currentRequest.isLive || isTv) return@LaunchedEffect
+        val watchedPlayer = player
+        var waitingSinceMs: Long? = null
+        val attemptsAtStart = autoFailoverCount
+        val replacementAtStart = replaceGen.get()
+        var hasEverPlayed = watchedPlayer.isPlaying
+        while (true) {
+            if (disposed.get() || watchedPlayer !== latestPlayer.value || currentRequest != latestRequest.value) {
+                return@LaunchedEffect
+            }
+            if (autoFailoverCount != attemptsAtStart || replaceGen.get() != replacementAtStart) {
+                return@LaunchedEffect
+            }
+            hasEverPlayed = hasEverPlayed || watchedPlayer.isPlaying
+            if (hasEverPlayed) return@LaunchedEffect
+            val state = watchedPlayer.playbackState
+            val buffering = state == Player.STATE_BUFFERING || state == Player.STATE_IDLE
+            val nowMs = System.nanoTime() / 1_000_000L
+            waitingSinceMs = liveStartupWaitingSince(
+                waitingSinceMs, nowMs, watchedPlayer.playWhenReady, buffering
+            )
+            val elapsedMs = waitingSinceMs?.let { nowMs - it } ?: 0L
+            if (shouldFailoverStalledLiveStartup(
+                    isLive = true,
+                    isTv = false,
+                    playWhenReady = watchedPlayer.playWhenReady,
+                    hasEverPlayed = hasEverPlayed,
+                    isBuffering = buffering,
+                    elapsedMs = elapsedMs
+                )) {
+                val maxAttempts = com.pulsestream.app.data.LivePlaybackPolicy.MAX_MOBILE_LIVE_FAILOVERS
+                if (autoFailoverCount < maxAttempts) {
+                    autoFailoverCount++
+                    com.pulsestream.app.data.SourceDiagnostics.record("Live playback", "startup_timeout", elapsedMs)
+                    failoverToNextSource?.invoke(autoFailoverCount)
+                } else {
+                    com.pulsestream.app.data.SourceDiagnostics.record("Live playback", "fallback_exhausted", 0)
+                    playerError = "Live source did not start"
+                }
+                return@LaunchedEffect
+            }
+            delay(500)
+        }
+    }
+
+    // Recovery after first successful playback: the startup watchdog above deliberately
+    // stops once a stream has played. A separate bounded watchdog handles streams that
+    // subsequently stall without a Media3 error. It never acts while paused or seeking.
+    LaunchedEffect(player, currentRequest, isTv) {
+        if (!currentRequest.isLive || isTv) return@LaunchedEffect
+        val watchedPlayer = player
+        var hasPlayed = watchedPlayer.isPlaying
+        var rebufferSinceMs: Long? = null
+        while (true) {
+            if (disposed.get() || watchedPlayer !== latestPlayer.value || currentRequest != latestRequest.value) {
+                return@LaunchedEffect
+            }
+            hasPlayed = hasPlayed || watchedPlayer.isPlaying
+            if (!hasPlayed || !watchedPlayer.playWhenReady || watchedPlayer.playbackState != Player.STATE_BUFFERING) {
+                rebufferSinceMs = null
+            } else {
+                val nowMs = System.nanoTime() / 1_000_000L
+                rebufferSinceMs = rebufferSinceMs ?: nowMs
+                if (com.pulsestream.app.ui.screens.player.shouldFailoverStalledLiveRebuffer(
+                        isLive = currentRequest.isLive,
+                        isTv = isTv,
+                        playWhenReady = watchedPlayer.playWhenReady,
+                        hasEverPlayed = hasPlayed,
+                        isBuffering = watchedPlayer.playbackState == Player.STATE_BUFFERING,
+                        elapsedMs = nowMs - rebufferSinceMs!!
+                    )) {
+                    val maxRecoveries = 2
+                    if (liveRebufferRecoveries < maxRecoveries) {
+                        liveRebufferRecoveries++
+                        com.pulsestream.app.data.SourceDiagnostics.record("Live playback", "rebuffer_timeout", nowMs - rebufferSinceMs!!)
+                        pokeIndicator(PlayerIndicator.Message("Live stream stalled — trying another source…"))
+                        nextSource(automaticLiveFallback = true)
+                    } else {
+                        com.pulsestream.app.data.SourceDiagnostics.record("Live playback", "fallback_exhausted", nowMs - rebufferSinceMs!!)
+                        playerError = "Live stream stopped responding. Try Retry or choose another source."
+                    }
+                    return@LaunchedEffect
+                }
+            }
+            delay(500)
+        }
     }
 
     fun playEpisode(video: Video) {
@@ -1143,12 +1434,12 @@ fun PlayerScreen(
         ioScope.launch {
             val type = currentRequest.type
             val result = withTimeoutOrNull(20_000) {
-                repository.streamResultsFlow(type, video.id).firstOrNull { it.streams.isNotEmpty() }
+                repository.streamResultsFlow(type, video.id).firstOrNull { it.streams.any { stream -> com.pulsestream.app.data.isPlayableLiveStreamUrl(stream.url) } }
             }
             // Back to the main thread: everything below touches Compose state.
             withContext(Dispatchers.Main) {
                 val (playableStreams, hidden) = result?.streams?.let { ( it to 0 ) } ?: (emptyList<com.pulsestream.app.data.StreamItem>() to 0)
-                val stream = playableStreams.firstOrNull()
+                val stream = playableStreams.firstOrNull { com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url) }
                 if (stream == null) {
                     pokeIndicator(PlayerIndicator.Message("No sources found for this episode"))
                 } else {
@@ -1159,6 +1450,7 @@ fun PlayerScreen(
                         currentRequest.copy(
                             streamUrl = stream.url,
                             headers = stream.headers,
+                            mimeType = stream.mimeType,
                             title = "$showName S${video.season}E${video.episode}",
                             poster = video.thumbnail ?: currentRequest.poster,
                             videoId = video.id,
@@ -1173,8 +1465,6 @@ fun PlayerScreen(
                         startAtMs = 0L,
                         autoplay = true
                     )
-                    // Keep filling the Sources list with the remaining addons.
-                    refreshStreamsBackground(type, video.id)
                 }
                 switchingMedia = false
             }
@@ -1312,7 +1602,7 @@ fun PlayerScreen(
         val pl: Player = latestPlayer.value
         val req = latestRequest.value
         // #8: live TV never enters Continue Watching.
-        if (req.type == "tv") return
+        if (req.isLive) return
         // Trailers never enter Continue Watching either.
         if (req.isTrailer) return
         val pos = pl.currentPosition
@@ -1404,30 +1694,46 @@ fun PlayerScreen(
         }
     }
 
-    // One-time init: resume prompt / autoplay, then prepare.
+    // One-time init: begin buffering immediately, then apply saved-position / autoplay policy.
     LaunchedEffect(Unit) {
-        val saved = repository.getSavedPosition(initialRequest.streamUrl)
+        val startupPlayer = player
+        val isLocalFile = initialRequest.streamUrl.startsWith("file:", true) || initialRequest.streamUrl.startsWith("content:", true)
+        val prepareEarly = initialRequest.streams.isNotEmpty() || initialRequest.isLive || isLocalFile
+        val saved = preparePlayerBeforeSavedPositionLookup(
+            preparePlayer = {
+                // Prepare with playback held so a resume prompt never leaks audio/video
+                // while progress storage (or a fresh-URL lookup) is still pending.
+                startupPlayer.playWhenReady = false
+                startupPlayer.prepare()
+            },
+            loadSavedPosition = {
+                if (initialRequest.isLive && !isTv) 0L
+                else repository.getSavedPosition(initialRequest.streamUrl)
+            },
+            prepareEarly = prepareEarly
+        )
         var req: PlaybackRequest = initialRequest
+        var rebuiltForFreshResumeUrl = false
         var offerResume = saved > 0
         // Local files (downloads): never re-resolve sources — play the file directly.
-        val isLocalFile = initialRequest.streamUrl.startsWith("file://")
-        if (saved > 0 && req.streams.isEmpty() && req.type != "tv" && !isLocalFile && !disposed.get()) {
+        if (saved > 0 && req.streams.isEmpty() && !req.isLive && !isLocalFile && !disposed.get()) {
             // #15: Continue Watching resume — re-resolve the title's streams
             // first so signed/expiring URLs are fresh, and resume at the saved
             // position on the fresh URL. Falls back to the stored URL when
             // re-resolution fails.
             val fresh = withTimeoutOrNull(20_000) {
                 repository.streamResultsFlow(req.type, req.videoId)
-                    .firstOrNull { it.streams.isNotEmpty() }
+                    .firstOrNull { it.streams.any { stream -> com.pulsestream.app.data.isPlayableLiveStreamUrl(stream.url) } }
             }
             val (playableFresh, hiddenFresh) = fresh?.streams?.let { ( it to 0 ) } ?: (emptyList<com.pulsestream.app.data.StreamItem>() to 0)
-            val stream = playableFresh.firstOrNull()
+            val stream = playableFresh.firstOrNull { com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url) }
             if (fresh != null && stream != null && !disposed.get()) {
                 availableStreams = playableFresh
                 hiddenIncompatibleCount = hiddenFresh
                 req = req.copy(
                     streamUrl = stream.url,
                     headers = stream.headers,
+                    mimeType = stream.mimeType,
                     streamLabel = streamQualityLabel(stream),
                     sourceName = stream.sourceName,
                     subtitles = fresh.subtitles,
@@ -1448,15 +1754,23 @@ fun PlayerScreen(
             val oldPlayer = player
             playerView?.player = null
             oldPlayer.release()
-            val rebuilt = buildExo(req).also { it.addListener(errorListener) }
+            val rebuilt = buildExo(req).also { it.addListener(guardedPlayerListener()) }
             rebuilt.setPlaybackSpeed(speed)
             player = rebuilt
             mimeHealAttempted = false
             currentRequest = req
+            rebuiltForFreshResumeUrl = true
         }
         val p = player
-        p.seekTo(saved)
-        p.prepare()
+        seekToPlaybackStart(
+            isMobileLive = req.isLive && !isTv,
+            startAtMs = saved,
+            seekToPosition = { p.seekTo(it) },
+            seekToDefaultPosition = { p.seekToDefaultPosition() }
+        )
+        // The original instance is already prepared above. A refreshed URL has
+        // a newly-built player and still needs its first prepare after seekTo.
+        if (rebuiltForFreshResumeUrl || !prepareEarly) p.prepare()
         if (offerResume) {
             p.playWhenReady = false
             resumeOfferMs = saved
@@ -1467,12 +1781,16 @@ fun PlayerScreen(
             p.playWhenReady = false
             showControls = true
         }
-        // Sources sheet fallback: if we arrived without a stream list
-        // (e.g. from Continue Watching), fill it quietly in the background.
-        // Local files (downloads): no sources to fetch — play the file directly.
-        if (availableStreams.isEmpty() && !isLocalFile) {
-            refreshStreamsBackground(req.type, req.videoId)
-        }
+    }
+
+    // An early Play action may hand off only the first addon's results. Always finish
+    // the same title's complete addon flow; a source switch alone does not restart it.
+    LaunchedEffect(currentRequest.type, currentRequest.videoId, currentRequest.liveChannel) {
+        val req = currentRequest
+        val local = req.streamUrl.startsWith("file:", true) || req.streamUrl.startsWith("content:", true)
+        val playlistChannel = req.isLive && req.liveChannel == null &&
+            com.pulsestream.app.data.isPlayableLiveStreamUrl(req.videoId)
+        if (!local && !playlistChannel) refreshStreamsBackground(req.type, req.videoId)
     }
 
     // Skip segments follow the title, not the source — fetch once per episode.
@@ -1525,6 +1843,7 @@ fun PlayerScreen(
         onDispose {
             // #9: from here on, no late work may build a player (ghost audio).
             disposed.set(true)
+            preemptPendingLiveFallback()
             savePosition()
             scrobbler.shutdown()
             // #9: kill late zap/episode/source-switch work. The scope itself
@@ -1729,7 +2048,12 @@ fun PlayerScreen(
         // Suppressed on a fatal error — the error overlay takes its place (#4).
         if ((isBuffering || switchingMedia) && playerError == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DotsLoadingIndicator(if (switchingMedia) "Loading episode…" else "Finding source…")
+                DotsLoadingIndicator(when {
+                    switchingMedia && !currentRequest.isLive -> "Loading episode…"
+                    currentRequest.isLive && player.currentPosition > 0L -> "Buffering live stream…"
+                    currentRequest.isLive -> "Connecting to live stream…"
+                    else -> "Finding source…"
+                })
             }
         }
 
@@ -1969,15 +2293,17 @@ fun PlayerScreen(
                             )
                         }
                     }
-                    IconButton(
-                        onClick = { seekByWithFeedback(-10_000) },
-                        modifier = Modifier.then(act("rew") { seekByWithFeedback(-10_000) })
-                            .tvFocusRing(RoundedCornerShape(50))
-                    ) {
-                        Icon(
-                            Icons.Filled.Replay10, "Back 10 seconds",
-                            tint = TextPrimary, modifier = Modifier.size(56.dp)
-                        )
+                    if (!currentRequest.isLive) {
+                        IconButton(
+                            onClick = { seekByWithFeedback(-10_000) },
+                            modifier = Modifier.then(act("rew") { seekByWithFeedback(-10_000) })
+                                .tvFocusRing(RoundedCornerShape(50))
+                        ) {
+                            Icon(
+                                Icons.Filled.Replay10, "Back 10 seconds",
+                                tint = TextPrimary, modifier = Modifier.size(56.dp)
+                            )
+                        }
                     }
                     Box(
                         modifier = Modifier
@@ -1999,15 +2325,17 @@ fun PlayerScreen(
                             )
                         }
                     }
-                    IconButton(
-                        onClick = { seekByWithFeedback(10_000) },
-                        modifier = Modifier.then(act("fwd") { seekByWithFeedback(10_000) })
-                            .tvFocusRing(RoundedCornerShape(50))
-                    ) {
-                        Icon(
-                            Icons.Filled.Forward10, "Forward 10 seconds",
-                            tint = TextPrimary, modifier = Modifier.size(56.dp)
-                        )
+                    if (!currentRequest.isLive) {
+                        IconButton(
+                            onClick = { seekByWithFeedback(10_000) },
+                            modifier = Modifier.then(act("fwd") { seekByWithFeedback(10_000) })
+                                .tvFocusRing(RoundedCornerShape(50))
+                        ) {
+                            Icon(
+                                Icons.Filled.Forward10, "Forward 10 seconds",
+                                tint = TextPrimary, modifier = Modifier.size(56.dp)
+                            )
+                        }
                     }
                     if (canZap()) {
                         IconButton(
@@ -2032,23 +2360,58 @@ fun PlayerScreen(
                         .padding(horizontal = 20.dp)
                         .padding(bottom = 14.dp)
                 ) {
-                    SlimSeekBar(
-                        positionMs = positionMs,
-                        durationMs = durationMs,
-                        onSeek = { player.seekTo(it) },
-                        isTv = isTv,
-                        onSeekDelta = { seekByWithFeedback(it) },
-                        onFocusChanged = { seekbarFocused = it }
-                    )
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TimeChip(formatMs(positionMs))
-                        TimeChip(formatMs(durationMs))
+                    if (currentRequest.isLive) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Surface(
+                                color = Color(0xFFE5484D),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    "LIVE",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                            Text(
+                                currentRequest.title,
+                                color = TextPrimary,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                when { switchingMedia -> "Switching…"; isBuffering -> "Buffering…"; else -> "On air" },
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    } else {
+                        SlimSeekBar(
+                            positionMs = positionMs,
+                            durationMs = durationMs,
+                            onSeek = { player.seekTo(it) },
+                            isTv = isTv,
+                            onSeekDelta = { seekByWithFeedback(it) },
+                            onFocusChanged = { seekbarFocused = it }
+                        )
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TimeChip(formatMs(positionMs))
+                            TimeChip(formatMs(durationMs))
+                        }
+                        Spacer(Modifier.height(10.dp))
                     }
-                    Spacer(Modifier.height(10.dp))
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Box(
                             modifier = Modifier.liquidGlass(RoundedCornerShape(50))
@@ -2419,132 +2782,27 @@ fun PlayerScreen(
             }
         }
 
-        // Sources switcher: pick another stream without leaving the player.
+        // In-player Sources (Design I): full-width banner + tabs + cards.
         if (sourcesOpen) {
-            val browserState = rememberStreamBrowserState(availableStreams, repository.settings)
             ModalBottomSheet(
                 onDismissRequest = { sourcesOpen = false },
-                sheetState = rememberModalBottomSheetState(),
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                dragHandle = null,
                 containerColor = Color(0xFF14141F)
             ) {
-                Column(Modifier.tvSheetFocus()) {
-                // Movie banner: full-width backdrop with title overlay (user's order).
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(180.dp)
-                ) {
-                    // Backdrop image (poster, blurred to fill width)
-                    com.pulsestream.app.ui.components.SafePosterImage(
-                        model = currentRequest.poster,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    // Dark gradient for text readability
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                androidx.compose.ui.graphics.Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color.Transparent,
-                                        Color(0xFF14141F).copy(alpha = 0.7f),
-                                        Color(0xFF14141F)
-                                    )
-                                )
-                            )
-                    )
-                    // Title + count at the bottom
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(horizontal = 20.dp, vertical = 12.dp)
-                    ) {
-                        Text(
-                            text = currentRequest.title,
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            maxLines = 2
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            text = "${availableStreams.size} sources available",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-                    }
-                }
-                Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
-                    if (hiddenIncompatibleCount > 0) {
-                        Text(
-                            "$hiddenIncompatibleCount 4K stream${if (hiddenIncompatibleCount > 1) "s" else ""} hidden — your device doesn't support 4K playback",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary.copy(alpha = 0.7f),
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        )
-                    }
-                }
-                AddonTabs(browserState, modifier = Modifier.padding(bottom = 4.dp))
-                // Quality filter pills (user's order): dynamic, only available qualities.
-                com.pulsestream.app.ui.components.QualityPills(
-                    browserState,
-                    modifier = Modifier.padding(bottom = 8.dp)
+                com.pulsestream.app.ui.screens.player.PlayerSourcesContent(
+                    title = currentRequest.title,
+                    streams = availableStreams,
+                    selectedUrl = currentRequest.streamUrl,
+                    loading = streamsLoading,
+                    onPick = { switchSource(it) },
+                    onDownload = { downloadStream = it },
+                    onRetry = { refreshStreamsBackground(currentRequest.type, currentRequest.videoId) },
+                    onClose = { sourcesOpen = false },
+                    modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f),
+                    settings = repository.settings,
+                    poster = currentRequest.poster
                 )
-                when {
-                    availableStreams.isEmpty() && streamsLoading -> {
-                        Box(
-                            Modifier.fillMaxWidth().padding(32.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                CircularProgressIndicator(color = LocalPalette.current.accent)
-                                Spacer(Modifier.height(12.dp))
-                                Text("Finding sources…", color = TextSecondary)
-                            }
-                        }
-                    }
-                    availableStreams.isEmpty() -> {
-                        Column(
-                            Modifier.fillMaxWidth().padding(32.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                "No sources loaded for this title.",
-                                color = TextSecondary,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            TextButton(
-                                onClick = {
-                                    refreshStreamsBackground(
-                                        currentRequest.type,
-                                        currentRequest.videoId
-                                    )
-                                }
-                            ) {
-                                Text("Load sources", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                    else -> {
-                        androidx.compose.runtime.CompositionLocalProvider(
-                            LocalBadgeStyleKey provides repository.settings.streamCardStyle
-                        ) {
-                            StreamList(
-                                streams = browserState.filtered,
-                                onPick = { switchSource(it) },
-                                modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(
-                                    start = 4.dp, end = 4.dp, bottom = 32.dp
-                                ),
-                                selectedUrl = currentRequest.streamUrl,
-                                onDownload = { downloadStream = it }
-                            )
-                        }
-                    }
-                }
-                            }
             }
         }
 
@@ -2671,4 +2929,3 @@ fun PlayerScreen(
         }
     }
 }
-

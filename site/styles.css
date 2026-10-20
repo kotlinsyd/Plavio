@@ -79,11 +79,6 @@ body {
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
 }
 .dl-gh:hover { box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55); }
-.dl-tv {
-  background: linear-gradient(135deg, #0ea5a4, #2563eb);
-  box-shadow: 0 10px 34px rgba(14, 165, 164, 0.4);
-}
-.dl-tv:hover { box-shadow: 0 14px 40px rgba(14, 165, 164, 0.55); }
 .dl-ver {
   font-size: 0.8rem;
   font-weight: 600;
@@ -92,27 +87,6 @@ body {
   border-radius: 999px;
 }
 .dl-note { color: var(--muted); font-size: 0.9rem; margin-top: 14px; }
-
-/* ---------- TV app announcement ---------- */
-.tv-banner {
-  max-width: 640px;
-  margin: 0 auto 8px;
-  padding: 14px 22px;
-  border-radius: 16px;
-  border: 1px solid transparent;
-  background:
-    linear-gradient(var(--card), var(--card)) padding-box,
-    var(--grad) border-box;
-  color: var(--text);
-  text-align: center;
-  font-size: 1rem;
-}
-.tv-banner strong {
-  background: var(--grad);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
 
 /* ---------- sections ---------- */
 section { padding: 48px 20px; max-width: 1000px; margin: 0 auto; }

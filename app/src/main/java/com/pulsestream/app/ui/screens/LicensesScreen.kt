@@ -58,6 +58,7 @@ private val OSS_LIBRARIES = listOf(
     OssLibrary("Coil", "Apache License 2.0", "https://coil-kt.github.io/coil/"),
     OssLibrary("Firebase Crashlytics", "Apache License 2.0", "https://firebase.google.com/docs/crashlytics"),
     OssLibrary("Firebase Analytics", "Apache License 2.0", "https://firebase.google.com/docs/analytics"),
+    OssLibrary("NewPipeExtractor", "GNU GPL v3.0", "https://github.com/TeamNewPipe/NewPipeExtractor"),
     OssLibrary("FFmpeg (audio decoders)", "LGPL 2.1 or later", "https://ffmpeg.org"),
 )
 
@@ -115,11 +116,16 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
 END OF TERMS AND CONDITIONS"""
 
-private const val LGPL_NOTE = """FFmpeg is licensed under the GNU Lesser General Public License (LGPL) version 2.1 or later. Plavio ships FFmpeg's audio decoders as a dynamically loaded native library (libffmpeg.so); the library is used unmodified.
+private const val LGPL_NOTE = """The project identifies the bundled FFmpeg audio decoder as LGPL 2.1-or-later and loads it as a native library (libffmpegJNI.so). The package contains ARM32 and ARM64 binaries.
 
-Under the LGPL you have the right to obtain, modify, and replace the FFmpeg library. The complete corresponding source code for the FFmpeg build used in Plavio is available at https://ffmpeg.org/download.html — contact us via the project's GitHub or Discord and we will point you to the exact version and build configuration.
+The exact FFmpeg revision, source commit, patches, configure options, toolchain, and corresponding source for these binaries are not recorded in this source package. Their build/source provenance is unknown. The generic FFmpeg download page is not identified as the corresponding source for this binary. The distributor should identify and provide the matching source and build materials required by the applicable LGPL terms.
 
 Full license text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html"""
+
+private const val GPL_NOTE = """NewPipeExtractor is used for YouTube trailer stream extraction. The dependency declared by this project is TeamNewPipe/NewPipeExtractor v0.26.5, under the GNU General Public License v3.0.
+
+Project source and license: https://github.com/TeamNewPipe/NewPipeExtractor
+GPL v3.0 text: https://www.gnu.org/licenses/gpl-3.0.html"""
 
 private const val MIT_LICENSE_TEXT = """MIT License
 
@@ -225,6 +231,7 @@ fun LicensesScreen(
                             Text(
                                 text = when {
                                     lib.license.startsWith("LGPL") -> LGPL_NOTE
+                                    lib.license.startsWith("GNU GPL") -> GPL_NOTE
                                     lib.license == "MIT License" -> MIT_LICENSE_TEXT
                                     else -> APACHE_2_0_TEXT
                                 },

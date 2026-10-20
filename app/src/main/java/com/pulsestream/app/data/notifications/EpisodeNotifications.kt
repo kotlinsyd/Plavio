@@ -6,6 +6,9 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.work.Constraints
@@ -102,6 +105,9 @@ object EpisodeNotifications {
     ) {
         val appContext = context.applicationContext
         if (!NotificationManagerCompat.from(appContext).areNotificationsEnabled()) return
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                appContext, Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED) return
         ensureChannel(appContext)
 
         val route = Routes.detail(addonId, "series", metaId)
@@ -135,6 +141,10 @@ object EpisodeNotifications {
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
 
-        NotificationManagerCompat.from(appContext).notify(route.hashCode(), notification)
+        try {
+            NotificationManagerCompat.from(appContext).notify(route.hashCode(), notification)
+        } catch (_: SecurityException) {
+            // Permission can be revoked between the check and notify().
+        }
     }
 }

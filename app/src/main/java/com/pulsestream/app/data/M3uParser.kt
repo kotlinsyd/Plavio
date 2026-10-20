@@ -4,6 +4,7 @@ import com.pulsestream.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
@@ -103,9 +104,9 @@ object M3uParser {
             } else if (!line.startsWith("#")) {
                 val name = pendingName
                 if (name != null && (line.startsWith("http://") || line.startsWith("https://"))) {
-                    // Dedup on the normalized URL: "http://x" and "http://x/"
-                    // (or :80, or HOST case) are the same stream.
-                    if (seen.add(normalizeUrl(line))) {
+                    // Keep the supplied stream URL intact; normalize only the
+                    // comparison key (case/default-port differences).
+                    if (seen.add(comparisonKey(line))) {
                         out.add(M3uChannel(name, line, pendingLogo, pendingGroup))
                     }
                 }
@@ -118,27 +119,16 @@ object M3uParser {
     }
 
     /**
-     * Normalizes a stream/playlist URL for dedup and comparison: lowercase
-     * scheme + host, drop default ports, strip a trailing slash. The path
-     * and query keep their case (they can be case-sensitive).
+     * A comparison key only: OkHttp canonicalizes scheme/host/default ports,
+     * preserves credentials, IPv6 brackets, path trailing slash and query.
+     * The returned key must never replace the original URL used for fetching.
      */
-    fun normalizeUrl(url: String): String {
-        val u = url.trim()
-        return try {
-            val parsed = java.net.URI(u)
-            val scheme = (parsed.scheme ?: "http").lowercase()
-            val host = parsed.host?.lowercase() ?: return u.trimEnd('/')
-            var port = parsed.port
-            if ((scheme == "http" && port == 80) || (scheme == "https" && port == 443)) port = -1
-            val path = (parsed.rawPath ?: "").trimEnd('/')
-            val query = parsed.rawQuery?.let { "?$it" } ?: ""
-            buildString {
-                append(scheme).append("://").append(host)
-                if (port != -1) append(':').append(port)
-                append(path).append(query)
-            }
-        } catch (_: Exception) {
-            u.trimEnd('/')
-        }
+    fun comparisonKey(url: String): String {
+        val supplied = url.trim()
+        return supplied.toHttpUrlOrNull()?.newBuilder()?.fragment(null)?.build()?.toString()
+            ?: supplied
     }
+
+    /** Backwards-compatible alias for existing cache/dedup callers. */
+    fun normalizeUrl(url: String): String = comparisonKey(url)
 }

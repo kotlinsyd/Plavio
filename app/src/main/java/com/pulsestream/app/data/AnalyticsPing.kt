@@ -10,13 +10,13 @@ import java.net.URLEncoder
 import java.util.UUID
 
 /**
- * First-launch install ping for the PlavioHD stats backend.
+ * Optional first-launch install ping for the PlavioHD stats backend.
  *
- * Sends exactly one fire-and-forget HTTPS GET per install:
+ * When optional telemetry is enabled, sends at most one fire-and-forget HTTPS GET per install:
  *   /app-ping?uuid={random UUID}&ver={versionName}&flavor={mobile|tv}
- * No personal data, no device identifiers — the UUID is random and exists
- * only to de-duplicate installs. Never blocks startup; failures are silent
- * (retried on next launch until the first ping succeeds).
+ * The random install UUID is a pseudonymous identifier, not a guarantee of
+ * anonymity. No request is made unless the user enabled optional telemetry.
+ * Never blocks startup; failures are silent (retried on a later launch).
  */
 object AnalyticsPing {
     private const val ENDPOINT = "https://plaviohd.edon.workers.dev/app-ping"
@@ -29,6 +29,7 @@ object AnalyticsPing {
 
     /** Sends the one-time install ping. Safe to call on every launch. */
     suspend fun trackInstallOnce(context: Context) = withContext(Dispatchers.IO) {
+        if (!TelemetryConsent.enabled(context)) return@withContext
         val p = prefs(context.applicationContext)
         if (p.getBoolean(KEY_PINGED, false)) return@withContext
         val uuid = p.getString(KEY_UUID, null) ?: UUID.randomUUID().toString().also {

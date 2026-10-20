@@ -153,94 +153,48 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
     }
 }
 
-/**
- * v8 → v9: `custom_lists` + `custom_list_items` tables for user-created
- * named lists. Composite primary key (listId, itemKey) prevents duplicates.
- * NOTE: register in PulseApp.buildDatabase()'s addMigrations chain —
- * that file is intentionally untouched by the custom-lists change.
- */
+/** Creates Room's exact custom-list schema and copies any recoverable legacy rows. */
+private fun rebuildCustomListTables(db: SupportSQLiteDatabase) {
+    fun columns(table: String): Set<String> {
+        if (db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='$table'").use { it.count == 0 }) return emptySet()
+        return db.query("PRAGMA table_info(`$table`)").use { cursor ->
+            buildSet { while (cursor.moveToNext()) add(cursor.getString(cursor.getColumnIndexOrThrow("name"))) }
+        }
+    }
+    fun copyTable(table: String, required: List<String>, defaults: Map<String, String>) {
+        val existing = columns(table)
+        val backup = "${table}_migration_backup"
+        db.execSQL("DROP TABLE IF EXISTS `$backup`")
+        if (existing.isNotEmpty()) db.execSQL("ALTER TABLE `$table` RENAME TO `$backup`")
+        when (table) {
+            "custom_lists" -> db.execSQL("CREATE TABLE `custom_lists` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+            "custom_list_items" -> db.execSQL("CREATE TABLE `custom_list_items` (`listId` TEXT NOT NULL, `itemKey` TEXT NOT NULL, `addonId` TEXT NOT NULL, `type` TEXT NOT NULL, `metaId` TEXT NOT NULL, `name` TEXT NOT NULL, `poster` TEXT, `addedAt` INTEGER NOT NULL, PRIMARY KEY(`listId`, `itemKey`))")
+        }
+        if (existing.isNotEmpty()) {
+            val usable = required.filter { it in existing || it in defaults }
+            if (required.take(2).all { it in usable }) {
+                val expr = usable.joinToString(",") { col -> if (col in existing) "`$col`" else defaults.getValue(col) }
+                val cols = usable.joinToString(",") { "`$it`" }
+                db.execSQL("INSERT OR IGNORE INTO `$table` ($cols) SELECT $expr FROM `$backup`")
+            }
+            db.execSQL("DROP TABLE IF EXISTS `$backup`")
+        }
+    }
+    copyTable("custom_lists", listOf("id", "name", "createdAt"), mapOf("name" to "''", "createdAt" to "0"))
+    copyTable("custom_list_items", listOf("listId", "itemKey", "addonId", "type", "metaId", "name", "poster", "addedAt"), mapOf("addonId" to "''", "type" to "''", "metaId" to "''", "name" to "''", "poster" to "NULL", "addedAt" to "0"))
+}
+
+/** v8 → v9: introduce custom lists without discarding any pre-existing recoverable tables. */
 val MIGRATION_8_9 = object : Migration(8, 9) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        // Drop existing tables first to ensure clean schema (handles cases where
-        // test builds created tables with slightly different schemas)
-        db.execSQL("DROP TABLE IF EXISTS custom_list_items")
-        db.execSQL("DROP TABLE IF EXISTS custom_lists")
-        db.execSQL(
-            """CREATE TABLE IF NOT EXISTS custom_lists (
-                id TEXT NOT NULL PRIMARY KEY,
-                name TEXT NOT NULL,
-                createdAt INTEGER NOT NULL
-            )"""
-        )
-        db.execSQL(
-            """CREATE TABLE IF NOT EXISTS custom_list_items (
-                listId TEXT NOT NULL,
-                itemKey TEXT NOT NULL,
-                addonId TEXT NOT NULL,
-                type TEXT NOT NULL,
-                metaId TEXT NOT NULL,
-                name TEXT NOT NULL,
-                poster TEXT,
-                addedAt INTEGER NOT NULL,
-                PRIMARY KEY (listId, itemKey)
-            )"""
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS index_custom_list_items_listId ON custom_list_items (listId)"
-        )
-    }
+    override fun migrate(db: SupportSQLiteDatabase) = rebuildCustomListTables(db)
 }
 
-/**
- * v9 → v10: Rebuild `custom_lists` + `custom_list_items` with the exact
- * schema Room expects. Fixes "Migration didn't properly handle:
- * custom_list_items" crashes (126 events) where the v8→9 migration left
- * a schema mismatch on some devices. Data in these tables is user-created
- * lists; the tables are dropped and recreated empty — the alternative is
- * a crash loop on every app start.
- */
+/** v9 → v10: normalize custom-list schema while preserving every compatible row. */
 val MIGRATION_9_10 = object : Migration(9, 10) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("DROP TABLE IF EXISTS custom_list_items")
-        db.execSQL("DROP TABLE IF EXISTS custom_lists")
-        db.execSQL(
-            """CREATE TABLE custom_lists (
-                id TEXT NOT NULL PRIMARY KEY,
-                name TEXT NOT NULL,
-                createdAt INTEGER NOT NULL
-            )"""
-        )
-        db.execSQL(
-            """CREATE TABLE custom_list_items (
-                listId TEXT NOT NULL,
-                itemKey TEXT NOT NULL,
-                addonId TEXT NOT NULL,
-                type TEXT NOT NULL,
-                metaId TEXT NOT NULL,
-                name TEXT NOT NULL,
-                poster TEXT,
-                addedAt INTEGER NOT NULL,
-                PRIMARY KEY (listId, itemKey)
-            )"""
-        )
-        // NOTE: Do NOT create an index here — Room's schema validator does not
-        // expect one on custom_list_items, and creating it causes
-        // "Migration didn't properly handle: custom_list_items" crashes.
-    }
+    override fun migrate(db: SupportSQLiteDatabase) = rebuildCustomListTables(db)
 }
 
-/**
- * v10 → v11: Rebuild `custom_lists` + `custom_list_items` using Room's EXACT
- * generated schema (no extra indices). The v9→10 migration created an index
- * that Room's validator doesn't expect, causing "Migration didn't properly
- * handle: custom_list_items" on devices where the old table survived.
- * Data is dropped; custom lists can be re-added.
- */
+/** v10 → v11: normalize Room's exact schema and retain user list contents. */
 val MIGRATION_10_11 = object : Migration(10, 11) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("DROP TABLE IF EXISTS custom_list_items")
-        db.execSQL("DROP TABLE IF EXISTS custom_lists")
-        db.execSQL("CREATE TABLE IF NOT EXISTS `custom_lists` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
-        db.execSQL("CREATE TABLE IF NOT EXISTS `custom_list_items` (`listId` TEXT NOT NULL, `itemKey` TEXT NOT NULL, `addonId` TEXT NOT NULL, `type` TEXT NOT NULL, `metaId` TEXT NOT NULL, `name` TEXT NOT NULL, `poster` TEXT, `addedAt` INTEGER NOT NULL, PRIMARY KEY(`listId`, `itemKey`))")
-    }
+    override fun migrate(db: SupportSQLiteDatabase) = rebuildCustomListTables(db)
 }

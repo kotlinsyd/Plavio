@@ -21,25 +21,51 @@ object PlaybackHeaders {
         "Mozilla/5.0 (Linux; Android 13; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     /**
-     * Nuvio-style header sanitization: forward the addon's proxyHeaders
-     * verbatim, dropping only blank keys/values and Range. Never strip
-     * User-Agent — upstreams that ship a UA via proxyHeaders expect it,
-     * and a missing UA is itself a bot-filter trigger.
+     * Validated addon headers shared by the built-in player and prober.
+     * Header names/values are bounded and control characters rejected; hop-by-hop
+     * and caller-supplied Range headers are not forwarded.
      */
     fun buildPlaybackHeaders(
         addonHeaders: Map<String, String>,
         isTv: Boolean
     ): Map<String, String> {
-        val out = LinkedHashMap<String, String>()
-        for ((k, v) in addonHeaders) {
-            if (k.isBlank() || v.isBlank()) continue
-            if (k.equals("Range", ignoreCase = true)) continue
-            out[k] = v
+        val blocked = setOf("range", "connection", "host", "content-length", "transfer-encoding", "upgrade")
+        val out = linkedMapOf<String, Pair<String, String>>()
+        for ((rawName, rawValue) in addonHeaders) {
+            val name = rawName.trim()
+            val value = rawValue.trim()
+            if (name.isEmpty() || name.length > 128 || value.isEmpty() || value.length > 8192) continue
+            if (!name.matches(Regex("[!#$%&'*+.^_`|~0-9A-Za-z-]+"))) continue
+            if (value.any { it == '\r' || it == '\n' || it == '\u0000' }) continue
+            val lower = name.lowercase()
+            if (lower in blocked) continue
+            out[lower] = canonicalHeaderName(name) to value
         }
-        if (out.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
-            out["User-Agent"] = if (isTv) DEFAULT_TV_UA else DEFAULT_MOBILE_UA
+        if ("user-agent" !in out) {
+            val ua = if (isTv) DEFAULT_TV_UA else DEFAULT_MOBILE_UA
+            out["user-agent"] = "User-Agent" to ua
         }
-        return out
+        return out.values.associateTo(linkedMapOf()) { it }
+    }
+
+    /** Headers safe to expose to arbitrary external-player apps via intent extras. */
+    fun isSensitiveHeader(name: String): Boolean {
+        val normalized = name.lowercase().replace("_", "-")
+        return normalized in setOf("authorization", "proxy-authorization", "cookie", "set-cookie", "referer", "origin") ||
+            listOf("token", "secret", "api-key", "apikey", "auth").any { it in normalized }
+    }
+
+    fun externalPlayerHeaders(addonHeaders: Map<String, String>, isTv: Boolean = false): Map<String, String> =
+        buildPlaybackHeaders(addonHeaders, isTv).filterKeys { it.lowercase() in setOf("user-agent", "accept", "accept-language") }
+
+    private fun canonicalHeaderName(name: String): String = when (name.lowercase()) {
+        "user-agent" -> "User-Agent"
+        "accept" -> "Accept"
+        "referer" -> "Referer"
+        "origin" -> "Origin"
+        "authorization" -> "Authorization"
+        "cookie" -> "Cookie"
+        else -> name
     }
 
     private val M3U8_PATTERN = Regex("(^|[=/_.?&%-])m3u8($|[=/_.?&%-])", RegexOption.IGNORE_CASE)
@@ -51,9 +77,14 @@ object PlaybackHeaders {
      * (e.g. /api/manifest?url=<encoded ...m3u8>).
      * Returns null when nothing recognizable is found.
      */
-    fun inferMimeType(url: String): String? = when {
-        M3U8_PATTERN.containsMatchIn(url) -> MimeTypes.APPLICATION_M3U8
-        MPD_PATTERN.containsMatchIn(url) -> MimeTypes.APPLICATION_MPD
-        else -> null
+    fun inferMimeType(url: String): String? {
+        // Encoded punctuation (%2E, %2F) is not a literal extension boundary.
+        // Decode only for detection; never rewrite the signed playback URL.
+        val decoded = try { java.net.URLDecoder.decode(url, "UTF-8") } catch (_: IllegalArgumentException) { url }
+        return when {
+            M3U8_PATTERN.containsMatchIn(url) || M3U8_PATTERN.containsMatchIn(decoded) -> MimeTypes.APPLICATION_M3U8
+            MPD_PATTERN.containsMatchIn(url) || MPD_PATTERN.containsMatchIn(decoded) -> MimeTypes.APPLICATION_MPD
+            else -> null
+        }
     }
 }

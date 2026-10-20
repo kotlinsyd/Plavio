@@ -32,13 +32,16 @@ fun DownloadConfirmDialog(
     var sizeBytes by remember { mutableStateOf<Long?>(null) }
     var probing by remember { mutableStateOf(true) }
     var alreadyDownloaded by remember { mutableStateOf(false) }
+    var requestError by remember { mutableStateOf<String?>(null) }
+    val adaptiveUnsupported = manager.isAdaptiveDownloadUrl(stream.url)
 
     LaunchedEffect(stream.url) {
         alreadyDownloaded = manager.getByUrl(stream.url)?.status == "COMPLETED"
-        sizeBytes = manager.probeSize(stream.url, stream.headers)
+        if (!adaptiveUnsupported) sizeBytes = manager.probeSize(stream.url, stream.headers)
         probing = false
     }
 
+    val enoughStorage = manager.storagePreflight(sizeBytes)
     val isLarge = (sizeBytes ?: -1L) > DownloadManager.LARGE_FILE_WARNING_BYTES
     val displayTitle = stream.title?.takeIf { it.isNotBlank() }
         ?: stream.name?.takeIf { it.isNotBlank() }
@@ -72,6 +75,13 @@ fun DownloadConfirmDialog(
                             )
                         }
                     }
+                    adaptiveUnsupported -> {
+                        Text(
+                            "Offline downloads currently support progressive media files only. HLS/DASH adaptive streams require downloading multiple segments and are not supported as complete offline downloads.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                     alreadyDownloaded -> {
                         Text(
                             "This file is already downloaded.",
@@ -88,6 +98,10 @@ fun DownloadConfirmDialog(
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary
                         )
+                        if (sizeBytes != null && sizeBytes!! > 0 && !enoughStorage) {
+                            Spacer(Modifier.height(8.dp))
+                            Text("Not enough free storage for this file plus a safety reserve.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        }
                         if (isLarge) {
                             Spacer(Modifier.height(8.dp))
                             Text(
@@ -99,29 +113,29 @@ fun DownloadConfirmDialog(
                         }
                     }
                 }
+                requestError?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
                     if (!alreadyDownloaded) {
-                        // Use NonCancellable so the download survives dialog dismissal.
-                        // The dialog's scope is cancelled on dismiss, which was
-                        // killing startDownload before launchDownload could run,
-                        // leaving the item stuck in QUEUED state.
                         scope.launch(kotlinx.coroutines.NonCancellable) {
-                            manager.startDownload(
-                                url = stream.url,
-                                title = displayTitle,
-                                headers = stream.headers
-                            )
-                            DownloadService.start(context)
-                            onStarted()
+                            try {
+                                manager.startDownload(url = stream.url, title = displayTitle, headers = stream.headers)
+                                DownloadService.start(context)
+                                onStarted()
+                                onDismiss()
+                            } catch (e: Exception) {
+                                requestError = e.message ?: "Could not start this download."
+                            }
                         }
-                    }
-                    onDismiss()
+                    } else onDismiss()
                 },
-                enabled = !probing && !alreadyDownloaded
+                enabled = !probing && !alreadyDownloaded && !adaptiveUnsupported && enoughStorage
             ) {
                 Text("Download", color = MaterialTheme.colorScheme.primary)
             }

@@ -58,10 +58,11 @@ private val features = listOf(
             "You can also set how much disk space the player may use for caching."
     ),
     FeatureGuide(
-        Icons.Filled.Backup,
-        "Backup & Restore",
-        "In Settings → Account → Backup & Restore, export your settings, addons, watchlist and playback " +
-            "progress to a file. Restore it on a new device to pick up where you left off. No account needed."
+        Icons.Filled.CloudSync,
+        "Account Sync",
+        "Open Settings → Account to sync your library, progress and portable settings across devices. " +
+            "Optionally encrypt integration keys and full configured addon URLs with a passphrase; on a new device, restore the profile first, then unlock the private data. " +
+            "The passphrase has no recovery, and downloaded files, Android permissions and cloud sign-in remain device-only."
     ),
     FeatureGuide(
         Icons.Filled.Info,

@@ -1,5 +1,6 @@
 package com.pulsestream.app.data
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -17,6 +18,9 @@ object TmdbClient {
     
     private val json = Json { ignoreUnknownKeys = true }
 
+    internal fun isFullyEnrichedCast(cast: List<CastMember>): Boolean =
+        cast.isNotEmpty() && cast.all { it.photo != null && it.id > 0 }
+
     /**
      * Enrich cast members with TMDB photos and IDs.
      * Takes a Stremio/IMDb ID string and resolves it to TMDB ID first.
@@ -30,20 +34,20 @@ object TmdbClient {
     ): List<CastMember> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) return@withContext cast
         // Only enrich if needed
-        if (cast.all { it.photo != null && it.id > 0 }) return@withContext cast
+        if (isFullyEnrichedCast(cast)) return@withContext cast
         
         try {
             // Resolve Stremio/IMDb ID to TMDB ID via find API
             val tmdbType = if (mediaType == "series") "tv" else "movie"
             val findUrl = "$BASE/find/$stremioId?api_key=$apiKey&external_source=imdb_id"
-            val findResponse = java.net.URL(findUrl).readText()
+            val findResponse = BoundedHttp.get(findUrl, headers = mapOf("Accept" to "application/json"))
             val findJson = json.parseToJsonElement(findResponse).jsonObject
             val results = findJson["${tmdbType}_results"]?.jsonArray
             val tmdbId = results?.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content?.toIntOrNull()
                 ?: return@withContext cast
             
             val url = "$BASE/$tmdbType/$tmdbId/credits?api_key=$apiKey"
-            val response = java.net.URL(url).readText()
+            val response = BoundedHttp.get(url, headers = mapOf("Accept" to "application/json"))
             val root = json.parseToJsonElement(response).jsonObject
             val tmdbCast = root["cast"]?.jsonArray ?: return@withContext cast
             
@@ -76,6 +80,8 @@ object TmdbClient {
                     )
                 } else member
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             cast // Return original on failure
         }
@@ -93,7 +99,7 @@ object TmdbClient {
         try {
             // Person details
             val personUrl = "$BASE/person/$personId?api_key=$apiKey"
-            val personResponse = java.net.URL(personUrl).readText()
+            val personResponse = BoundedHttp.get(personUrl, headers = mapOf("Accept" to "application/json"))
             val personJson = json.parseToJsonElement(personResponse).jsonObject
             val name = personJson["name"]?.jsonPrimitive?.content ?: return@withContext null
             val profile = personJson["profile_path"]?.jsonPrimitive?.content
@@ -101,7 +107,7 @@ object TmdbClient {
 
             // Combined credits (movies + TV)
             val creditsUrl = "$BASE/person/$personId/combined_credits?api_key=$apiKey"
-            val creditsResponse = java.net.URL(creditsUrl).readText()
+            val creditsResponse = BoundedHttp.get(creditsUrl, headers = mapOf("Accept" to "application/json"))
             val creditsJson = json.parseToJsonElement(creditsResponse).jsonObject
             val castArray = creditsJson["cast"]?.jsonArray ?: return@withContext PersonDetail(
                 id = personId, name = name, photo = photo,
@@ -131,6 +137,8 @@ object TmdbClient {
                 movies = movies.take(20),
                 series = series.take(20)
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             null
         }
@@ -141,7 +149,7 @@ object TmdbClient {
         try {
             val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8")
             val url = "$BASE/search/multi?api_key=$apiKey&query=$encoded&page=1&include_adult=false"
-            val response = java.net.URL(url).readText()
+            val response = BoundedHttp.get(url, headers = mapOf("Accept" to "application/json"))
             val root = json.parseToJsonElement(response).jsonObject
             val results = root["results"]?.jsonArray ?: return@withContext emptyList()
             val out = mutableListOf<MetaPreview>()
@@ -158,6 +166,7 @@ object TmdbClient {
                 out.add(MetaPreview(id = "tmdb:$mediaType:$id", type = type, name = title, poster = posterUrl))
             }
             out
-        } catch (e: Exception) { emptyList() }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { emptyList() }
     }
 }

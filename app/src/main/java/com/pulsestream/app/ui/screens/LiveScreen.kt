@@ -64,6 +64,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pulsestream.app.data.CatalogRow
+import com.pulsestream.app.data.isPlayableLiveStreamUrl
+import com.pulsestream.app.data.LIVE_SOURCE_RESOLUTION_TIMEOUT_MS
+import com.pulsestream.app.data.liveResolutionFailureMessage
+import com.pulsestream.app.data.liveResourceType
 import com.pulsestream.app.data.MetaPreview
 import com.pulsestream.app.data.PlaybackRequest
 import com.pulsestream.app.data.StreamItem
@@ -79,10 +83,15 @@ import com.pulsestream.app.ui.theme.GlassWhite
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
-private sealed interface LiveUiState {
+internal sealed interface LiveUiState {
     data object Loading : LiveUiState
     data class Content(
         val rows: List<CatalogRow>,
@@ -94,23 +103,35 @@ private sealed interface LiveUiState {
     data object Empty : LiveUiState
 }
 
-private class LiveViewModel(
+internal class LiveViewModel(
     private val repository: com.pulsestream.app.data.StreamRepository
 ) : androidx.lifecycle.ViewModel() {
     var uiState: LiveUiState by mutableStateOf(LiveUiState.Loading)
         private set
+    private var loadJob: Job? = null
 
     init {
         load()
     }
 
     fun load() {
-        uiState = LiveUiState.Loading
-        viewModelScope.launch {
+        // init and ON_RESUME may happen together; never duplicate a refresh.
+        if (loadJob?.isActive == true) return
+        loadJob = viewModelScope.launch {
             try {
-                val rows = repository.loadTvRows()
-                val m3u = repository.loadM3uRows()
+                val previous = uiState as? LiveUiState.Content
+                val cached = repository.loadTvRowsCached()
                 val playlists = repository.settings.m3uPlaylists
+                if (cached.isNotEmpty()) {
+                    uiState = LiveUiState.Content(cached, previous?.m3uRows.orEmpty(), playlists)
+                } else if (previous == null) {
+                    uiState = LiveUiState.Loading
+                }
+                val (rows, m3u) = coroutineScope {
+                    val addonRows = async { repository.loadTvRows() }
+                    val playlistRows = async { repository.loadM3uRows() }
+                    addonRows.await() to playlistRows.await()
+                }
                 uiState = if (rows.isEmpty() && m3u.rows.isEmpty()) {
                     // A failed playlist must say so, not show the generic
                     // "no live TV" empty state.
@@ -119,8 +140,13 @@ private class LiveViewModel(
                 } else {
                     LiveUiState.Content(rows, m3u.rows, playlists, m3u.errors)
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
-                uiState = LiveUiState.Error("Couldn't load live TV: ${e.message}")
+                val saved = uiState as? LiveUiState.Content
+                uiState = if (saved != null) saved.copy(
+                    m3uErrors = saved.m3uErrors + "Live refresh failed; showing saved channels. Retry to refresh."
+                ) else LiveUiState.Error("Couldn't load live channels. Please retry.")
             }
         }
     }
@@ -151,6 +177,8 @@ fun LiveScreen(
     })
     var query by remember { mutableStateOf("") }
     var resolvingKey by remember { mutableStateOf<String?>(null) }
+    var resolvingJob by remember { mutableStateOf<Job?>(null) }
+    var resolveGeneration by remember { mutableIntStateOf(0) }
     var resolveError by remember { mutableStateOf<String?>(null) }
     var showSearch by remember { mutableStateOf(false) }
     var showM3uDialog by remember { mutableStateOf(false) }
@@ -178,7 +206,9 @@ fun LiveScreen(
         addonId = row.addonId,
         metaId = meta.id,
         name = meta.name,
-        poster = meta.poster
+        poster = meta.poster,
+        type = liveResourceType(meta.type, row.type),
+        catalogId = row.catalogId
     )
 
     fun playChannel(row: CatalogRow, meta: MetaPreview, flatList: List<TvChannelRef>) {
@@ -187,6 +217,11 @@ fun LiveScreen(
         // from on the very first play.
         val idx = flatList.indexOfFirst { it.addonId == row.addonId && it.metaId == meta.id }
         repository.setTvZapList(flatList, if (idx >= 0) idx else 0)
+        resolvingJob?.cancel()
+        resolvingJob = null
+        val generation = ++resolveGeneration
+        resolvingKey = null
+        resolveError = null
         if (row.addonId == "m3u") {
             // M3U: the channel id IS the stream URL — play it directly.
             // (No resolution step exists here, so this is as "after
@@ -207,15 +242,34 @@ fun LiveScreen(
         }
         val key = channelKey(row, meta)
         resolvingKey = key
-        resolveError = null
-        scope.launch {
+        val channel = channelRef(row, meta)
+        resolvingJob = scope.launch {
             try {
-                var streams = emptyList<StreamItem>()
-                withTimeoutOrNull(25_000) {
-                    repository.streamResultsFlow("tv", meta.id).collect { r ->
-                        if (r.streams.isNotEmpty()) streams = r.streams
+                // FIX (2026-10-20): Collect streams from ALL addons, not just the first.
+                // The old firstOrNull meant if the fastest addon returned dead URLs,
+                // working streams from slower addons were never tried - causing the
+                // "keep changing sources then can't play" symptom.
+                val allStreams = mutableListOf<com.pulsestream.app.data.StreamItem>()
+                val seenUrls = mutableSetOf<String>()
+                // Bounded window: addons answer in parallel, so most arrive in a
+                // few seconds; don't let one slow addon stall channel start.
+                withTimeoutOrNull(8_000L) {
+                    repository.liveStreamResultsFlow(channel).collect { result ->
+                        result.streams.forEach { stream ->
+                            if (isPlayableLiveStreamUrl(stream.url) && seenUrls.add(stream.url)) {
+                                allStreams.add(stream)
+                            }
+                        }
                     }
                 }
+                if (generation != resolveGeneration) return@launch
+                // Probe-rank: verified-alive streams first, so the first URL
+                // handed to the player isn't a dead one that triggers the
+                // source-cycling failover. Budget-bounded; unverified streams
+                // stay in the list as failover candidates.
+                val streams = com.pulsestream.app.data.StreamProber
+                    .rankByProbe(allStreams, isTv = true)
+                if (generation != resolveGeneration) return@launch
                 val first = streams.firstOrNull()
                 if (first == null) {
                     resolveError = "No playable stream found for \"${meta.name}\"."
@@ -230,17 +284,27 @@ fun LiveScreen(
                             headers = first.headers,
                             title = meta.name,
                             poster = meta.poster,
-                            type = "tv",
+                            type = channel.type,
                             videoId = meta.id,
                             streamLabel = "LIVE",
-                            sourceName = first.sourceName
+                            sourceName = first.sourceName,
+                            streams = streams,
+                            mimeType = first.mimeType,
+                            liveChannel = channel
                         )
                     )
                 }
+            } catch (cancel: CancellationException) {
+                throw cancel
             } catch (e: Exception) {
-                resolveError = "Couldn't load \"${meta.name}\": ${e.message}"
+                if (generation == resolveGeneration) {
+                    resolveError = liveResolutionFailureMessage(meta.name)
+                }
             } finally {
-                resolvingKey = null
+                if (generation == resolveGeneration) {
+                    resolvingJob = null
+                    resolvingKey = null
+                }
             }
         }
     }
@@ -680,16 +744,14 @@ private fun chipColors() = FilterChipDefaults.filterChipColors(
 /** Live indicator: a red dot with a white center, gently pulsing. */
 @Composable
 private fun LiveDot(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "livedot")
-    val alpha by transition.animateFloat(
-        initialValue = 0.55f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1100, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "livedotAlpha"
-    )
+    val reduced = com.pulsestream.app.data.rememberReducedMotion()
+    val alpha = if (reduced) 1f else {
+        val transition = rememberInfiniteTransition(label = "livedot")
+        val animated by transition.animateFloat(initialValue = 0.55f, targetValue = 1f,
+            animationSpec = infiniteRepeatable(animation = tween(1100, easing = FastOutSlowInEasing), repeatMode = RepeatMode.Reverse),
+            label = "livedotAlpha")
+        animated
+    }
     Box(
         modifier.size(15.dp),
         contentAlignment = Alignment.Center

@@ -124,4 +124,18 @@ class SubtitleShifterTest {
         val shiftedText = result[0].file.readText()
         assertTrue(shiftedText.contains("00:00:02.000 --> 00:00:05.000"))
     }
+
+    @Test
+    fun `shiftSubtitles shifts short form WebVTT timestamps`() {
+        val vtt = "WEBVTT\n\n01:23.456 --> 02:00.000\nShort-form cue\n"
+        val file = File.createTempFile("short-vtt", ".vtt").apply {
+            writeText(vtt); deleteOnExit()
+        }
+        val resolved = listOf(ResolvedSubtitle(
+            sub = Subtitle(url = "http://x/short.vtt", lang = "en"), file = file, mimeType = "text/vtt"
+        ))
+        val result = shiftSubtitles(resolved, 1000L, File(createTempDir(), "short-vtt-cache"))
+        assertTrue(result.single().file.readText().contains("00:01:24.456 --> 00:02:01.000"))
+    }
+
 }

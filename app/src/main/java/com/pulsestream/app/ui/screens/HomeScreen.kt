@@ -488,11 +488,12 @@ private fun HeroCarousel(
     val pagerState = rememberPagerState(pageCount = { featured.size })
     val isTv = rememberIsTv()
 
-    LaunchedEffect(pagerState, featured.size) {
+    val reducedMotion = com.pulsestream.app.data.rememberReducedMotion()
+    LaunchedEffect(pagerState, featured.size, reducedMotion) {
         // No auto-advance on TV: the 5s full-bleed pager animation steals
         // frames from D-pad browsing on weak TV GPUs/CPUs and its backdrop
         // re-decodes cause jank spikes that coincide with user input.
-        if (isTv) return@LaunchedEffect
+        if (isTv || reducedMotion) return@LaunchedEffect
         while (featured.size > 1) {
             delay(5000)
             if (!pagerState.isScrollInProgress) {

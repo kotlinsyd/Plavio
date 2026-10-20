@@ -1,7 +1,11 @@
 package com.pulsestream.app.ui.screens
 
+import android.accounts.AccountManager
+import android.app.Activity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -10,27 +14,25 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,435 +43,333 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.StreamRepository
-import com.pulsestream.app.data.cloud.CloudManager
+import com.pulsestream.app.data.cloud.GoogleDriveSyncManager
 import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.GlowBackground
-import com.pulsestream.app.ui.screens.SettingsStaticRow
-import com.pulsestream.app.ui.theme.LocalPalette
-import com.pulsestream.app.ui.theme.TextPrimary
-import com.pulsestream.app.ui.theme.TextSecondary
 import kotlinx.coroutines.launch
 
 /**
- * Account screen (v0.11.2+): Plavio Cloud login + profiles.
- * Login is OPTIONAL — the app works fully without an account.
- * When logged in: backup/restore watchlist, continue watching, settings, addons.
- * Profiles: multiple profiles per account (e.g. for family members).
- * The last used profile is remembered — no login prompt on every launch.
+ * Account screen (v0.11.9+): Google account + Drive sync.
+ * User's order 2026-10-19: remove Supabase entirely, Google login only,
+ * auto-backup and auto-restore everything including API keys.
+ * Uses system account picker (no GET_ACCOUNTS permission needed).
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountScreen(
     repository: StreamRepository,
     onBack: () -> Unit = {}
 ) {
-    val settings = repository.settings
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val cloud = remember { CloudManager(context, settings, repository) }
+    val sync = remember { GoogleDriveSyncManager(context, repository.settings, repository) }
 
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var isLoginMode by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
     var syncing by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var cloudTick by remember { mutableStateOf(0) }
+    var refreshTick by remember { mutableStateOf(0) }
 
-    val isLoggedIn = remember(cloudTick) { cloud.isLoggedIn }
-    val userEmail = remember(cloudTick) { cloud.userEmail }
-    val profiles = remember(cloudTick) { cloud.getProfiles() }
-    val activeProfileId = remember(cloudTick) { cloud.activeProfileId }
+    val isSignedIn = remember(refreshTick) { sync.isSignedIn() }
+    val accountEmail = remember(refreshTick) { sync.getAccountEmail() }
+    val lastBackup = remember(refreshTick) { sync.getLastBackupTime() }
+    val lastRestore = remember(refreshTick) { sync.getLastRestoreTime() }
 
-    fun doAuth() {
-        if (email.isBlank() || password.isBlank()) {
-            error = "Enter your email and password."
-            return
-        }
-        if (password.length < 6) {
-            error = "Password must be at least 6 characters."
-            return
-        }
-        busy = true
-        error = null
-        scope.launch {
-            val result = if (isLoginMode) {
-                cloud.signIn(email.trim(), password)
-            } else {
-                cloud.signUp(email.trim(), password)
-            }
-            busy = false
-            result.onFailure {
-                val msg = it.message ?: "Something went wrong. Try again."
-                if (msg.startsWith("VERIFY_EMAIL:")) {
-                    // Show as info, not error - user needs to verify email
-                    error = msg.removePrefix("VERIFY_EMAIL:")
-                    // Switch to login mode so they can log in after verifying
-                    isLoginMode = true
-                } else {
-                    error = msg
+    // Auth activity launcher (for when user needs to grant Drive access)
+    // Defined first because accountPickerLauncher uses it
+    val authLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        // Retry the pending operation after auth
+        refreshTick++
+        message = "Authorization granted. Try backup/restore again."
+    }
+
+    // System account picker (no permission needed, works on all Android versions)
+    val accountPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val accountName = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+            if (accountName != null) {
+                scope.launch {
+                    busy = true
+                    error = null
+                    sync.selectAccountByName(accountName)
+                    message = "Signed in as $accountName. Restoring..."
+                    // Auto-restore on login (user's order)
+                    val restoreResult = sync.autoRestoreOnLogin()
+                    restoreResult.onSuccess { restored ->
+                        message = if (restored) {
+                            "Welcome back! Everything restored."
+                        } else {
+                            "Signed in. No backup found yet - your data will sync automatically."
+                        }
+                    }.onFailure { e ->
+                        if (e is GoogleDriveSyncManager.AuthRequiredException) {
+                            authLauncher.launch(e.intent)
+                            message = "Please grant Drive access to continue."
+                        } else {
+                            message = "Signed in, but restore failed: ${e.message}"
+                        }
+                    }
+                    busy = false
+                    refreshTick++
                 }
-            }.onSuccess {
-                // Auto-sync: restore cloud backup on login
-                if (isLoginMode) {
-                    syncing = true
-                    cloud.autoSyncOnLogin()
-                    syncing = false
-                }
-                cloudTick++
-                email = ""
-                password = ""
             }
         }
     }
 
-    GlowBackground {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 24.dp)
-        ) {
-            item(key = "header") {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                Icons.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = TextPrimary
-                            )
-                        }
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            text = "Account",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Optional. Log in to back up your data and use profiles.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                        modifier = Modifier.padding(start = 56.dp, end = 8.dp)
-                    )
+    fun doPickAccount() {
+        val intent = AccountManager.newChooseAccountIntent(
+            null, // selectedAccount
+            null, // allowableAccounts
+            arrayOf("com.google"), // allowableAccountTypes
+            false, // alwaysPromptForAccount
+            null, // descriptionOverrideText
+            null, // addAccountAuthTokenType
+            null, // addAccountRequiredFeatures
+            null // addAccountOptions
+        )
+        accountPickerLauncher.launch(intent)
+    }
+
+    fun doSignOut() {
+        sync.signOut()
+        refreshTick++
+        message = "Signed out."
+    }
+
+    fun doBackup() {
+        if (syncing || busy) return
+        scope.launch {
+            syncing = true
+            error = null
+            sync.backupNow().onSuccess {
+                message = "Backup saved to Google Drive."
+            }.onFailure { e ->
+                if (e is GoogleDriveSyncManager.AuthRequiredException) {
+                    authLauncher.launch(e.intent)
+                    message = "Please grant Drive access to continue."
+                } else {
+                    error = "Backup failed: ${e.message}"
                 }
             }
+            syncing = false
+            refreshTick++
+        }
+    }
 
-            if (!isLoggedIn) {
-                // Login / signup form
-                item(key = "cloud_login") {
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Column(Modifier.padding(16.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    Icons.Filled.CloudUpload,
-                                    contentDescription = null,
-                                    tint = LocalPalette.current.accent,
-                                    modifier = Modifier.padding(end = 12.dp)
-                                )
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        "Plavio Cloud",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = TextPrimary
-                                    )
-                                    Text(
-                                        "Back up watchlist, progress, settings & addons",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = TextSecondary
-                                    )
-                                }
-                            }
-                            Spacer(Modifier.height(16.dp))
-
-                            OutlinedTextField(
-                                value = email,
-                                onValueChange = { email = it.trim(); error = null },
-                                label = { Text("Email") },
-                                singleLine = true,
-                                enabled = !busy,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(50),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = LocalPalette.current.accent,
-                                    focusedLabelColor = LocalPalette.current.accent
-                                )
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = password,
-                                onValueChange = { password = it; error = null },
-                                label = { Text("Password") },
-                                singleLine = true,
-                                enabled = !busy,
-                                visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(50),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = LocalPalette.current.accent,
-                                    focusedLabelColor = LocalPalette.current.accent
-                                )
-                            )
-                            if (error != null) {
-                                Spacer(Modifier.height(8.dp))
-                                Text(error!!, color = Color(0xFFF87171), style = MaterialTheme.typography.bodySmall)
-                            }
-                            Spacer(Modifier.height(12.dp))
-                            Button(
-                                onClick = { doAuth() },
-                                enabled = !busy,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(50),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = LocalPalette.current.accent
-                                )
-                            ) {
-                                if (busy || syncing) {
-                                    CircularProgressIndicator(
-                                        color = Color.White,
-                                        modifier = Modifier.padding(end = 8.dp)
-                                    )
-                                }
-                                Text(
-                                    when {
-                                        syncing -> "Syncing..."
-                                        isLoginMode -> "Log in"
-                                        else -> "Create account"
-                                    },
-                                    color = Color.White
-                                )
-                            }
-                            Spacer(Modifier.height(4.dp))
-                            TextButton(
-                                onClick = { isLoginMode = !isLoginMode; error = null },
-                                modifier = Modifier.align(Alignment.CenterHorizontally)
-                            ) {
-                                Text(
-                                    if (isLoginMode) "New here? Create an account"
-                                    else "Already have an account? Log in",
-                                    color = LocalPalette.current.accent
-                                )
-                            }
-                            if (isLoginMode) {
-                                TextButton(
-                                    onClick = {
-                                        if (email.isBlank()) {
-                                            error = "Enter your email first, then tap Forgot password."
-                                        } else {
-                                            scope.launch {
-                                                busy = true; error = null
-                                                val result = cloud.resetPassword(email.trim())
-                                                busy = false
-                                                error = if (result.isSuccess) "Reset email sent \u2014 check your inbox."
-                                                    else result.exceptionOrNull()?.message ?: "Could not send reset email."
-                                            }
-                                        }
-                                    },
-                                    enabled = !busy,
-                                    modifier = Modifier.align(Alignment.CenterHorizontally)
-                                ) { Text("Forgot password?", color = TextSecondary) }
-                            }
-                        }
-                    }
+    fun doRestore() {
+        if (syncing || busy) return
+        scope.launch {
+            syncing = true
+            error = null
+            sync.restoreFromCloud().onSuccess { restored ->
+                message = if (restored) "Everything restored from Google Drive." else "No backup found in Google Drive."
+            }.onFailure { e ->
+                if (e is GoogleDriveSyncManager.AuthRequiredException) {
+                    authLauncher.launch(e.intent)
+                    message = "Please grant Drive access to continue."
+                } else {
+                    error = "Restore failed: ${e.message}"
                 }
+            }
+            syncing = false
+            refreshTick++
+        }
+    }
 
-                item(key = "cloud_note") {
+    GlowBackground {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Account & Sync") },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Transparent
+                    )
+                )
+            },
+            containerColor = Color.Transparent
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                error?.let {
                     Text(
-                        "Your data stays on your device unless you log in. " +
-                            "Login is optional — the app works fully without it.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                        modifier = Modifier.padding(horizontal = 32.dp, vertical = 8.dp)
+                        text = it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
                     )
                 }
-            } else {
-                // Logged in: show user + profiles + backup
-                item(key = "user_info") {
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Row(
-                            Modifier.padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                message?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                if (!isSignedIn) {
+                    GlassCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Icon(
-                                Icons.Filled.AccountCircle,
+                                Icons.Filled.CloudDone,
                                 contentDescription = null,
-                                tint = LocalPalette.current.accent,
-                                modifier = Modifier.padding(end = 12.dp)
+                                modifier = Modifier.size(48.dp),
+                                tint = MaterialTheme.colorScheme.primary
                             )
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    userEmail ?: "Plavio Cloud",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimary
-                                )
-                                Text(
-                                    "Logged in",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = LocalPalette.current.accent
-                                )
-                            }
-                            TextButton(onClick = {
-                                scope.launch {
-                                    cloud.signOut()
-                                    cloudTick++
-                                }
-                            }) {
-                                Text("Log out", color = TextSecondary)
-                            }
-                        }
-                    }
-                }
-
-                item(key = "profiles_header") {
-                    Row(
-                        Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "Profiles",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        TextButton(onClick = {
-                            scope.launch {
-                                cloud.createProfile("Profile ${profiles.size + 1}")
-                                cloudTick++
-                            }
-                        }) {
-                            Icon(Icons.Filled.Add, contentDescription = "Add profile", tint = LocalPalette.current.accent)
-                            Text("Add", color = LocalPalette.current.accent)
-                        }
-                    }
-                }
-
-                profiles.forEach { profile ->
-                    item(key = "profile_${profile.id}") {
-                        val isActive = profile.id == activeProfileId
-                        var showDeleteDialog by remember { mutableStateOf(false) }
-                        SettingsStaticRow(
-                            icon = Icons.Filled.AccountCircle,
-                            title = profile.name,
-                            subtitle = if (isActive) "Active profile" else "Tap to switch",
-                            trailing = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    if (isActive) {
-                                        Icon(
-                                            Icons.Filled.Check,
-                                            contentDescription = "Active",
-                                            tint = LocalPalette.current.accent
-                                        )
-                                    }
-                                    if (profiles.size > 1) {
-                                        IconButton(
-                                            onClick = { showDeleteDialog = true },
-                                            modifier = Modifier.size(32.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Filled.Delete,
-                                                contentDescription = "Delete profile",
-                                                tint = TextSecondary,
-                                                modifier = Modifier.size(20.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            },
-                            onClick = {
-                                if (!isActive) {
-                                    scope.launch {
-                                        cloud.switchProfile(profile.id)
-                                        cloudTick++
-                                    }
-                                }
-                            }
-                        )
-                        if (showDeleteDialog) {
-                            AlertDialog(
-                                onDismissRequest = { showDeleteDialog = false },
-                                title = { Text("Delete ${profile.name}?", color = TextPrimary) },
-                                text = {
-                                    Text(
-                                        "This will delete the profile and its cloud backup. This cannot be undone.",
-                                        color = TextSecondary
-                                    )
-                                },
-                                confirmButton = {
-                                    TextButton(
-                                        onClick = {
-                                            scope.launch {
-                                                cloud.deleteProfile(profile.id)
-                                                cloudTick++
-                                            }
-                                            showDeleteDialog = false
-                                        }
-                                    ) {
-                                        Text("Delete", color = Color.Red)
-                                    }
-                                },
-                                dismissButton = {
-                                    TextButton(onClick = { showDeleteDialog = false }) {
-                                        Text("Cancel", color = TextSecondary)
-                                    }
-                                }
-                            )
-                        }
-                    }
-                }
-
-                item(key = "backup") {
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Column(Modifier.padding(16.dp)) {
                             Text(
-                                "Backup",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextPrimary
+                                "Sync with Google",
+                                style = MaterialTheme.typography.titleLarge
                             )
-                            Spacer(Modifier.height(4.dp))
                             Text(
-                                "Automatically backs up watchlist, continue watching, custom lists, settings, and installed addons.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
+                                "Choose your Google account to automatically backup and sync your watchlist, history, addons, settings, and API keys to Google Drive.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            Spacer(Modifier.height(12.dp))
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+
+                            Spacer(Modifier.height(8.dp))
+                            Button(
+                                onClick = ::doPickAccount,
+                                enabled = !busy,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
+                                if (busy) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Signing in...")
+                                } else {
+                                    Text("Choose Google Account")
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    GlassCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
                                 Icon(
-                                    Icons.Filled.Sync,
+                                    Icons.Filled.CloudDone,
                                     contentDescription = null,
-                                    tint = LocalPalette.current.accent,
-                                    modifier = Modifier.size(20.dp)
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(32.dp)
                                 )
-                                Spacer(Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "Signed in",
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    Text(
+                                        accountEmail ?: "",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            lastBackup?.let {
                                 Text(
-                                    "Auto-sync is on",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimary
+                                    "Last backup: $it",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                            lastRestore?.let {
+                                Text(
+                                    "Last restore: $it",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
                             Spacer(Modifier.height(4.dp))
-                            val lastBackup = remember(cloudTick) { cloud.lastBackupTime }
+
+                            Button(
+                                onClick = ::doBackup,
+                                enabled = !syncing && !busy,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                if (syncing) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Syncing...")
+                                } else {
+                                    Icon(Icons.Filled.CloudUpload, contentDescription = null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Backup Now")
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = ::doRestore,
+                                enabled = !syncing && !busy,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.CloudDownload, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Restore from Drive")
+                            }
+
+                            OutlinedButton(
+                                onClick = ::doSignOut,
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.Logout, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Sign Out")
+                            }
+                        }
+                    }
+
+                    GlassCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(16.dp)) {
                             Text(
-                                if (lastBackup != null) "Last synced: $lastBackup" else "Will sync automatically",
+                                "Automatic Sync",
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Your data syncs automatically to your private Google Drive folder. " +
+                                "When you sign in on a new device, everything restores automatically - " +
+                                "watchlist, watch history, addons, settings, and API keys.",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }

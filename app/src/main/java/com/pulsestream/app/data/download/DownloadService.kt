@@ -63,6 +63,7 @@ class DownloadService : Service() {
 
         // Watch active downloads and update notifications
         scope.launch {
+            manager.recoverInterruptedDownloads()
             manager.activeDownloads.collect { active ->
                 if (active.isEmpty()) {
                     // No active downloads — stop the service

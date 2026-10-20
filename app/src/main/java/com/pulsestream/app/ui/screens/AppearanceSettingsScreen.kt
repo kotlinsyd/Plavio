@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +58,7 @@ fun AppearanceSettingsScreen(
     val settings = repository.settings
     var accentName by remember { mutableStateOf(settings.accentName) }
     var amoled by remember { mutableStateOf(settings.amoledBlack) }
+    var themeMode by remember { mutableStateOf(settings.themeMode) }
 
     GlowBackground {
         LazyColumn(
@@ -143,6 +145,33 @@ fun AppearanceSettingsScreen(
                                     color = if (selected) TextPrimary else TextSecondary
                                 )
                             }
+                        }
+                    }
+                }
+            }
+            item(key = "theme_mode") {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text(
+                        "Theme",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf("dark" to "Dark", "light" to "Light").forEach { (mode, label) ->
+                            FilterChip(
+                                selected = themeMode == mode,
+                                onClick = {
+                                    themeMode = mode
+                                    settings.themeMode = mode
+                                    onThemeChanged()
+                                },
+                                label = { Text(label) },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
                     }
                 }

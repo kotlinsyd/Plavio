@@ -9,9 +9,25 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.net.URI
+import java.net.URLDecoder
 
 /** One addon inside a share bundle. */
 data class SharedAddon(val name: String, val url: String)
+
+/** A credential-like value found in an addon URL; the value itself is never retained. */
+data class AddonShareRisk(val addonName: String, val reasons: List<String>)
+
+/** Result of checking the URLs that would be copied into a share bundle. */
+data class AddonShareAudit(val risks: List<AddonShareRisk>) {
+    val isSafe: Boolean get() = risks.isEmpty()
+}
+
+/** Thrown rather than serializing a URL that appears to contain credentials. */
+class UnsafeAddonShareException(val risks: List<AddonShareRisk>) : IllegalArgumentException(
+    "Addon sharing was blocked because one or more URLs appear to contain credentials. " +
+        "Remove the secret from the URL before sharing."
+)
 
 /**
  * Addon share bundles: checkbox-select addons → one shareable code.
@@ -22,9 +38,68 @@ data class SharedAddon(val name: String, val url: String)
 object AddonShare {
     const val SCHEME = "plavio-addons://"
 
+    private val sensitiveQueryNames = setOf(
+        "key", "apikey", "apikeys", "accesskey", "secret", "clientsecret",
+        "token", "accesstoken", "refreshtoken", "authtoken", "bearertoken",
+        "password", "passwd", "credential", "credentials", "authorization",
+        "signature", "sig", "jwt", "session", "privatekey"
+    )
+
+    // High-confidence token formats that can appear in paths or unlabelled query parameters.
+    private val credentialPatterns = listOf(
+        Regex("(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*"),
+        Regex("\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b"),
+        Regex("\\bAKIA[0-9A-Z]{16}\\b"),
+        Regex("\\bgh[pousr]_[A-Za-z0-9]{20,}\\b"),
+        Regex("\\bAIza[0-9A-Za-z_-]{30,}\\b"),
+        Regex("\\bsk-[A-Za-z0-9_-]{20,}\\b")
+    )
+
     private val json = Json { ignoreUnknownKeys = true }
 
+    /**
+     * Conservatively checks addon URLs before they are placed in a share code.
+     * This is a heuristic, not a secret scanner: avoid putting credentials in
+     * addon URLs even when this check does not flag them.
+     */
+    fun audit(addons: List<SharedAddon>): AddonShareAudit = AddonShareAudit(
+        addons.mapNotNull { addon ->
+            val reasons = credentialReasons(addon.url)
+            reasons.takeIf { it.isNotEmpty() }?.let {
+                AddonShareRisk(addon.name.ifBlank { "Unnamed addon" }, it)
+            }
+        }
+    )
+
+    private fun credentialReasons(url: String): List<String> {
+        val reasons = linkedSetOf<String>()
+        val uri = runCatching { URI(url) }.getOrNull()
+        if (uri?.rawUserInfo?.isNotBlank() == true) reasons += "URL user information"
+        uri?.rawQuery?.split('&')?.forEach { part ->
+            val key = part.substringBefore('=')
+            val value = part.substringAfter('=', "")
+            val decodedKey = runCatching { URLDecoder.decode(key, "UTF-8") }
+                .getOrDefault(key)
+            val normalizedKey = decodedKey.lowercase().filter(Char::isLetterOrDigit)
+            if (value.isNotBlank() && (
+                    normalizedKey in sensitiveQueryNames ||
+                        normalizedKey.endsWith("apikey") ||
+                        normalizedKey.endsWith("token") ||
+                        normalizedKey.endsWith("secret") ||
+                        normalizedKey.endsWith("password") ||
+                        normalizedKey.endsWith("credential")
+                    )
+            ) reasons += "credential-like query parameter"
+        }
+        if (credentialPatterns.any { it.containsMatchIn(url) }) {
+            reasons += "credential-like token pattern"
+        }
+        return reasons.toList()
+    }
+
     fun encode(addons: List<SharedAddon>): String {
+        val audit = audit(addons)
+        if (!audit.isSafe) throw UnsafeAddonShareException(audit.risks)
         val obj = buildJsonObject {
             put("v", 1)
             put("addons", buildJsonArray {

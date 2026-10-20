@@ -129,11 +129,17 @@ interface CatalogCacheDao {
     @Query("DELETE FROM catalog_cache")
     suspend fun clearAll()
 
+    @Query("DELETE FROM catalog_cache WHERE `key` = :key")
+    suspend fun deleteByKey(key: String)
+
+    @Query("DELETE FROM catalog_cache WHERE addonId = :addonId")
+    suspend fun deleteByAddonId(addonId: String)
+
     /**
      * Drops rows whose JSON exceeds SQLite's ~2MB CursorWindow limit —
      * reading one would crash with SQLiteBlobTooBigException.
      */
-    @Query("DELETE FROM catalog_cache WHERE length(itemsJson) > :maxBytes")
+    @Query("DELETE FROM catalog_cache WHERE length(CAST(itemsJson AS BLOB)) > :maxBytes")
     suspend fun pruneOversized(maxBytes: Int): Int
 
     /**
@@ -230,6 +236,21 @@ interface CustomListDao {
     @Query("DELETE FROM custom_lists WHERE id = :id")
     suspend fun deleteList(id: String)
 
+    @Query("DELETE FROM custom_lists")
+    suspend fun clearLists()
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLists(lists: List<CustomList>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertItems(items: List<CustomListItem>)
+
+    @Query("SELECT * FROM custom_list_items ORDER BY addedAt DESC")
+    suspend fun getAllItems(): List<CustomListItem>
+
+    @Query("DELETE FROM custom_list_items")
+    suspend fun clearAllItems()
+
     @Query("SELECT * FROM custom_list_items WHERE listId = :listId ORDER BY addedAt DESC")
     fun observeItems(listId: String): Flow<List<CustomListItem>>
 
@@ -259,6 +280,8 @@ data class SubtitleCache(
 
 @Dao
 interface SubtitleCacheDao {
+    @Query("DELETE FROM subtitle_cache")
+    suspend fun clearAll()
     @Query("SELECT * FROM subtitle_cache WHERE `key` = :key LIMIT 1")
     suspend fun getByKey(key: String): SubtitleCache?
 

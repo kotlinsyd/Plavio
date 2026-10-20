@@ -1,7 +1,17 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.pulsestream.app.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import androidx.media3.ui.AspectRatioFrameLayout
 import com.pulsestream.app.ui.theme.AccentTheme
 
@@ -270,6 +280,44 @@ class SettingsStore(context: Context) {
     private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
         appContext.getSharedPreferences("pulse_settings", Context.MODE_PRIVATE)
+
+    /**
+     * Adaptive quality ceiling (user's order 2026-10-20, Netflix/YouTube style):
+     * the highest quality this device + network can actually handle.
+     * - Device cap: based on the screen's smaller dimension in pixels.
+     *   A 720p phone gains nothing from a 4K stream - it just buffers more.
+     * - Network cap: based on the system's downstream bandwidth estimate.
+     * Returns one of QUALITY_ORDER_OPTIONS ("480p".."2160p").
+     */
+    fun adaptiveQualityCap(): String {
+        // Device cap from screen resolution.
+        val metrics = appContext.resources.displayMetrics
+        val shortSide = minOf(metrics.widthPixels, metrics.heightPixels)
+        val deviceCap = when {
+            shortSide >= 1440 -> "2160p" // QHD+ screen: 4K downscale still beats 1080p
+            shortSide >= 1080 -> "1080p"
+            shortSide >= 720 -> "720p"
+            else -> "480p"
+        }
+        // Network cap from the system's link bandwidth estimate.
+        val networkCap = try {
+            val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
+            val downKbps = caps?.linkDownstreamBandwidthKbps ?: 0
+            when {
+                downKbps <= 0 -> deviceCap // unknown - trust the device
+                downKbps >= 25_000 -> "2160p" // 25+ Mbps for 4K
+                downKbps >= 10_000 -> "1080p" // 10+ Mbps for 1080p (headroom)
+                downKbps >= 5_000 -> "720p"   // 5+ Mbps for 720p
+                else -> "480p"
+            }
+        } catch (e: Exception) {
+            deviceCap
+        }
+        // The lower of the two wins.
+        val ladder = listOf("480p", "720p", "1080p", "2160p")
+        return if (ladder.indexOf(networkCap) < ladder.indexOf(deviceCap)) networkCap else deviceCap
+    }
     /**
      * Onboarding flag lives in its OWN prefs file: Android auto-backup must
      * never restore onboarding_done=true on a fresh install / new device,
@@ -277,6 +325,10 @@ class SettingsStore(context: Context) {
      */
     private val onboardingPrefs: SharedPreferences =
         appContext.getSharedPreferences("pulse_onboarding", Context.MODE_PRIVATE)
+    private val secretPrefs: SharedPreferences =
+        appContext.getSharedPreferences("pulse_secret_settings", Context.MODE_PRIVATE)
+
+    init { migrateLegacySecrets() }
 
     /** Play the first source automatically (v0.2.0 behavior) vs. manual play. */
     var autoplay: Boolean
@@ -323,8 +375,8 @@ class SettingsStore(context: Context) {
      * themoviedb.org/settings/api.
      */
     var tmdbApiKey: String
-        get() = prefs.getString(KEY_TMDB_API_KEY, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_TMDB_API_KEY, value).apply()
+        get() = getSecret(KEY_TMDB_API_KEY).orEmpty()
+        set(value) = putSecret(KEY_TMDB_API_KEY, value.takeIf { it.isNotBlank() })
 
     // ------------------------------------------------------------------
     // Buffer & cache (v0.9.0+): player buffering + on-disk playback cache.
@@ -396,11 +448,8 @@ class SettingsStore(context: Context) {
 
     /** Simkl access token (null = not linked). */
     var simklToken: String?
-        get() = prefs.getString(KEY_SIMKL_TOKEN, null)
-        set(value) {
-            if (value == null) prefs.edit().remove(KEY_SIMKL_TOKEN).apply()
-            else prefs.edit().putString(KEY_SIMKL_TOKEN, value).apply()
-        }
+        get() = getSecret(KEY_SIMKL_TOKEN)
+        set(value) = putSecret(KEY_SIMKL_TOKEN, value)
 
     /** Simkl display name for the linked account. */
     var simklUsername: String?
@@ -412,36 +461,24 @@ class SettingsStore(context: Context) {
 
     /** TorBox API key (null = not configured). Debrid-only: resolves cached torrent infoHashes to direct HTTP links. */
     var torboxApiKey: String?
-        get() = prefs.getString(KEY_TORBOX_API_KEY, null)?.takeIf { it.isNotBlank() }
-        set(value) {
-            if (value.isNullOrBlank()) prefs.edit().remove(KEY_TORBOX_API_KEY).apply()
-            else prefs.edit().putString(KEY_TORBOX_API_KEY, value.trim()).apply()
-        }
+        get() = getSecret(KEY_TORBOX_API_KEY)?.takeIf { it.isNotBlank() }
+        set(value) = putSecret(KEY_TORBOX_API_KEY, value?.trim()?.takeIf { it.isNotBlank() })
 
     /** Real-Debrid API key (null = not configured). Debrid-only. */
     var realDebridApiKey: String?
-        get() = prefs.getString(KEY_REALDEBRID_API_KEY, null)?.takeIf { it.isNotBlank() }
-        set(value) {
-            if (value.isNullOrBlank()) prefs.edit().remove(KEY_REALDEBRID_API_KEY).apply()
-            else prefs.edit().putString(KEY_REALDEBRID_API_KEY, value.trim()).apply()
-        }
+        get() = getSecret(KEY_REALDEBRID_API_KEY)?.takeIf { it.isNotBlank() }
+        set(value) = putSecret(KEY_REALDEBRID_API_KEY, value?.trim()?.takeIf { it.isNotBlank() })
 
 
     /** Trakt access token (null = not linked). */
     var traktAccessToken: String?
-        get() = prefs.getString(KEY_TRAKT_TOKEN, null)
-        set(value) {
-            if (value == null) prefs.edit().remove(KEY_TRAKT_TOKEN).apply()
-            else prefs.edit().putString(KEY_TRAKT_TOKEN, value).apply()
-        }
+        get() = getSecret(KEY_TRAKT_TOKEN)
+        set(value) = putSecret(KEY_TRAKT_TOKEN, value)
 
     /** Trakt refresh token. */
     var traktRefreshToken: String?
-        get() = prefs.getString(KEY_TRAKT_REFRESH, null)
-        set(value) {
-            if (value == null) prefs.edit().remove(KEY_TRAKT_REFRESH).apply()
-            else prefs.edit().putString(KEY_TRAKT_REFRESH, value).apply()
-        }
+        get() = getSecret(KEY_TRAKT_REFRESH)
+        set(value) = putSecret(KEY_TRAKT_REFRESH, value)
 
     /** Epoch millis when the Trakt access token should be refreshed. */
     var traktTokenExpiry: Long
@@ -465,6 +502,11 @@ class SettingsStore(context: Context) {
     var amoledBlack: Boolean
         get() = prefs.getBoolean(KEY_AMOLED, false)
         set(value) = prefs.edit().putBoolean(KEY_AMOLED, value).apply()
+
+    /** Theme mode: "dark" (default) or "light". */
+    var themeMode: String
+        get() = prefs.getString(KEY_THEME_MODE, "dark") ?: "dark"
+        set(value) = prefs.edit().putString(KEY_THEME_MODE, value).apply()
 
     /** Stream badge pack key (custom pack "custom:<name>"). Empty = no badges. */
     var streamCardStyle: String
@@ -622,6 +664,61 @@ class SettingsStore(context: Context) {
         get() = prefs.getInt(KEY_AUTOPLAY_MAX_SIZE, 0).coerceAtLeast(0)
         set(value) = prefs.edit().putInt(KEY_AUTOPLAY_MAX_SIZE, value.coerceAtLeast(0)).apply()
 
+    private fun migrateLegacySecrets() {
+        for (key in SECRET_KEYS) {
+            val legacy = prefs.getString(key, null) ?: continue
+            if (secretPrefs.getString(key, null) == null) runCatching { putSecret(key, legacy) }
+            // Remove plaintext only after the encrypted copy was persisted.
+            if (secretPrefs.getString(key, null) != null) prefs.edit().remove(key).apply()
+        }
+    }
+
+    private fun getSecret(key: String): String? {
+        val encoded = secretPrefs.getString(key, null)
+        if (encoded != null) return runCatching { decryptSecret(encoded) }.getOrNull()
+        val legacy = prefs.getString(key, null) ?: return null
+        runCatching { putSecret(key, legacy) }
+        if (secretPrefs.getString(key, null) != null) prefs.edit().remove(key).apply()
+        return legacy
+    }
+
+    private fun putSecret(key: String, value: String?) {
+        if (value == null) {
+            secretPrefs.edit().remove(key).apply()
+            prefs.edit().remove(key).apply()
+        } else {
+            check(secretPrefs.edit().putString(key, encryptSecret(value)).commit()) { "Could not persist encrypted secret." }
+            prefs.edit().remove(key).commit()
+        }
+    }
+
+    private fun encryptSecret(value: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+        return Base64.encodeToString(cipher.iv + encrypted, Base64.NO_WRAP)
+    }
+
+    private fun decryptSecret(value: String): String {
+        val bytes = Base64.decode(value, Base64.NO_WRAP)
+        require(bytes.size > 12)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
+        return cipher.doFinal(bytes.copyOfRange(12, bytes.size)).toString(Charsets.UTF_8)
+    }
+
+    private fun secretKey(): SecretKey {
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (store.getKey(SECRET_KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(KeyGenParameterSpec.Builder(SECRET_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true).build())
+        return generator.generateKey()
+    }
+
     // ------------------------------------------------------------------
     // Backup & restore (v0.9.0+): raw prefs access for JSON export/import.
     // The onboarding prefs file is deliberately excluded — restoring
@@ -629,7 +726,35 @@ class SettingsStore(context: Context) {
     // ------------------------------------------------------------------
 
     /** Snapshot of every stored preference (excludes the onboarding file). */
-    fun exportAllPrefs(): Map<String, *> = prefs.all.toMap()
+    fun exportAllPrefs(): Map<String, *> = prefs.all.filterKeys { it !in SECRET_KEYS }.toMap()
+
+    /**
+     * Exports API keys (decrypted) for cloud backup (user's order: simple sync like Nuvio,
+     * no separate passphrase). Only includes non-blank keys.
+     */
+    fun exportApiKeysForBackup(): Map<String, String> {
+        val keys = mutableMapOf<String, String>()
+        tmdbApiKey.takeIf { it.isNotBlank() }?.let { keys["tmdb_api_key"] = it }
+        torboxApiKey?.takeIf { it.isNotBlank() }?.let { keys["torbox_api_key"] = it }
+        realDebridApiKey?.takeIf { it.isNotBlank() }?.let { keys["realdebrid_api_key"] = it }
+        traktAccessToken?.takeIf { it.isNotBlank() }?.let { keys["trakt_access_token"] = it }
+        traktRefreshToken?.takeIf { it.isNotBlank() }?.let { keys["trakt_refresh_token"] = it }
+        simklToken?.takeIf { it.isNotBlank() }?.let { keys["simkl_token"] = it }
+        return keys
+    }
+
+    /**
+     * Restores API keys from cloud backup (user's order: simple sync).
+     * Only fills in blank local keys to avoid clobbering newer local values.
+     */
+    fun importApiKeysFromBackup(keys: Map<String, String>) {
+        keys["tmdb_api_key"]?.takeIf { it.isNotBlank() && tmdbApiKey.isBlank() }?.let { tmdbApiKey = it }
+        keys["torbox_api_key"]?.takeIf { it.isNotBlank() && torboxApiKey.isNullOrBlank() }?.let { torboxApiKey = it }
+        keys["realdebrid_api_key"]?.takeIf { it.isNotBlank() && realDebridApiKey.isNullOrBlank() }?.let { realDebridApiKey = it }
+        keys["trakt_access_token"]?.takeIf { it.isNotBlank() && traktAccessToken.isNullOrBlank() }?.let { traktAccessToken = it }
+        keys["trakt_refresh_token"]?.takeIf { it.isNotBlank() && traktRefreshToken.isNullOrBlank() }?.let { traktRefreshToken = it }
+        keys["simkl_token"]?.takeIf { it.isNotBlank() && simklToken.isNullOrBlank() }?.let { simklToken = it }
+    }
 
     /**
      * Restores preferences from an export map. Unknown keys and wrong-typed
@@ -637,7 +762,13 @@ class SettingsStore(context: Context) {
      */
     fun importAllPrefs(values: Map<String, Any?>) {
         val e = prefs.edit()
+        // Backup restore replaces portable settings instead of merging; keep
+        // Keystore secrets and local first-run/privacy consent state untouched.
+        prefs.all.keys.filterNot { key -> key in SECRET_KEYS || key == KEY_ONBOARDING_DONE ||
+            key.contains("privacy", ignoreCase = true) || key.contains("consent", ignoreCase = true) }
+            .forEach(e::remove)
         for ((k, v) in values) {
+            if (k in SECRET_KEYS || k == KEY_ONBOARDING_DONE || k.contains("privacy", true) || k.contains("consent", true)) continue
             when (v) {
                 is Boolean -> e.putBoolean(k, v)
                 is Int -> e.putInt(k, v)
@@ -657,10 +788,15 @@ class SettingsStore(context: Context) {
                 null -> e.remove(k)
             }
         }
-        e.apply()
+        check(e.commit()) { "Could not apply backup settings." }
     }
 
     companion object {
+        private const val SECRET_KEY_ALIAS = "plavio.settings.secrets.v1"
+        private val SECRET_KEYS = setOf(
+            "tmdb_api_key", "simkl_token", "torbox_api_key", "realdebrid_api_key",
+            "trakt_access_token", "trakt_refresh_token"
+        )
         private const val KEY_AUTOPLAY = "autoplay"
         private const val KEY_AUTOPLAY_NEXT = "autoplay_next_episode"
         private const val KEY_SHUFFLE_EPISODES = "shuffle_episodes"
@@ -689,6 +825,7 @@ class SettingsStore(context: Context) {
         private const val KEY_SUBTITLE_LANGS = "subtitle_languages"
         private const val KEY_ACCENT = "accent_theme"
         private const val KEY_AMOLED = "amoled_black"
+        private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_CARD_STYLE = "stream_card_style"
         private const val KEY_PREINSTALL_PREFIX = "preinstall_done_"
         private const val KEY_SIMKL_TOKEN = "simkl_token"

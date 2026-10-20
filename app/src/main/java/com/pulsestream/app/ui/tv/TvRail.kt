@@ -82,7 +82,7 @@ fun TvBottomBar(
     ) {
         Surface(
             shape = RoundedCornerShape(32.dp),
-            color = palette.panel.copy(alpha = 0.94f),
+            color = palette.panel.copy(alpha = 0.55f),
             border = BorderStroke(1.dp, GlassBorder),
             shadowElevation = 10.dp
         ) {

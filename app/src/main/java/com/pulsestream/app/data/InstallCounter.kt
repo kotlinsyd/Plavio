@@ -7,10 +7,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Global install counter shown in Settings > About ("N installs").
+ * Optional global install counter shown in Settings > About ("N installs").
  *
- * Backend: Abacus (free counter API, no signup). One [trackInstallOnce] hit per
- * install; About reads the total via [getInstallCount].
+ * Backend: Abacus. No counter request is made unless the user enabled optional
+ * telemetry. About reads the total via [getInstallCount].
  *
  * Abacus keys have an absolute ~168-day TTL, so the app self-heals: it remembers
  * the highest count it has ever seen locally, and if the backend key ever
@@ -29,6 +29,7 @@ object InstallCounter {
 
     /** Increments the global counter once per install. Safe to call on every launch. */
     suspend fun trackInstallOnce(context: Context) = withContext(Dispatchers.IO) {
+        if (!TelemetryConsent.enabled(context)) return@withContext
         val p = prefs(context)
         if (p.getBoolean(KEY_COUNTED, false)) return@withContext
         try {
@@ -48,6 +49,7 @@ object InstallCounter {
      * right now (offline and nothing cached yet).
      */
     suspend fun getInstallCount(context: Context): Int? = withContext(Dispatchers.IO) {
+        if (!TelemetryConsent.enabled(context)) return@withContext null
         val p = prefs(context)
         val localMax = p.getInt(KEY_MAX_SEEN, 0)
         try {

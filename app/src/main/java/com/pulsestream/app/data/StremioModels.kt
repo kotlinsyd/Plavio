@@ -119,7 +119,18 @@ data class StreamItem(
      * stream has no usable URL, TorBox debrid can resolve it to a direct
      * HTTP link (only when a TorBox API key is configured).
      */
-    val infoHash: String? = null
+    val infoHash: String? = null,
+    /** Index of the requested file within a torrent/file pack, when supplied by the addon. */
+    val fileIdx: Int? = null,
+    /** Exact torrent-relative file path, when supplied by the addon. */
+    val filePath: String? = null,
+    /** Optional stream MIME hint, from the stream or its behaviorHints. */
+    val mimeType: String? = null,
+    /** Optional Stremio video metadata retained for downstream playback decisions. */
+    val videoSize: Long? = null,
+    val filename: String? = null,
+    /** Identity only: lets a cached HTTP link replace its pending row across progressive updates. */
+    val resolvedInfoHash: String? = null
 )
 
 data class Subtitle(
@@ -186,12 +197,16 @@ data class PlaybackRequest(
      * position saving, and Trakt/Simkl scrobbling.
      */
     val isTrailer: Boolean = false,
-    /**
-     * YouTube DASH: when the video stream is video-only, URL of the audio
-     * stream the player merges in so the quality plays with sound.
-     */
-    val mergeAudioUrl: String? = null
-)
+    /** Optional separate audio track for video-only sources; normal playback is unchanged. */
+    val mergeAudioUrl: String? = null,
+    /** Optional addon-provided MIME hint; playback may still probe/self-heal it. */
+    val mimeType: String? = null,
+    /** Originating Live channel, retained for player zap/source re-resolution. */
+    val liveChannel: TvChannelRef? = null
+) {
+    /** M3U uses type=tv; addon Live requests may use a custom resource type. */
+    val isLive: Boolean get() = type == "tv" || liveChannel != null
+}
 
 /** One entry on the Trailers tab: catalog item + where to fetch its meta/trailers. */
 data class TrailerItem(
@@ -206,7 +221,11 @@ data class TvChannelRef(
     val addonId: String,
     val metaId: String,
     val name: String,
-    val poster: String?
+    val poster: String?,
+    /** Resource type used by the channel meta and /stream request. */
+    val type: String = "tv",
+    /** Origin catalog identity; addonId above identifies its owning addon. */
+    val catalogId: String? = null
 )
 
 /** Pulls a quality tag like "1080p"/"4K" out of a stream's name/title, if present. */

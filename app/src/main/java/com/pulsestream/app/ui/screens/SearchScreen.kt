@@ -73,17 +73,43 @@ fun SearchScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var selectedType by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedGenre by rememberSaveable { mutableStateOf<String?>(null) }
+    var yearFilter by rememberSaveable { mutableStateOf(SearchYearFilter.ANY) }
+    var ratingFilter by rememberSaveable { mutableStateOf(SearchRatingFilter.ANY) }
+    var refinementsExpanded by rememberSaveable { mutableStateOf(false) }
     // The query+type combo the saved genre belongs to — resets the genre
     // when the search moves on (replaces the old remember(query) reset).
     var genreOwner by rememberSaveable { mutableStateOf("") }
     var results by remember { mutableStateOf<List<CachedMeta>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
-    val genres = remember(results) {
-        results.flatMap { it.meta.genres }.distinct().sorted().take(14)
+    var resultOwner by remember { mutableStateOf("") }
+    val queryOwner = "${query.trim()}|$selectedType"
+    val queryResults = if (queryOwner == resultOwner) results else emptyList()
+    val genres = remember(queryResults) {
+        queryResults.flatMap { it.meta.genres }.distinct().sorted().take(14)
     }
-    val visibleResults = remember(results, selectedGenre) {
-        if (selectedGenre == null) results
-        else results.filter { selectedGenre in it.meta.genres }
+    val refinedResults = remember(queryResults, yearFilter, ratingFilter) {
+        filterSearchRefinements(
+            queryResults,
+            yearFilter = yearFilter,
+            ratingFilter = ratingFilter,
+            releaseInfo = { it.meta.releaseInfo },
+            imdbRating = { it.meta.imdbRating }
+        )
+    }
+    val visibleResults = remember(refinedResults, selectedGenre) {
+        if (selectedGenre == null) refinedResults
+        else refinedResults.filter { selectedGenre in it.meta.genres }
+    }
+    val activeRefinementCount =
+        (if (selectedGenre != null) 1 else 0) +
+            (if (yearFilter != SearchYearFilter.ANY) 1 else 0) +
+            (if (ratingFilter != SearchRatingFilter.ANY) 1 else 0)
+    val metadataRefinementActive =
+        yearFilter != SearchYearFilter.ANY || ratingFilter != SearchRatingFilter.ANY
+    val clearRefinements = {
+        selectedGenre = null
+        yearFilter = SearchYearFilter.ANY
+        ratingFilter = SearchRatingFilter.ANY
     }
     val appContext = LocalContext.current.applicationContext
     var history by remember { mutableStateOf(SearchHistory.get(appContext)) }
@@ -93,6 +119,7 @@ fun SearchScreen(
         val q = query.trim()
         if (q.length < 2) {
             results = emptyList()
+            resultOwner = ""
             searching = false
             return@LaunchedEffect
         }
@@ -105,7 +132,9 @@ fun SearchScreen(
         }
         searching = true
         delay(500)
-        results = repository.searchAll(q, selectedType)
+        val fetchedResults = repository.searchAll(q, selectedType)
+        results = fetchedResults
+        resultOwner = owner
         searching = false
         SearchHistory.add(appContext, q)
         history = SearchHistory.get(appContext)
@@ -169,6 +198,87 @@ fun SearchScreen(
                 }
             }
             Spacer(Modifier.height(8.dp))
+            // Keep the added metadata filters tucked away until requested, so
+            // search results remain visible on smaller phone screens.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                TextButton(onClick = { refinementsExpanded = !refinementsExpanded }) {
+                    Text(
+                        if (activeRefinementCount > 0) "Refine ($activeRefinementCount)" else "Refine",
+                        color = LocalPalette.current.accent
+                    )
+                }
+                if (activeRefinementCount > 0) {
+                    TextButton(onClick = clearRefinements) {
+                        Text("Clear filters", color = TextSecondary)
+                    }
+                }
+            }
+            if (refinementsExpanded) {
+                Text(
+                    "Year",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(start = 16.dp, top = 2.dp)
+                )
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(SearchYearFilter.entries, key = { it.name }) { filter ->
+                        FilterChip(
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
+                            selected = yearFilter == filter,
+                            onClick = { yearFilter = filter },
+                            label = { Text(filter.label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = LocalPalette.current.accent.copy(alpha = 0.25f),
+                                selectedLabelColor = TextPrimary,
+                                containerColor = Color.White.copy(alpha = 0.06f),
+                                labelColor = TextSecondary
+                            )
+                        )
+                    }
+                }
+                Text(
+                    "IMDb rating",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(start = 16.dp, top = 2.dp)
+                )
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(SearchRatingFilter.entries, key = { it.name }) { filter ->
+                        FilterChip(
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
+                            selected = ratingFilter == filter,
+                            onClick = { ratingFilter = filter },
+                            label = { Text(filter.label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = LocalPalette.current.accent.copy(alpha = 0.25f),
+                                selectedLabelColor = TextPrimary,
+                                containerColor = Color.White.copy(alpha = 0.06f),
+                                labelColor = TextSecondary
+                            )
+                        )
+                    }
+                }
+                if (yearFilter != SearchYearFilter.ANY || ratingFilter != SearchRatingFilter.ANY) {
+                    Text(
+                        "Titles with unknown year or rating are hidden while that filter is active.",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
+                }
+            }
             // Discover: genre chips derived from the results, filtering locally.
             if (genres.isNotEmpty() && query.trim().length >= 2) {
                 LazyRow(
@@ -265,14 +375,14 @@ fun SearchScreen(
                         }
                     }
                 }
-                searching && results.isEmpty() -> Box(
+                searching -> Box(
                     Modifier.fillMaxSize(), contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = LocalPalette.current.accent)
                         Spacer(Modifier.height(12.dp))
                         Text(
-                            "Searching…",
+                            "Searching for \"${query.trim()}\"…",
                             color = TextSecondary,
                             style = MaterialTheme.typography.bodyMedium
                         )
@@ -288,21 +398,38 @@ fun SearchScreen(
                     )
                 }
                 else -> LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
+                    columns = GridCells.Adaptive(110.dp),
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     if (visibleResults.isEmpty()) {
-                        item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(3) }) {
-                            Text(
-                                "No $selectedGenre titles in these results.",
-                                color = TextSecondary,
-                                style = MaterialTheme.typography.bodyMedium,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth().padding(24.dp)
-                            )
+                        item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    if (activeRefinementCount > 0) "No titles match these filters."
+                                    else "No $selectedGenre titles in these results.",
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    textAlign = TextAlign.Center
+                                )
+                                if (metadataRefinementActive) {
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        "Some titles may have no release year or IMDb rating; unknown values are excluded by active filters.",
+                                        color = TextSecondary,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    TextButton(onClick = clearRefinements) {
+                                        Text("Clear filters", color = LocalPalette.current.accent)
+                                    }
+                                }
+                            }
                         }
                     }
                     itemsIndexed(
@@ -351,14 +478,14 @@ private fun GridPoster(item: CachedMeta, onClick: () -> Unit) {
         Spacer(Modifier.height(4.dp))
         Text(
             text = item.meta.name,
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.bodySmall,
             color = TextPrimary,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
         Text(
             text = item.addonName,
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.bodySmall,
             color = TextSecondary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis

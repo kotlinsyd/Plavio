@@ -10,7 +10,6 @@ import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
 import org.schabi.newpipe.extractor.MediaFormat
 import org.schabi.newpipe.extractor.stream.StreamInfo
-import org.schabi.newpipe.extractor.stream.VideoStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -57,12 +56,14 @@ object TrailerResolver {
         }
     }
 
+    /** A valid trailer selection; audioUrl is required when the video is video-only. */
+    data class PlaybackSelection(val videoUrl: String, val audioUrl: String? = null)
+
     /**
-     * Best progressive (audio+video) MP4 URL for a YouTube video id, or null.
-     * Prefers 720p (good balance for trailers); falls back to the highest
-     * available progressive stream, then any video stream.
+     * Resolves a trailer into either one muxed stream or an explicit video/audio
+     * pair. Never returns a video-only URL without its separate audio track.
      */
-    suspend fun resolveUrl(ytId: String): String? = withContext(Dispatchers.IO) {
+    suspend fun resolvePlayback(ytId: String): PlaybackSelection? = withContext(Dispatchers.IO) {
         runCatching {
             ensureInit()
             val info = StreamInfo.getInfo(
@@ -71,12 +72,33 @@ object TrailerResolver {
             )
             val progressive = info.videoStreams
                 .filter { it.format == MediaFormat.MPEG_4 && !it.isVideoOnly }
-            // Prefer 720p, else the highest progressive MP4…
-            progressive.firstOrNull { it.height in 700..760 }?.url
-                ?: progressive.maxByOrNull { it.height }?.url
-                // …then any progressive stream, then anything with a URL.
-                ?: info.videoStreams.firstOrNull { !it.isVideoOnly }?.url
-                ?: info.videoStreams.firstOrNull()?.url
+            val muxed = progressive.firstOrNull { it.height in 700..760 }
+                ?: progressive.maxByOrNull { it.height }
+                ?: info.videoStreams.firstOrNull { !it.isVideoOnly }
+            val muxedUrl = muxed?.url?.takeIf { it.isNotBlank() }
+            if (muxedUrl != null) return@runCatching PlaybackSelection(muxedUrl)
+
+            val videoOnly = info.videoStreams.filter { it.isVideoOnly }
+                .firstOrNull { it.height in 700..760 }
+                ?: info.videoStreams.filter { it.isVideoOnly }.maxByOrNull { it.height }
+                ?: return@runCatching null
+            val videoUrl = videoOnly.url?.takeIf { it.isNotBlank() }
+                ?: return@runCatching null
+            val audio = info.audioStreams.maxByOrNull { it.averageBitrate }
+                ?: return@runCatching null
+            val audioUrl = audio.url?.takeIf { it.isNotBlank() }
+                ?: return@runCatching null
+            PlaybackSelection(videoUrl, audioUrl)
         }.getOrNull()
     }
+
+    /**
+     * Compatibility helper for callers that only accept a single URL.
+     * Returns null rather than silently selecting a video-only stream; callers
+     * supporting mergeAudioUrl should use [resolvePlayback].
+     */
+    suspend fun resolveUrl(ytId: String): String? = resolvePlayback(ytId)
+        ?.takeIf { it.audioUrl == null }
+        ?.videoUrl
+
 }

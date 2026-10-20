@@ -17,6 +17,8 @@ import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.db.DownloadItem
 import com.pulsestream.app.data.download.DownloadManager
 import com.pulsestream.app.ui.components.GlassCard
+import com.pulsestream.app.ui.components.GlassIconButton
+import com.pulsestream.app.ui.components.WifiOnlyDownloadsControl
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
 import kotlinx.coroutines.launch
@@ -36,7 +38,9 @@ fun DownloadsScreen(
     val activeProgress by manager.activeDownloads.collectAsState()
     var storageUsed by remember { mutableStateOf(0L) }
     var confirmDelete by remember { mutableStateOf<DownloadItem?>(null) }
+    var wifiOnly by remember { mutableStateOf(manager.isWifiOnlyDownloads()) }
 
+    LaunchedEffect(Unit) { manager.recoverInterruptedDownloads() }
     LaunchedEffect(downloads) {
         storageUsed = manager.storageUsedBytes()
     }
@@ -49,132 +53,172 @@ fun DownloadsScreen(
             TopAppBar(
                 title = { Text("Downloads") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
+                    GlassIconButton(
+                        image = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        onClick = onBack,
+                        tint = TextPrimary
+                    )
                 }
             )
         }
     ) { padding ->
-        if (downloads.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        Icons.Filled.CloudDownload,
-                        contentDescription = null,
-                        modifier = Modifier.size(64.dp),
-                        tint = TextSecondary.copy(alpha = 0.5f)
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Text("No downloads yet", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Tap the download icon next to any stream to save it here.",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                item {
-                    GlassCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.padding(14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Filled.Storage, contentDescription = null, tint = TextSecondary)
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "Storage used: ${manager.formatBytes(storageUsed)}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
-                            )
-                        }
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            WifiOnlyDownloadsControl(
+                checked = wifiOnly,
+                onCheckedChange = { enabled ->
+                    wifiOnly = enabled
+                    manager.setWifiOnlyDownloads(enabled)
+                    if (!enabled) {
+                        manager.resumeQueuedDownloads()
+                        DownloadServiceStarter.start(context)
                     }
-                }
+                },
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
 
-                if (active.isNotEmpty()) {
-                    item {
-                        Text(
-                            "Active",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary,
-                            modifier = Modifier.padding(top = 4.dp)
+            if (downloads.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(horizontal = 24.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.CloudDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(64.dp),
+                            tint = TextSecondary.copy(alpha = 0.5f)
                         )
-                    }
-                    items(active, key = { it.id }) { item ->
-                        val progress = activeProgress[item.id]
-                        DownloadRow(
-                            item = item,
-                            progress = progress,
-                            manager = manager,
-                            onPause = { manager.pauseDownload(item.id) },
-                            onResume = {
-                                manager.resumeDownload(item.id)
-                                DownloadServiceStarter.start(context)
-                            },
-                            onCancel = {
-                                scope.launch { manager.cancelDownload(item.id) }
-                            },
-                            onDelete = { confirmDelete = item }
+                        Spacer(Modifier.height(12.dp))
+                        Text("No downloads yet", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Tap the download icon next to any stream to save it here.",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
                 }
-
-                if (completed.isNotEmpty()) {
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     item {
-                        Text(
-                            "Completed",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
-                    items(completed, key = { it.id }) { item ->
                         GlassCard(modifier = Modifier.fillMaxWidth()) {
                             Row(
                                 modifier = Modifier.padding(14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    Icons.Filled.Movie,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(32.dp)
-                                )
-                                Spacer(Modifier.width(12.dp))
+                                Icon(Icons.Filled.Storage, contentDescription = null, tint = TextSecondary)
+                                Spacer(Modifier.width(8.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        item.title,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = TextPrimary,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Spacer(Modifier.height(2.dp))
-                                    Text(
-                                        manager.formatBytes(item.totalBytes.takeIf { it > 0 }
-                                            ?: File(item.filePath).length()),
+                                        "Storage used: ${manager.formatBytes(storageUsed)}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = TextSecondary
                                     )
+                                    if (active.isNotEmpty()) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            TextButton(onClick = { manager.pauseAll() }) { Text("Pause queue") }
+                                            TextButton(onClick = {
+                                                manager.resumeQueuedDownloads()
+                                                DownloadServiceStarter.start(context)
+                                            }) { Text("Resume queue") }
+                                        }
+                                    }
                                 }
-                                IconButton(onClick = { onPlayFile(item.filePath, item.title) }) {
-                                    Icon(Icons.Filled.PlayArrow, contentDescription = "Play", tint = TextPrimary)
-                                }
-                                IconButton(onClick = { confirmDelete = item }) {
-                                    Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = TextSecondary)
+                            }
+                        }
+                    }
+
+                    if (active.isNotEmpty()) {
+                        item {
+                            Text(
+                                "Active",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        items(active, key = { it.id }) { item ->
+                            val progress = activeProgress[item.id]
+                            DownloadRow(
+                                item = item,
+                                progress = progress,
+                                manager = manager,
+                                onPause = { manager.pauseDownload(item.id) },
+                                onResume = {
+                                    manager.resumeDownload(item.id)
+                                    DownloadServiceStarter.start(context)
+                                },
+                                onCancel = {
+                                    scope.launch { manager.cancelDownload(item.id) }
+                                },
+                                onDelete = { confirmDelete = item }
+                            )
+                        }
+                    }
+
+                    if (completed.isNotEmpty()) {
+                        item {
+                            Text(
+                                "Completed",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        items(completed, key = { it.id }) { item ->
+                            GlassCard(modifier = Modifier.fillMaxWidth()) {
+                                Row(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Movie,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            item.title,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = TextPrimary,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            if (manager.isAdaptiveDownloadUrl(item.url)) "Manifest only — not a complete offline download"
+                                            else manager.formatBytes(item.totalBytes.takeIf { it > 0 } ?: File(item.filePath).length()),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (manager.isAdaptiveDownloadUrl(item.url)) MaterialTheme.colorScheme.error else TextSecondary
+                                        )
+                                    }
+                                    if (!manager.isAdaptiveDownloadUrl(item.url)) {
+                                        GlassIconButton(
+                                            image = Icons.Filled.PlayArrow,
+                                            contentDescription = "Play",
+                                            onClick = { onPlayFile(item.filePath, item.title) },
+                                            tint = TextPrimary
+                                        )
+                                    }
+                                    GlassIconButton(
+                                        image = Icons.Filled.Delete,
+                                        contentDescription = "Delete",
+                                        onClick = { confirmDelete = item },
+                                        tint = TextSecondary
+                                    )
                                 }
                             }
                         }
@@ -238,7 +282,7 @@ private fun DownloadRow(
                             else manager.formatBytes(downloaded)
                             "PAUSED" -> "Paused • ${manager.formatBytes(downloaded)}" +
                                 (if (total > 0) " of ${manager.formatBytes(total)}" else "")
-                            "QUEUED" -> "Waiting…"
+                            "QUEUED" -> item.error ?: "Waiting…"
                             "FAILED" -> "Failed${item.error?.let { ": $it" } ?: ""}"
                             else -> status
                         },
@@ -250,19 +294,28 @@ private fun DownloadRow(
                 }
                 when (status) {
                     "DOWNLOADING", "QUEUED" -> {
-                        IconButton(onClick = onPause) {
-                            Icon(Icons.Filled.Pause, contentDescription = "Pause", tint = TextPrimary)
-                        }
+                        GlassIconButton(
+                            image = Icons.Filled.Pause,
+                            contentDescription = "Pause",
+                            onClick = onPause,
+                            tint = TextPrimary
+                        )
                     }
                     "PAUSED", "FAILED" -> {
-                        IconButton(onClick = onResume) {
-                            Icon(Icons.Filled.PlayArrow, contentDescription = "Resume", tint = TextPrimary)
-                        }
+                        GlassIconButton(
+                            image = Icons.Filled.PlayArrow,
+                            contentDescription = "Resume",
+                            onClick = onResume,
+                            tint = TextPrimary
+                        )
                     }
                 }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Filled.Close, contentDescription = "Cancel", tint = TextSecondary)
-                }
+                GlassIconButton(
+                    image = Icons.Filled.Close,
+                    contentDescription = "Cancel",
+                    onClick = onDelete,
+                    tint = TextSecondary
+                )
             }
             Spacer(Modifier.height(8.dp))
             LinearProgressIndicator(

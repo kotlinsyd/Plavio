@@ -116,7 +116,8 @@ class RealDebridApi(private val apiKey: String) {
     data class RdFile(
         val id: Long,
         val path: String,
-        val bytes: Long
+        val bytes: Long,
+        val selected: Boolean = false
     )
 
     /** Status info for one torrent. */
@@ -139,7 +140,8 @@ class RealDebridApi(private val apiKey: String) {
                 RdFile(
                     id = f.optLong("id", -1L),
                     path = f.optString("path", ""),
-                    bytes = f.optLong("bytes", 0L)
+                    bytes = f.optLong("bytes", 0L),
+                    selected = f.optInt("selected", 0) == 1
                 )
             }
         } ?: emptyList()
@@ -197,6 +199,22 @@ class RealDebridApi(private val apiKey: String) {
         return ext in VIDEO_EXTS
     }
 
+    internal fun selectRequestedFile(files: List<RdFile>, fileIdx: Int?, filePath: String?): RdFile? {
+        if (fileIdx == null && filePath.isNullOrBlank()) {
+            return files.filter { isVideo(it.path) }.maxByOrNull { it.bytes }
+                ?: files.maxByOrNull { it.bytes }
+        }
+        val byIndex = fileIdx?.let { files.getOrNull(it) }
+        val normalizedPath = filePath?.replace('\\', '/')?.trim('/')
+        val byPath = normalizedPath?.let { requested ->
+            files.firstOrNull { it.path.replace('\\', '/').trim('/').equals(requested, true) }
+        }
+        if (fileIdx != null && byIndex == null) return null
+        if (filePath != null && byPath == null) return null
+        if (byIndex != null && byPath != null && byIndex != byPath) return null
+        return byIndex ?: byPath
+    }
+
     /**
      * Full resolve: infoHash → direct HTTP URL.
      *
@@ -206,26 +224,41 @@ class RealDebridApi(private val apiKey: String) {
      *
      * Picks the largest video file in the torrent.
      */
-    suspend fun resolveCachedToHttp(infoHash: String): String? = withContext(Dispatchers.IO) {
+    suspend fun resolveCachedToHttp(
+        infoHash: String,
+        fileIdx: Int? = null,
+        filePath: String? = null
+    ): String? = withContext(Dispatchers.IO) {
         runCatching {
             if (!isCached(infoHash)) return@runCatching null
             val magnet = "magnet:?xt=urn:btih:$infoHash"
             val torrentId = addMagnet(magnet)
             var info = getTorrentInfo(torrentId)
             if (info.status == "waiting_files_selection") {
-                val video = info.files
-                    .filter { isVideo(it.path) }
-                    .maxByOrNull { it.bytes }
-                    ?: info.files.maxByOrNull { it.bytes }
+                val selected = selectRequestedFile(info.files, fileIdx, filePath)
                     ?: return@runCatching null
-                selectFiles(torrentId, video.id.toString())
+                selectFiles(torrentId, selected.id.toString())
                 info = waitForDownload(torrentId)
             } else if (info.status != "downloaded") {
                 info = waitForDownload(torrentId)
             }
-            val link = info.links.firstOrNull() ?: return@runCatching null
+            val selected = selectRequestedFile(info.files, fileIdx, filePath)
+                ?: return@runCatching null
+            // Existing cached torrents may already have several selected files.
+            // Match the selected file's position, never blindly take the first URL.
+            val link = linkForRequestedFile(info, selected) ?: return@runCatching null
             unrestrictLink(link)
-        }.getOrNull()
+        }.getOrElse { error ->
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    internal fun linkForRequestedFile(status: TorrentStatus, requested: RdFile): String? {
+        val selected = status.files.filter { it.selected }
+        if (selected.size != status.links.size) return null // Split/ambiguous mappings fail closed.
+        val index = selected.indexOfFirst { it.id == requested.id }
+        return status.links.getOrNull(index)
     }
 }
 

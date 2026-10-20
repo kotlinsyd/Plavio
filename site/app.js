@@ -69,65 +69,59 @@ fetch("addons.json")
   })
   .catch(function () { renderAddons(ADDONS); });
 
-// Always point the download buttons at the newest release APKs.
+// Use the same stable mobile manifest as the in-app updater. If it cannot be
+// validated or fetched, leave generic release-page links rather than claiming
+// an old APK is current.
 (function () {
-  var GITLAB_PROJECT = 87396069;
+  var STABLE_URL = 'https://gitlab.com/KotlinJS5/plavio/-/raw/main/stable.json';
   var labBtn = document.getElementById('dlGitlab');
   var labVer = document.getElementById('dlVerLab');
   var hubBtn = document.getElementById('dlGithub');
   var hubVer = document.getElementById('dlVerHub');
+  var versionPattern = /^\d+\.\d+\.\d+$/;
 
-  // GitLab: use stable.json version (same as in-app updater) — never serve untested releases.
-  var tvBtn = document.getElementById('dlTv');
-  var tvVer = document.getElementById('dlVerTv');
-  fetch('https://gitlab.com/api/v4/projects/' + GITLAB_PROJECT + '/repository/files/stable.json/raw?ref=main')
+  function isValidMobileStable(stable) {
+    if (!stable || stable.platform !== 'mobile' || stable.channel !== 'stable' ||
+        stable.artifactType !== 'apk' || !versionPattern.test(stable.version || '')) return false;
+    var expected = 'https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/' +
+      stable.version + '/Plavio-v' + stable.version + '.apk';
+    return stable.apkUrl === expected;
+  }
+
+  fetch(STABLE_URL)
     .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
     .then(function (stable) {
-      var stableVer = (stable.version || '').trim();
-      if (!stableVer) return Promise.reject();
-      return fetch('https://gitlab.com/api/v4/projects/' + GITLAB_PROJECT + '/releases?per_page=20')
-        .then(function (r) { return r.json(); })
-        .then(function (releases) {
-          var tvDone = false, labDone = false;
-          for (var i = 0; i < releases.length && !(tvDone && labDone); i++) {
-            var tag = releases[i].tag_name || '';
-            var isTv = /-tv$/i.test(tag);
-            var links = (releases[i].assets && releases[i].assets.links) || [];
-            for (var j = 0; j < links.length; j++) {
-              if (/\.apk$/i.test(links[j].url)) {
-                if (isTv && tvBtn && !tvDone) {
-                  tvBtn.href = links[j].url;
-                  if (tvVer) tvVer.textContent = tag;
-                  tvDone = true;
-                } else if (!isTv && !labDone) {
-                  // Only use the stable version for the main download button
-                  var relVer = tag.replace(/^v/i, '');
-                  if (relVer === stableVer) {
-                    labBtn.href = links[j].url;
-                    labVer.textContent = tag;
-                    labDone = true;
-                  }
-                }
-                break;
-              }
+      if (!isValidMobileStable(stable)) return;
+      labBtn.href = stable.apkUrl;
+      labVer.textContent = 'v' + stable.version + ' · stable';
+
+      // Update the structured-data version from the validated stable pointer.
+      var appSchema = document.getElementById('softwareApplicationSchema');
+      if (appSchema) {
+        try {
+          var schema = JSON.parse(appSchema.textContent);
+          schema.softwareVersion = stable.version;
+          appSchema.textContent = JSON.stringify(schema);
+        } catch (e) {}
+      }
+
+      // A GitHub APK is shown only when that exact stable version has the
+      // canonical mobile artifact. Never substitute GitHub's latest release.
+      return fetch('https://api.github.com/repos/kotlinsyd/Plavio/releases/tags/v' + stable.version)
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+        .then(function (rel) {
+          var tagVersion = (rel.tag_name || '').replace(/^v/i, '');
+          if (tagVersion !== stable.version) return;
+          var assets = rel.assets || [];
+          for (var i = 0; i < assets.length; i++) {
+            if (assets[i].name === 'Plavio-v' + stable.version + '.apk' &&
+                /^https:\/\/github\.com\//i.test(assets[i].browser_download_url || '')) {
+              hubBtn.href = assets[i].browser_download_url;
+              hubVer.textContent = 'v' + stable.version + ' · stable';
+              return;
             }
           }
         });
     })
-    .catch(function () { /* keep the hardcoded fallback link */ });
-
-  // GitHub: newest release with an .apk asset.
-  fetch('https://api.github.com/repos/kotlinsyd/Plavio/releases/latest')
-    .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
-    .then(function (rel) {
-      var assets = rel.assets || [];
-      for (var i = 0; i < assets.length; i++) {
-        if (/\.apk$/i.test(assets[i].name || '')) {
-          hubBtn.href = assets[i].browser_download_url;
-          hubVer.textContent = rel.tag_name;
-          return;
-        }
-      }
-    })
-    .catch(function () { /* keep the releases-page fallback link */ });
+    .catch(function () { /* leave generic release-page links and labels */ });
 })();

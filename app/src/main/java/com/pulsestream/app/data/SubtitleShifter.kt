@@ -22,7 +22,7 @@ private const val SHIFT_CACHE_DIR = "plavio_subs_shifted"
 private val SRT_TS = Regex("""(\d{2}):(\d{2}):(\d{2}),(\d{3})""")
 
 /** Matches a WebVTT timestamp: 00:01:23.456 (2- or 3-part hours accepted). */
-private val VTT_TS = Regex("""(\d{2,}):(\d{2}):(\d{2})\.(\d{3})""")
+private val VTT_TS = Regex("""(?:(\d{2,}):)?(\d{2}):(\d{2})\.(\d{3})""")
 
 /**
  * Returns a copy of [resolved] with [offsetMs] applied to every timestamp.
@@ -60,7 +60,8 @@ fun formatOffsetMs(offsetMs: Long): String = when {
 }
 
 private fun shiftedFile(source: File, offsetMs: Long, dir: File): File {
-    val out = File(dir, "shift_${offsetMs}_${source.name}")
+    val sourceKey = source.absolutePath.hashCode().toUInt().toString(16)
+    val out = File(dir, "shift_${offsetMs}_${sourceKey}_${source.name}")
     if (out.exists() && out.length() > 0) return out
     val text = source.readText(Charsets.UTF_8)
     val isVtt = text.trimStart().startsWith("WEBVTT", ignoreCase = true)
@@ -80,7 +81,13 @@ private fun parseSrt(m: MatchResult): Long {
     return h.toLong() * 3_600_000L + min.toLong() * 60_000L + s.toLong() * 1_000L + ms.toLong()
 }
 
-private fun parseVtt(m: MatchResult): Long = parseSrt(m)
+private fun parseVtt(m: MatchResult): Long {
+    val h = m.groups[1]?.value?.toLongOrNull() ?: 0L
+    val min = m.groupValues[2].toLong()
+    val sec = m.groupValues[3].toLong()
+    val ms = m.groupValues[4].toLong()
+    return h * 3_600_000L + min * 60_000L + sec * 1_000L + ms
+}
 
 private fun shiftMs(tsMs: Long, offsetMs: Long): Long =
     (tsMs + offsetMs).coerceAtLeast(0L)

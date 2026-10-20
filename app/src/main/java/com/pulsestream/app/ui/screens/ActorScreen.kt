@@ -32,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
@@ -59,11 +60,7 @@ fun ActorScreen(
 ) {
     var person by remember(personId) { mutableStateOf<PersonDetail?>(null) }
     var loading by remember(personId) { mutableStateOf(true) }
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val tmdbKey = remember {
-        context.getSharedPreferences("pulse_settings", android.content.Context.MODE_PRIVATE)
-            .getString("tmdb_api_key", null)
-    }
+    val tmdbKey = remember { repository.settings.tmdbApiKey.takeIf { it.isNotBlank() } }
 
     LaunchedEffect(personId) {
         loading = true
@@ -195,10 +192,11 @@ private fun FilmographyGrid(
     onOpenDetail: (type: String, metaId: String) -> Unit
 ) {
     // Fixed-height grid inside the outer LazyColumn.
-    val rows = (metas.size + 2) / 3
-    val gridHeight = (rows * 236).dp
+    val columns = adaptiveColumnCount(LocalConfiguration.current.screenWidthDp - 48)
+    val rows = (metas.size + columns - 1) / columns
+    val gridHeight = (rows * 244).dp
     LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
+        columns = GridCells.Adaptive(140.dp),
         modifier = Modifier
             .fillMaxWidth()
             .height(gridHeight),

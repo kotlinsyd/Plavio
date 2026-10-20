@@ -47,6 +47,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -63,6 +64,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -76,6 +78,7 @@ import com.pulsestream.app.ui.components.PlayButton
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.data.MetaDetail
 import com.pulsestream.app.data.PlaybackRequest
+import com.pulsestream.app.data.BrowsingPrivacy
 import com.pulsestream.app.data.TrailerResolver
 import com.pulsestream.app.data.TmdbClient
 import com.pulsestream.app.data.RelatedSection
@@ -102,7 +105,6 @@ import com.pulsestream.app.ui.components.streamListItems
 import com.pulsestream.app.ui.components.DownloadConfirmDialog
 import com.pulsestream.app.ui.components.StreamTab
 import com.pulsestream.app.ui.components.addonKey
-import com.pulsestream.app.ui.components.rememberStreamBrowserState
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.TextPrimary
@@ -297,11 +299,23 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
      * probe. Keeps an already-found winner — no churn while sources stream in.
      */
     private fun maybeProbePick(streams: List<StreamItem>) {
-        if (pickState is PickState.Found) return
+        // Adaptive quality cap (user's order 2026-10-20): only when the user
+        // left quality on "Auto".
+        val cap = if (repo.settings.autoplayQuality == "Auto")
+            repo.settings.adaptiveQualityCap() else null
+        val found = pickState as? PickState.Found
+        if (found != null) {
+            // Keep the winner — UNLESS it violates the cap. A 4K pick could have
+            // locked in from the first addon's early emission, before a 1080p
+            // option from a slower addon ever arrived; then re-probe.
+            val capRank = cap?.let { com.pulsestream.app.data.StreamProber.qualityRank(it) }
+            if (capRank == null ||
+                com.pulsestream.app.data.StreamProber.qualityRank(found.stream) <= capRank) return
+        }
         probeJob?.cancel()
         probeJob = viewModelScope.launch {
             pickState = PickState.Probing
-            val best = StreamProber.findBest(streams, isTv)
+            val best = StreamProber.findBest(streams.filter { com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url) }, isTv, cap)
             pickState = if (best != null) PickState.Found(best) else PickState.None
         }
     }
@@ -332,7 +346,8 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
         val s = streamsState as? StreamsUiState.Content ?: return
         // Only consider playable streams - skip unresolved infohash: placeholders.
         // Debrid resolution replaces these with real HTTP links asynchronously.
-        val playableStreams = s.streams.filter { !it.url.startsWith("infohash:") }
+        val playableStreams = s.streams.filter { com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url) }
+        if (playableStreams.isEmpty()) { pendingAutoPlay = true; return }
         // Settings > Streams autoplay: pick by the user's quality/size rule
         // instead of the probed fastest stream.
         if (repo.settings.streamAutoplay) {
@@ -355,7 +370,7 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
                 withTimeoutOrNull(2500) { probeJob?.join() }
                 val best = pickState as? PickState.Found
                 val cur = streamsState as? StreamsUiState.Content ?: return@launch
-                val curPlayable = cur.streams.filter { !it.url.startsWith("infohash:") }
+                val curPlayable = cur.streams.filter { com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url) }
                 if (best != null && !best.stream.url.startsWith("infohash:")) autoPlayEvent = AutoPlay(best.stream, cur.subtitles)
                 else if (curPlayable.isNotEmpty()) autoPlayEvent = AutoPlay(curPlayable.first(), cur.subtitles)
             }
@@ -461,6 +476,7 @@ private fun startPlayback(
     allStreams: List<StreamItem>,
     onPlay: () -> Unit
 ) {
+    if (stream.url.startsWith("infohash:", true) || stream.url.startsWith("magnet:", true)) return
     val meta = (vm.metaState as? MetaUiState.Content)?.meta ?: return
     val isSeries = meta.type == "series" && vm.selectedVideo != null
     val title = if (isSeries) {
@@ -471,6 +487,7 @@ private fun startPlayback(
     repository.pendingPlayback = PlaybackRequest(
         streamUrl = stream.url,
         headers = stream.headers,
+        mimeType = stream.mimeType,
         title = title,
         poster = vm.selectedVideo?.thumbnail ?: meta.poster,
         videoId = vm.selectedVideo?.id ?: meta.id,
@@ -536,6 +553,13 @@ private fun DetailContent(
     val isTvDetail = rememberIsTv()
     val playButtonFocus = remember { FocusRequester() }
     var playFocusLanded by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val browsingPrivacy = remember(context) { BrowsingPrivacy(context) }
+    var hideEpisodeDetails by remember { mutableStateOf(browsingPrivacy.hideUnrevealedEpisodes()) }
+    val episodeShowKey = "$addonId|${meta.type}|${meta.id}"
+    var revealedEpisodeIds by remember(episodeShowKey) {
+        mutableStateOf(browsingPrivacy.revealedEpisodes(episodeShowKey))
+    }
     LaunchedEffect(isTvDetail, playFocusLanded) {
         if (isTvDetail && !playFocusLanded) {
             playFocusLanded = true
@@ -692,21 +716,23 @@ private fun DetailContent(
                 ) {
                     items(meta.trailerStreams, key = { it.ytId }) { trailer ->
                         var resolving by remember { mutableStateOf(false) }
+                        var trailerUnavailable by remember { mutableStateOf(false) }
                         Card(
                             modifier = Modifier
                                 .width(160.dp)
                                 .clickable(enabled = !resolving) {
                                     if (resolving) return@clickable
                                     resolving = true
+                                    trailerUnavailable = false
                                     scope.launch {
                                         try {
-                                            val url = withTimeoutOrNull(30_000) {
-                                                TrailerResolver.resolveUrl(trailer.ytId)
+                                            val playback = withTimeoutOrNull(30_000) {
+                                                TrailerResolver.resolvePlayback(trailer.ytId)
                                             }
-                                            if (url != null) {
+                                            if (playback != null) {
                                                 onPlayTrailer(
                                                     PlaybackRequest(
-                                                        streamUrl = url,
+                                                        streamUrl = playback.videoUrl,
                                                         title = "${meta.name} — Trailer",
                                                         poster = meta.background ?: meta.poster,
                                                         videoId = "trailer_${trailer.ytId}",
@@ -714,9 +740,12 @@ private fun DetailContent(
                                                         type = meta.type,
                                                         streamLabel = "TRAILER",
                                                         metaId = meta.id,
-                                                        isTrailer = true
+                                                        isTrailer = true,
+                                                        mergeAudioUrl = playback.audioUrl
                                                     )
                                                 )
+                                            } else {
+                                                trailerUnavailable = true
                                             }
                                         } finally {
                                             resolving = false
@@ -767,6 +796,13 @@ private fun DetailContent(
                                     color = TextPrimary,
                                     maxLines = 1
                                 )
+                                if (trailerUnavailable) {
+                                    Text(
+                                        "Trailer stream unavailable",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextSecondary
+                                    )
+                                }
                             }
                         }
                     }
@@ -776,11 +812,7 @@ private fun DetailContent(
         // Only actors with a TMDB person id navigate (keyless mode has names only).
         if (meta.cast.isNotEmpty()) {
             item(key = "cast") {
-                val context = androidx.compose.ui.platform.LocalContext.current
-                val tmdbKey = remember {
-                    context.getSharedPreferences("pulse_settings", android.content.Context.MODE_PRIVATE)
-                        .getString("tmdb_api_key", null)
-                }
+                val tmdbKey = remember { repository.settings.tmdbApiKey.takeIf { it.isNotBlank() } }
                 // Enrich cast with TMDB photos/IDs when key is available
                 var enrichedCast by remember { mutableStateOf(meta.cast) }
                 LaunchedEffect(meta.id, tmdbKey) {
@@ -836,11 +868,7 @@ private fun DetailContent(
         }
         // "You May Like" — TMDB recommendations (requires TMDB API key in Settings).
         item(key = "you_may_like") {
-            val context = androidx.compose.ui.platform.LocalContext.current
-            val tmdbKey = remember {
-                context.getSharedPreferences("pulse_settings", android.content.Context.MODE_PRIVATE)
-                    .getString("tmdb_api_key", null)
-            }
+            val tmdbKey = remember { repository.settings.tmdbApiKey.takeIf { it.isNotBlank() } }
             if (!tmdbKey.isNullOrBlank()) {
                 var recommendations by remember { mutableStateOf<List<TmdbRecommendation>>(emptyList()) }
                 var loadingRecs by remember { mutableStateOf(false) }
@@ -884,11 +912,9 @@ private fun DetailContent(
                                         .width(110.dp)
                                         .liquidGlass(RoundedCornerShape(16.dp))
                                         .clickable {
-                                            val ctx2 = context
+                                            val key = tmdbKey ?: return@clickable
                                             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                                                 try {
-                                                    val key = ctx2.getSharedPreferences("pulse_settings", android.content.Context.MODE_PRIVATE)
-                                                        .getString("tmdb_api_key", null) ?: return@launch
                                                     val client = okhttp3.OkHttpClient()
                                                     val url = "https://api.themoviedb.org/3/${rec.mediaType}/${rec.id}/external_ids?api_key=$key"
                                                     val req = okhttp3.Request.Builder().url(url).get().build()
@@ -986,10 +1012,29 @@ private fun DetailContent(
                             tint = if (vm.shuffleEpisodes) LocalPalette.current.accent else TextSecondary
                         )
                     }
+                    if (!isTvDetail) {
+                        FilterChip(
+                            selected = hideEpisodeDetails,
+                            onClick = {
+                                val enabled = !hideEpisodeDetails
+                                hideEpisodeDetails = enabled
+                                browsingPrivacy.setHideUnrevealedEpisodes(enabled)
+                            },
+                            label = { Text("Hide spoilers") },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = LocalPalette.current.accent.copy(alpha = 0.25f),
+                                selectedLabelColor = TextPrimary,
+                                containerColor = Color.White.copy(alpha = 0.06f),
+                                labelColor = TextSecondary
+                            )
+                        )
+                    }
                 }
             }
             itemsIndexed(episodes, key = { index, video -> "${video.id}_$index" }) { _, video ->
                 val selected = vm.selectedVideo?.id == video.id
+                val episodeRevealed = video.id in revealedEpisodeIds
+                val hideDetails = BrowsingPrivacy.shouldHideEpisodeDetails(hideEpisodeDetails, episodeRevealed)
                 GlassCard(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
                         .border(
@@ -1005,24 +1050,53 @@ private fun DetailContent(
                                 .background(Color.White.copy(alpha = 0.06f)),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (video.thumbnail != null) {
+                            if (!hideDetails && video.thumbnail != null) {
                                 SafePosterImage(video.thumbnail, null, modifier = Modifier.fillMaxSize())
                             } else {
-                                Text("E${video.episode}", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                                Text("S${video.season} · E${video.episode}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                             }
                         }
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(
-                                "${video.episode}. ${video.title}",
-                                color = TextPrimary,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (!video.overview.isNullOrBlank()) {
-                                Text(video.overview!!, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (hideDetails) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        "Episode details hidden",
+                                        color = TextSecondary,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (!isTvDetail) {
+                                        TextButton(
+                                            onClick = {
+                                                revealedEpisodeIds = browsingPrivacy.setEpisodeRevealed(episodeShowKey, video.id, true)
+                                            }
+                                        ) {
+                                            Text("Reveal")
+                                        }
+                                    }
+                                }
+                            } else {
+                                Text(
+                                    "${video.episode}. ${video.title}",
+                                    color = TextPrimary,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (!video.overview.isNullOrBlank()) {
+                                    Text(video.overview!!, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                                if (!isTvDetail && hideEpisodeDetails) {
+                                    TextButton(
+                                        onClick = {
+                                            revealedEpisodeIds = browsingPrivacy.setEpisodeRevealed(episodeShowKey, video.id, false)
+                                        }
+                                    ) {
+                                        Text("Hide details")
+                                    }
+                                }
                             }
                         }
                         if (selected) {
@@ -1450,13 +1524,9 @@ private fun PickerCardBody(
 }
 
 
-/**
- * Full-screen source picker opened by long-pressing Play.
- * Top: compact title header (poster, name, year, rating) with back button.
- * Then per-addon tabs, then the filtered stream list.
- */
+/** Full-screen picker opened by long-pressing Play. All content scrolls on small screens. */
 @Composable
-private fun FullPageSourcePicker(
+internal fun FullPageSourcePicker(
     meta: MetaDetail,
     streams: List<StreamItem>,
     loading: Boolean,
@@ -1467,125 +1537,162 @@ private fun FullPageSourcePicker(
     onDownload: ((StreamItem) -> Unit)? = null
 ) {
     val palette = LocalPalette.current
-    val browserState = com.pulsestream.app.ui.components.rememberStreamBrowserState(streams)
+    val browserState = rememberStreamBrowserState(streams)
+    androidx.activity.compose.BackHandler(onBack = onBack)
     GlowBackground {
-        Column(Modifier.fillMaxSize()) {
-            // Top bar: back + title
+        Column(Modifier.fillMaxSize().tvSheetFocus()) {
             Row(
-                Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp),
+                Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onBack) {
                     Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
                 }
                 Text(
-                    "Sources",
+                    "Choose stream",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
-                    color = TextPrimary
+                    color = TextPrimary,
+                    modifier = Modifier.weight(1f)
                 )
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.Close, contentDescription = "Close stream picker", tint = TextSecondary)
+                }
             }
-            // Full-width poster banner (user's order — matches player Sources sheet).
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp)
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().testTag("stream-picker-list"),
+                contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                com.pulsestream.app.ui.components.SafePosterImage(
-                    model = meta.poster,
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize()
-                )
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            androidx.compose.ui.graphics.Brush.verticalGradient(
-                                colors = listOf(
-                                    Color.Transparent,
-                                    Color(0xFF14141F).copy(alpha = 0.7f),
-                                    Color(0xFF14141F)
-                                )
-                            )
-                        )
-                )
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(horizontal = 20.dp, vertical = 12.dp)
-                ) {
-                    Text(
-                        text = meta.name,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary,
-                        maxLines = 2
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    val sub = listOfNotNull(
-                        meta.releaseInfo?.takeIf { it.isNotBlank() },
-                        meta.imdbRating?.takeIf { it.isNotBlank() }?.let { "★ $it" }
-                    ).joinToString(" · ")
-                    Text(
-                        text = if (sub.isNotBlank()) sub else "${streams.size} sources",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
-                }
-            }
-            // Addon tabs + quality pills (user's order).
-            com.pulsestream.app.ui.components.AddonTabs(
-                browserState,
-                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-            )
-            com.pulsestream.app.ui.components.QualityPills(
-                browserState,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            // Stream list / states
-            when {
-                loading && streams.isEmpty() -> {
+                item(key = "poster") {
+                    // Design I banner (user's approved design): full-width backdrop
+                    // with gradient into the page background, title + count below.
                     Box(
-                        Modifier.fillMaxWidth().padding(32.dp),
-                        contentAlignment = Alignment.Center
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(200.dp)
                     ) {
-                        CircularProgressIndicator(
-                            color = palette.accent,
-                            modifier = Modifier.size(32.dp)
+                        SafePosterImage(
+                            model = meta.background ?: meta.poster,
+                            contentDescription = "${meta.name} banner",
+                            modifier = Modifier.fillMaxSize()
                         )
-                    }
-                }
-                errorMessage != null && streams.isEmpty() -> {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
-                        Text(
-                            errorMessage,
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.bodyMedium
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                                        colors = listOf(
+                                            Color.Transparent,
+                                            palette.background.copy(alpha = 0.7f),
+                                            palette.background
+                                        )
+                                    )
+                                )
                         )
-                        Spacer(Modifier.height(12.dp))
-                        Button(
-                            onClick = onRetry,
-                            colors = ButtonDefaults.buttonColors(containerColor = palette.accent)
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(horizontal = 20.dp, vertical = 12.dp)
                         ) {
-                            Text("Retry", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text(
+                                meta.name,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                maxLines = 2
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = listOfNotNull(
+                                    "${streams.size} sources available",
+                                    meta.releaseInfo?.takeIf { it.isNotBlank() },
+                                    meta.imdbRating?.takeIf { it.isNotBlank() }?.let { "★ $it" }
+                                ).joinToString(" · "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
                         }
                     }
                 }
-                streams.isEmpty() -> {
+                item(key = "filters") {
                     Text(
-                        "No sources found yet — they appear here as each addon answers.",
+                        "Add-ons",
                         color = TextSecondary,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                     )
+                    AddonTabs(browserState, compact = true)
+                    com.pulsestream.app.ui.components.QualityPills(
+                        browserState,
+                        compact = true,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 12.dp)
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            browserState.selectedQuality?.let { "$it streams" } ?: "Available streams",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            "${browserState.filtered.size} results",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextSecondary
+                        )
+                    }
+                    if (loading && streams.isNotEmpty()) {
+                        androidx.compose.material3.LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            color = palette.accent
+                        )
+                    }
                 }
-                else -> {
-                    StreamList(
+                when {
+                    loading && streams.isEmpty() -> item(key = "loading") {
+                        Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = palette.accent, modifier = Modifier.size(32.dp))
+                        }
+                    }
+                    errorMessage != null && streams.isEmpty() -> item(key = "error") {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp)) {
+                            Text(errorMessage, color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.height(12.dp))
+                            Button(onClick = onRetry, colors = ButtonDefaults.buttonColors(containerColor = palette.accent)) {
+                                Text("Retry", color = Color(0xFF0A0A12), fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    streams.isEmpty() -> item(key = "empty") {
+                        Text(
+                            "No sources found yet — they appear here as each addon answers.",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                    browserState.filtered.isEmpty() -> item(key = "no-matches") {
+                        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                            Text(
+                                "No streams match this add-on and quality. Choose Any or another add-on.",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            androidx.compose.material3.TextButton(onClick = {
+                                browserState.onSelectTab(com.pulsestream.app.ui.components.STREAM_TAB_ALL)
+                                browserState.onSelectQuality(null)
+                            }) { Text("Clear filters", color = palette.accent) }
+                        }
+                    }
+                    else -> streamListItems(
                         streams = browserState.filtered,
                         onPick = onPick,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 24.dp),
-                        onDownload = onDownload
+                        onDownload = onDownload,
+                        compact = true
                     )
                 }
             }

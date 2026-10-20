@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <!-- The onboarding-done flag lives in its own prefs file
-         (pulse_onboarding.xml). Auto-backup must never restore it: on a
-         fresh install or a new device the first-run guide has to show. -->
-    <exclude domain="sharedpref" path="pulse_onboarding.xml" />
+    <!-- Local file export is the only supported backup path. Exclude all
+         preference files (including cloud credentials) if a legacy platform
+         or OEM ignores android:allowBackup=false. -->
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="root" path="." />
+    <exclude domain="file" path="." />
 </full-backup-content>

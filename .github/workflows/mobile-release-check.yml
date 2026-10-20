@@ -1,0 +1,41 @@
+name: Validate owner-signed mobile release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Require existing owner signing identity
+        env:
+          SIGNING_STORE_B64: ${{ secrets.PLAVIO_SIGNING_STORE_B64 }}
+          EXPECTED_SIGNER: ${{ secrets.PLAVIO_EXPECTED_SIGNER_SHA256 }}
+        run: |
+          test -n "$SIGNING_STORE_B64" && test -n "$EXPECTED_SIGNER" || { echo 'Configure owner signing secrets before release validation.'; exit 1; }
+          umask 077
+          printf '%s' "$SIGNING_STORE_B64" | base64 --decode > "$RUNNER_TEMP/owner.jks"
+      - name: Validate source and native codecs before signing
+        run: |
+          python3 scripts/scan-source-secrets.py
+          python3 scripts/check-native-alignment.py
+      - name: Build and verify mobile release only
+        env:
+          ORG_GRADLE_PROJECT_PLAVIO_SIGNING_STORE: ${{ runner.temp }}/owner.jks
+          ORG_GRADLE_PROJECT_PLAVIO_SIGNING_STORE_PASSWORD: ${{ secrets.PLAVIO_SIGNING_STORE_PASSWORD }}
+          ORG_GRADLE_PROJECT_PLAVIO_SIGNING_KEY_ALIAS: ${{ secrets.PLAVIO_SIGNING_KEY_ALIAS }}
+          ORG_GRADLE_PROJECT_PLAVIO_SIGNING_KEY_PASSWORD: ${{ secrets.PLAVIO_SIGNING_KEY_PASSWORD }}
+          PLAVIO_EXPECTED_SIGNER_SHA256: ${{ secrets.PLAVIO_EXPECTED_SIGNER_SHA256 }}
+        run: |
+          ./gradlew --no-daemon -PplavioPublish=true :app:testMobileDebugUnitTest :app:lintMobileRelease :app:assembleMobileRelease
+          bash scripts/verify-release.sh
+      - name: Remove temporary signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/owner.jks"
+# Deliberately no upload, release creation, push, or deployment step.

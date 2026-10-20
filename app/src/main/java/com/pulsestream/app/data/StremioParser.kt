@@ -11,6 +11,8 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 
 /**
  * Resilient hand-written parser for the Stremio addon protocol.
@@ -34,16 +36,54 @@ object StremioParser {
      * Reads behaviorHints.proxyHeaders.request — extra HTTP headers an addon
      * requires on the stream URL (used by some debrid-backed addons).
      * Returns an empty map when absent.
+    */
+    private fun parseProxyHeaders(s: JsonObject, embeddedHeaders: Map<String, String>): Map<String, String> {
+        val hints = s["behaviorHints"] as? JsonObject
+        val req = (hints?.get("proxyHeaders") as? JsonObject)?.get("request") as? JsonObject
+        val proxyHeaders = parseHeaderObject(req)
+        // Explicit Stremio header objects retain their existing precedence over
+        // proxy headers; both override URL-embedded IPTV headers.
+        val merged = linkedMapOf<String, Pair<String, String>>()
+        listOf(embeddedHeaders, proxyHeaders, parseHeaderObject(s["headers"] as? JsonObject)).forEach { source ->
+            source.forEach { (name, value) -> merged[name.lowercase()] = name to value }
+        }
+        return merged.values.associate { it }
+    }
+
+    /**
+     * IPTV playlists/addons often encode request headers as
+     * `https://host/live.m3u8|User-Agent=...&Referer=...`. Treat the suffix as
+     * headers only when every pair is well-formed; otherwise preserve the URL
+     * unchanged rather than guessing at an arbitrary pipe in a URL.
      */
-    private fun parseProxyHeaders(s: JsonObject): Map<String, String> {
-        val hints = s["behaviorHints"] as? JsonObject ?: return emptyMap()
-        val proxy = hints["proxyHeaders"] as? JsonObject ?: return emptyMap()
-        val req = proxy["request"] as? JsonObject ?: return emptyMap()
-        return req.entries.mapNotNull { (k, v) ->
+    private fun splitEmbeddedHeaders(rawUrl: String?): Pair<String?, Map<String, String>> {
+        if (rawUrl == null) return null to emptyMap()
+        val separator = rawUrl.lastIndexOf('|')
+        if (separator < 0 || separator == rawUrl.lastIndex) return rawUrl to emptyMap()
+        val pairs = rawUrl.substring(separator + 1).split('&')
+        val headers = linkedMapOf<String, String>()
+        for (pair in pairs) {
+            val equals = pair.indexOf('=')
+            if (equals <= 0) return rawUrl to emptyMap()
+            val name = decodeHeaderComponent(pair.substring(0, equals)) ?: return rawUrl to emptyMap()
+            val value = decodeHeaderComponent(pair.substring(equals + 1)) ?: return rawUrl to emptyMap()
+            if (!name.matches(Regex("[!#$%&'*+.^_`|~0-9A-Za-z-]+")) ||
+                value.isBlank() || value.any { it == '\r' || it == '\n' || it == '\u0000' }) {
+                return rawUrl to emptyMap()
+            }
+            headers[name] = value
+        }
+        return rawUrl.substring(0, separator) to headers
+    }
+
+    private fun decodeHeaderComponent(value: String): String? =
+        runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8.name()) }.getOrNull()
+
+    private fun parseHeaderObject(obj: JsonObject?): Map<String, String> =
+        obj?.entries?.mapNotNull { (k, v) ->
             val value = (v as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
             if (value != null) k to value else null
-        }.toMap()
-    }
+        }?.toMap() ?: emptyMap()
 
     private fun resourceNames(el: JsonElement): List<String> = when (el) {
         is JsonPrimitive -> listOfNotNull(el.contentOrNull)
@@ -186,8 +226,10 @@ object StremioParser {
         val obj = json.parseToJsonElement(text).jsonObject
         val streams = (obj["streams"] as? JsonArray)?.mapNotNull { el ->
             val s = el as? JsonObject ?: return@mapNotNull null
-            val url = s.str("url")
-            val infoHash = s.str("infoHash")
+            val (url, embeddedHeaders) = splitEmbeddedHeaders(s.str("url"))
+            val magnetHash = torrentHashFromMagnet(url)
+            val infoHash = s.str("infoHash") ?: magnetHash
+            val behaviorHints = s["behaviorHints"] as? JsonObject
             // Keep entries that have either a direct URL or an infoHash
             // (infoHash-only entries can be resolved via TorBox debrid).
             if (url == null && infoHash == null) return@mapNotNull null
@@ -195,11 +237,19 @@ object StremioParser {
                 // Placeholder URL for infoHash-only entries so dedup still
                 // works; StreamRepository replaces it with the real HTTP
                 // link once TorBox resolves it.
-                url = url ?: "infohash:$infoHash",
+                url = if (magnetHash != null) "infohash:$infoHash" else url ?: "infohash:$infoHash",
                 name = s.str("name"),
                 title = s.str("title") ?: s.str("description"),
-                headers = parseProxyHeaders(s),
-                infoHash = infoHash
+                headers = parseProxyHeaders(s, embeddedHeaders),
+                infoHash = infoHash,
+                fileIdx = (s["fileIdx"] as? JsonPrimitive)?.intOrNull
+                    ?: ((s["behaviorHints"] as? JsonObject)?.get("fileIdx") as? JsonPrimitive)?.intOrNull,
+                filePath = s.str("filePath") ?: s.str("file") ?: s.str("path")
+                    ?: s.str("filename") ?: behaviorHints?.str("filePath"),
+                mimeType = s.str("mimeType") ?: behaviorHints?.str("mimeType"),
+                videoSize = ((s["videoSize"] ?: behaviorHints?.get("videoSize")) as? JsonPrimitive)
+                    ?.contentOrNull?.toLongOrNull(),
+                filename = s.str("filename") ?: behaviorHints?.str("filename")
             )
         } ?: emptyList()
         val subtitles = (obj["subtitles"] as? JsonArray)?.mapNotNull { el ->

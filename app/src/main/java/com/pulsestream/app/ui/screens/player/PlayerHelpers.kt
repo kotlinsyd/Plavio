@@ -1,83 +1,28 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.pulsestream.app.ui.screens.player
 
 import androidx.media3.common.Format
 import androidx.media3.common.Player
 import androidx.media3.common.TrackGroup
 import com.pulsestream.app.data.ResolvedSubtitle
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.TrustManagerFactory
-import javax.net.ssl.X509TrustManager
 
 /**
- * Nuvio parity: HEAD-probe a URL's Content-Type for self-heal.
- * Returns a media3 MIME string (or null when unknown).
+ * Format recovery accepts gateways that reject HEAD or hide playlist MIME types.
+ * Uses the same TLS and credential-scoping rules as normal playback.
  */
 internal fun probePlaybackContentType(url: String, headers: Map<String, String>): String? {
-    return try {
-        val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
-            requestMethod = "HEAD"
-            connectTimeout = 8000
-            readTimeout = 8000
-            instanceFollowRedirects = true
-            headers.forEach { (k, v) -> setRequestProperty(k, v) }
-        }
-        conn.connect()
-        val ct = conn.contentType?.lowercase().orEmpty()
-        conn.disconnect()
-        when {
-            "mpegurl" in ct || "m3u8" in ct -> androidx.media3.common.MimeTypes.APPLICATION_M3U8
-            "mpd" in ct || "dash" in ct -> androidx.media3.common.MimeTypes.APPLICATION_MPD
-            "mp4" in ct -> androidx.media3.common.MimeTypes.VIDEO_MP4
-            "webm" in ct -> androidx.media3.common.MimeTypes.VIDEO_WEBM
-            "matroska" in ct -> androidx.media3.common.MimeTypes.VIDEO_MATROSKA
-            else -> null
-        }
-    } catch (_: Exception) { null }
+    return com.pulsestream.app.data.PlaybackContentProbe.probe(url, headers)
 }
 
-/** Installs the fallback-trust SSLSocketFactory once (idempotent, NuvioTV parity). */
-internal var playbackTlsInstalled = false
-internal fun ensurePlaybackTlsInstalled() {
-    if (playbackTlsInstalled) return
-    playbackTlsInstalled = true
-    try {
-        val platformTm = run {
-            val tmf = TrustManagerFactory.getInstance(
-                TrustManagerFactory.getDefaultAlgorithm()
-            ).apply { init(null as java.security.KeyStore?) }
-            tmf.trustManagers.filterIsInstance<X509TrustManager>().first()
-        }
-        val fallbackTm = object : X509TrustManager {
-            override fun checkClientTrusted(
-                chain: Array<java.security.cert.X509Certificate>, authType: String
-            ) = platformTm.checkClientTrusted(chain, authType)
-            override fun checkServerTrusted(
-                chain: Array<java.security.cert.X509Certificate>, authType: String
-            ) {
-                try {
-                    platformTm.checkServerTrusted(chain, authType)
-                } catch (_: Exception) {
-                    // Fall back to trust-all (NuvioTV parity).
-                }
-            }
-            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> =
-                platformTm.acceptedIssuers
-        }
-        val sslContext = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf<TrustManager>(fallbackTm), java.security.SecureRandom())
-        }
-        HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
-        val platformVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
-        HttpsURLConnection.setDefaultHostnameVerifier { hostname, session ->
-            try {
-                platformVerifier.verify(hostname, session)
-            } catch (_: Exception) {
-                true // Fall back to allow (NuvioTV parity).
-            }
-        }
-    } catch (_: Exception) { /* platform TLS unchanged */ }
+/** Start ExoPlayer's silent prepare before waiting on persisted resume progress. */
+internal suspend fun preparePlayerBeforeSavedPositionLookup(
+    preparePlayer: () -> Unit,
+    loadSavedPosition: suspend () -> Long,
+    prepareEarly: Boolean = true
+): Long {
+    if (prepareEarly) preparePlayer()
+    return loadSavedPosition()
 }
 
 /** Transient on-screen feedback for gestures, speed, aspect and track changes. */

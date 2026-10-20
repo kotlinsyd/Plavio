@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.ChevronRight
@@ -50,6 +51,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -129,7 +131,8 @@ fun GlassCard(
     onClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
-    val shape = RoundedCornerShape(20.dp)
+    // Pill-leaning radius (user's order 2026-10-20): big soft corners.
+    val shape = RoundedCornerShape(28.dp)
     val clickableMod = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Box(
         modifier = modifier
@@ -138,6 +141,27 @@ fun GlassCard(
             .liquidGlass(shape),
         content = content
     )
+}
+
+/** A compact glass control with a reliable 48dp minimum touch target. */
+@Composable
+fun GlassIconButton(
+    image: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = TextPrimary
+) {
+    // Full pill for small glass controls (user's order 2026-10-20).
+    val shape = RoundedCornerShape(50)
+    IconButton(
+        onClick = onClick,
+        modifier = modifier
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .liquidGlass(shape)
+    ) {
+        Icon(image, contentDescription = contentDescription, tint = tint)
+    }
 }
 
 /**
@@ -265,7 +289,7 @@ fun GradientButton(
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier,
+        modifier = modifier.sizeIn(minHeight = 48.dp),
         colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
         contentPadding = androidx.compose.foundation.layout.PaddingValues()
     ) {
@@ -274,11 +298,11 @@ fun GradientButton(
                 .clip(RoundedCornerShape(28.dp))
                 .background(LocalPalette.current.gradient, RoundedCornerShape(28.dp))
                 // Glossy top highlight + rim light, like a glass button.
-                .topSheen(alpha = 0.28f, fraction = 0.55f)
+                .topSheen(alpha = 0.16f, fraction = 0.55f)
                 .border(
                     1.dp,
                     Brush.verticalGradient(
-                        listOf(Color.White.copy(alpha = 0.6f), Color.White.copy(alpha = 0.08f))
+                        listOf(Color.White.copy(alpha = 0.45f), Color.White.copy(alpha = 0.08f))
                     ),
                     RoundedCornerShape(28.dp)
                 )
@@ -403,16 +427,14 @@ fun DotsLoader(
     dotCount: Int = 5
 ) {
     val palette = LocalPalette.current
-    val transition = rememberInfiniteTransition(label = "dots")
-    val wave by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "dotsWave"
-    )
+    val reduced = com.pulsestream.app.data.rememberReducedMotion()
+    val wave = if (reduced) 0.5f else {
+        val transition = rememberInfiniteTransition(label = "dots")
+        val animated by transition.animateFloat(initialValue = 0f, targetValue = 1f,
+            animationSpec = infiniteRepeatable(animation = tween(1500, easing = LinearEasing), repeatMode = RepeatMode.Restart),
+            label = "dotsWave")
+        animated
+    }
     Canvas(
         modifier
             .width((dotCount * 22).dp)
@@ -569,7 +591,8 @@ fun GlassButton(
     val shape = RoundedCornerShape(28.dp)
     Box(
         modifier = modifier
-            .height(52.dp)
+            .sizeIn(minHeight = 52.dp)
+            .alpha(if (enabled) 1f else 0.45f)
             .tvFocusRing(shape)
             .liquidGlass(shape)
             .clickable(enabled = enabled, onClick = onClick)

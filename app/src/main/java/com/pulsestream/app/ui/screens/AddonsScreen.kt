@@ -545,11 +545,14 @@ fun AddonsScreen(
                     Surface(
                         onClick = {
                             if (chosen.isNotEmpty()) {
-                                val link = AddonShare.encode(
-                                    chosen.map {
-                                        SharedAddon(it.name, it.baseUrl)
-                                    }
-                                )
+                                val link = try {
+                                    AddonShare.encode(chosen.map { SharedAddon(it.name, it.baseUrl) })
+                                } catch (_: com.pulsestream.app.data.UnsafeAddonShareException) {
+                                    android.widget.Toast.makeText(context,
+                                        "Sharing blocked: an addon URL may contain a password, token or API key. Share its public install link instead.",
+                                        android.widget.Toast.LENGTH_LONG).show()
+                                    return@Surface
+                                }
                                 val intent = Intent(Intent.ACTION_SEND).apply {
                                     type = "text/plain"
                                     putExtra(

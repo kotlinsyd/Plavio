@@ -18,7 +18,7 @@ object BackupManager {
     /** Suggested file name for a new export, e.g. plavio-backup-2026-10-14.json */
     fun suggestedFileName(): String {
         val stamp = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-        return "plavio-backup-$stamp.json"
+        return "plavio-backup-$stamp.plavio"
     }
 
     /** Writes [json] to the user-chosen [uri]. Returns null on success, or an error message. */
@@ -34,7 +34,25 @@ object BackupManager {
     /** Reads text from the user-chosen [uri]. Returns null on failure. */
     fun readFromUri(context: Context, uri: Uri): String? {
         return runCatching {
-            context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                readBounded(input)
+            }
         }.getOrNull()?.takeIf { it.isNotBlank() }
     }
+    /** 10 MiB plaintext fits within a 14 MiB base64/encryption envelope. */
+    internal fun readBounded(input: java.io.InputStream, maxBytes: Int = 14 * 1024 * 1024): String {
+        require(maxBytes > 0)
+        val output = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        var total = 0
+        while (true) {
+            val count = input.read(buffer, 0, minOf(buffer.size, maxBytes - total + 1))
+            if (count < 0) break
+            total += count
+            require(total <= maxBytes) { "Backup file exceeds the size safety limit." }
+            output.write(buffer, 0, count)
+        }
+        return output.toString("UTF-8")
+    }
+
 }

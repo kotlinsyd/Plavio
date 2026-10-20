@@ -29,7 +29,6 @@ data class UpdateInfo(
  */
 object UpdateChecker {
     private const val STABLE_URL = "https://gitlab.com/KotlinJS5/plavio/-/raw/main/stable.json"
-    private const val STABLE_TV_URL = "https://gitlab.com/KotlinJS5/plavio/-/raw/main/stable-tv.json"
     private const val PREFS = "pulse_update"
     private const val KEY_LAST_CHECK = "last_check_ms"
     private const val KEY_SKIPPED = "skipped_version"
@@ -114,89 +113,39 @@ object UpdateChecker {
         p: SharedPreferences,
         respectSkip: Boolean
     ): UpdateInfo? {
-        // UPDATER LOCK (v0.8.23-tv): the flavor is decided at COMPILE time
-        // (BuildConfig.FLAVOR), never by a runtime UiMode check that a TV
-        // box can misreport. The tv flavor ONLY reads the TV pointer and
-        // ONLY accepts -tv tags/URLs; mobile ONLY reads the mobile pointer
-        // and only accepts non-tv tags/URLs. (The old code compared
-        // "0.8.20" as newer than "0.8.20-tv" — the "-tv" suffix parsed as
-        // 0 — and served the mobile APK to TVs.)
-        val isTv = BuildConfig.FLAVOR == "tv"
-        val url = if (isTv) STABLE_TV_URL else STABLE_URL
-        val stable: JSONObject
-        try {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 15000
-                readTimeout = 15000
-                setRequestProperty("User-Agent", "PulseStream/${BuildConfig.VERSION_NAME}")
+        val conn = (URL(STABLE_URL).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 15000
+            readTimeout = 15000
+            setRequestProperty("User-Agent", "Plavio/${BuildConfig.VERSION_NAME}")
+        }
+        val info = try {
+            if (conn.responseCode != 200) throw UpdateCheckFailure(
+                "The update server answered ${conn.responseCode}", offline = false)
+            if (conn.contentLengthLong > 65536) throw UpdateCheckFailure("Update manifest is too large", false)
+            val bytes = conn.inputStream.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(4096)
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    if (output.size() + n > 65536) throw UpdateCheckFailure("Update manifest is too large", false)
+                    output.write(buffer, 0, n)
+                }
+                output.toByteArray()
             }
-            if (conn.responseCode != 200) {
-                throw UpdateCheckFailure(
-                    "The update server answered ${conn.responseCode}", offline = false
-                )
-            }
-            stable = try {
-                JSONObject(conn.inputStream.bufferedReader().readText())
-            } catch (_: Exception) {
-                throw UpdateCheckFailure("Couldn't read the update info", offline = false)
-            }
+            try { MobileReleaseManifest.parse(JSONObject(bytes.toString(Charsets.UTF_8))) }
+            catch (_: Exception) { throw UpdateCheckFailure("Invalid stable mobile release metadata", false) }
         } catch (e: UpdateCheckFailure) {
             throw e
         } catch (e: Exception) {
             throw UpdateCheckFailure("Couldn't reach the update server", offline = isOffline(e))
+        } finally {
+            conn.disconnect()
         }
-        val tag = stable.optString("version", "").trim().trimStart { it == 'v' || it == 'V' }
-        // Tag lock: a TV build only ever accepts an "x.y.z-tv" tag, a
-        // mobile build only "x.y.z". A mismatched pointer can never slip
-        // through, whatever the release ordering or host state.
-        val tagMatchesFlavor = if (isTv) tag.endsWith("-tv", ignoreCase = true)
-        else !tag.endsWith("-tv", ignoreCase = true)
-        if (tag.isBlank() || !tagMatchesFlavor) return null
-        val version = tag.removeSuffix("-tv").removeSuffix("-TV")
-        // Local compare on the dotted part only ("0.8.23-tv" == "0.8.23").
-        val local = BuildConfig.VERSION_NAME.removeSuffix("-tv").removeSuffix("-TV")
-        if (version.isBlank() || !isNewer(version, local)) return null
-        if (respectSkip && p.getString(KEY_SKIPPED, null) == tag) return null
-        // Well-formed fallback per flavor (verified against the live
-        // pointers): the package path segment carries the full tag, the
-        // FILE name carries the dotted version only —
-        //   TV:     …/plavio-tv/0.8.23-tv/Plavio-TV-v0.8.23.apk
-        //   mobile: …/plavio/0.8.20/Plavio-v0.8.20.apk
-        val fallback = if (isTv)
-            "https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio-tv/$tag/Plavio-TV-v$version.apk"
-        else
-            "https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/$tag/Plavio-v$version.apk"
-        // URL lock: the TV package lives under /plavio-tv/ and its file
-        // name carries "-tv"; the mobile package under /plavio/ never
-        // does. The pointer URL must be https on gitlab.com and match this
-        // flavor — a blank, mismatched or non-https pointer falls back to
-        // the well-formed flavor URL instead of NPE-ing (mobile used to
-        // hit apkUrl!! on a blank pointer and silently offer no update).
-        val pointerUrl = stable.optString("apkUrl", "")
-            .takeIf { it.isNotBlank() }
-            ?.let { validateApkUrl(it) }
-        val urlMatchesFlavor = if (isTv) pointerUrl?.contains("plavio-tv") == true
-        else pointerUrl?.contains("-tv") != true
-        val apkUrl = if (pointerUrl != null && urlMatchesFlavor) pointerUrl else fallback
-        return UpdateInfo(
-            version = tag,
-            notes = stable.optString("notes", "").trim(),
-            apkUrl = apkUrl,
-            isMajor = stable.optBoolean("major", false)
-        )
+        if (!isNewer(info.version, BuildConfig.VERSION_NAME)) return null
+        if (respectSkip && p.getString(KEY_SKIPPED, null) == info.version) return null
+        return info
     }
-
-    /**
-     * The pointer's apkUrl must be an https URL on gitlab.com — cleartext
-     * http (or any other host) is rejected so a tampered pointer can't
-     * redirect the updater at an arbitrary APK.
-     */
-    private fun validateApkUrl(url: String): String? = runCatching {
-        val u = URL(url)
-        if (!u.protocol.equals("https", ignoreCase = true)) return null
-        if (!u.host.equals("gitlab.com", ignoreCase = true)) return null
-        url
-    }.getOrNull()
 
     private fun isOffline(e: Throwable): Boolean =
         e is UnknownHostException ||

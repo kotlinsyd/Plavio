@@ -30,6 +30,7 @@ import java.nio.ByteBuffer;
 import java.util.List;
 
 /** FFmpeg audio decoder. */
+@androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
 /* package */ final class FfmpegAudioDecoder
     extends SimpleDecoder<DecoderInputBuffer, SimpleDecoderOutputBuffer, FfmpegDecoderException> {
 

@@ -1,5 +1,1 @@
-{
-  "_how_to": "ADD YOUR OWN ADDONS HERE. Copy one block below, paste it after the last one (add a comma between blocks), and change name, desc and url. Save — the site rebuilds itself from GitLab, and the section reappears automatically.",
-
-  "addons": []
-}
+{"_how_to":"ADD YOUR OWN ADDONS HERE. Copy one block below, paste it after the last one (add a comma between blocks), and change name, desc and url. Save — the site rebuilds itself from GitLab, and the section reappears automatically.","addons":[{"desc":"Rich metadata, posters, trailers, and 'More like this' recommendations. Made for Plavio.","name":"PlavioMeta","url":"https://plaviometa.vercel.app/manifest.json"},{"desc":"HD streams for movies and shows — 4K, 1080p, 720p with Hindi and English audio options.","name":"PlavioHD","url":"https://plaviohd.edon.workers.dev/manifest.json"}]}

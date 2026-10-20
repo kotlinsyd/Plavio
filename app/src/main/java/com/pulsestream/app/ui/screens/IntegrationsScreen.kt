@@ -105,11 +105,11 @@ fun IntegrationsScreen(
                 SettingsStaticRow(
                     icon = Icons.Filled.Bolt,
                     title = "TorBox",
-                    subtitle = if (torboxConfigured) "Connected" else "Under testing — coming soon",
+                    subtitle = if (torboxConfigured) "API key saved" else "Add your API key for cached streams",
                     trailing = {
                         if (torboxConfigured) {
                             Text(
-                                "Connected",
+                                "Saved",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.SemiBold,
                                 color = LocalPalette.current.accent
@@ -130,7 +130,8 @@ fun IntegrationsScreen(
                         keyLinkText = "Get your API key at torbox.app/settings",
                         keyLinkUrl = "https://torbox.app",
                         currentKey = settings.torboxApiKey,
-                        enabled = false,
+                        enabled = true,
+                        helpText = "Paste your TorBox API key and tap Save. To remove it, clear the field and save. Saving does not validate the key.",
                         onSave = { settings.torboxApiKey = it; torboxTick++ },
                         onDismiss = { showTorboxDialog = false }
                     )
@@ -423,11 +424,13 @@ private fun ApiKeyDialog(
     currentKey: String?,
     enabled: Boolean,
     onSave: (String) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    helpText: String? = null
 ) {
     val context = LocalContext.current
     var keyInput by remember { mutableStateOf(currentKey ?: "") }
     var showKey by remember { mutableStateOf(false) }
+    var saveFailed by remember { mutableStateOf(false) }
 
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
@@ -436,7 +439,7 @@ private fun ApiKeyDialog(
             Column {
                 OutlinedTextField(
                     value = keyInput,
-                    onValueChange = { keyInput = it },
+                    onValueChange = { keyInput = it; saveFailed = false },
                     label = { Text("API key") },
                     singleLine = true,
                     enabled = enabled,
@@ -461,12 +464,26 @@ private fun ApiKeyDialog(
                         )
                     }
                 ) {
-                    Text(keyLinkText, color = LocalPalette.current.accent)
+                        Text(keyLinkText, color = LocalPalette.current.accent)
                     Spacer(Modifier.width(4.dp))
                     Icon(
                         Icons.Filled.OpenInNew,
                         contentDescription = null,
                         tint = LocalPalette.current.accent
+                    )
+                }
+                if (helpText != null) {
+                    Text(
+                        helpText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+                if (saveFailed) {
+                    Text(
+                        "Could not save the API key securely. Please try again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
                     )
                 }
                 if (!enabled) {
@@ -481,8 +498,13 @@ private fun ApiKeyDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    onSave(keyInput.trim())
-                    onDismiss()
+                    try {
+                        onSave(keyInput.trim())
+                        onDismiss()
+                    } catch (_: Exception) {
+                        // Never expose the key or a storage exception in UI/logs.
+                        saveFailed = true
+                    }
                 },
                 enabled = enabled
             ) {
