@@ -73,7 +73,7 @@ fetch("addons.json")
 // validated or fetched, leave generic release-page links rather than claiming
 // an old APK is current.
 (function () {
-  var STABLE_URL = 'https://gitlab.com/KotlinJS5/plavio/-/raw/main/stable.json';
+  var STABLE_URL = 'https://gitlab.com/api/v4/projects/87396069/repository/files/stable.json/raw?ref=main';
   var labBtn = document.getElementById('dlGitlab');
   var labVer = document.getElementById('dlVerLab');
   var hubBtn = document.getElementById('dlGithub');
