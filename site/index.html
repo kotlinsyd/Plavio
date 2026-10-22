@@ -1,175 +1,96 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Plavio — Free Android Streaming App | Movies, Series &amp; Live TV</title>
-<meta name="description" content="Plavio is a free, open-source Android streaming app. Watch movies, series and live TV on your phone or tablet. No in-app ads; optional telemetry is off by default.">
-<meta name="keywords" content="streaming app, watch movies, live TV, free, open source, APK download">
-<meta name="robots" content="index, follow">
-<meta name="google-site-verification" content="FL3IltwrKy0JnSscnZfDonLSzoOHVhWfZ4c582CBxBc">
-<link rel="canonical" href="https://plaviomedia.vercel.app/">
-<meta property="og:title" content="Plavio — Free Android Streaming App | Movies, Series & Live TV">
-<meta property="og:description" content="Free & open-source Android streaming app. Watch movies, series and live TV on your phone or tablet.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://plaviomedia.vercel.app/">
-<meta property="og:site_name" content="Plavio">
-<meta property="og:image" content="https://plaviomedia.vercel.app/img/logo.png">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Plavio — Free Android Streaming App">
-<meta name="twitter:description" content="Watch movies, series and live TV on Android. Free, open-source, no ads.">
-<script id="softwareApplicationSchema" type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  "name": "Plavio",
-  "applicationCategory": "MultimediaApplication",
-  "operatingSystem": "Android",
-  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
-  "description": "Plavio is a free, open-source Android streaming app. Watch movies, series and live TV on your phone or tablet. No in-app ads; optional telemetry is off by default.",
-  "url": "https://plaviomedia.vercel.app/",
-  "downloadUrl": "https://plaviomedia.vercel.app/",
-  "softwareVersion": "0.11.3",
-  "image": "https://plaviomedia.vercel.app/img/logo.png"
-}
-</script>
-<script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "FAQPage",
-  "mainEntity": [
-    {
-      "@type": "Question",
-      "name": "Is Plavio free?",
-      "acceptedAnswer": {"@type": "Answer", "text": "Plavio has no in-app advertising. It offers optional cloud sync and optional telemetry; telemetry is off by default. See the Privacy Policy for details."}
-    },
-    {
-      "@type": "Question",
-      "name": "Does Plavio work on Android TV?",
-      "acceptedAnswer": {"@type": "Answer", "text": "The Plavio TV app has been discontinued. Plavio is now mobile-only."}
-    },
-    {
-      "@type": "Question",
-      "name": "How do I install addons?",
-      "acceptedAnswer": {"@type": "Answer", "text": "Copy the addon's manifest URL, open Plavio, go to Addons and tap the + button, then paste the link. The addon installs instantly and its catalogs appear in the app."}
-    },
-    {
-      "@type": "Question",
-      "name": "Is Plavio open source?",
-      "acceptedAnswer": {"@type": "Answer", "text": "Yes. Plavio's source code is public on GitHub and GitLab under the MIT license. Anyone can inspect, fork or contribute to it."}
-    }
-  ]
-}
-</script>
-<link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="icon" type="image/png" sizes="192x192" href="img/favicon-192.png">
-<link rel="apple-touch-icon" href="img/favicon-192.png">
-<link rel="stylesheet" href="styles.css">
-<script>
-  window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
-</script>
-<script defer src="/_vercel/insights/script.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b100f">
+  <title>Plavio — Your streaming universe, on Android</title>
+  <meta name="description" content="A free, open-source streaming client for Android phones and tablets. Bring your addons, enjoy the built-in player, and make Plavio yours. Download v0.11.4.">
+  <link rel="canonical" href="https://plavio.site/">
+  <link rel="icon" href="assets/favicon.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/favicon.png">
+  <link rel="preload" as="image" href="assets/app-home.webp">
+  <link rel="stylesheet" href="styles.css">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Plavio">
+  <meta property="og:title" content="Plavio — Press play. Make it yours.">
+  <meta property="og:description" content="Your addons. Your player. Your streaming universe. Free and open source, made for Android.">
+  <meta property="og:url" content="https://plavio.site/">
+  <meta property="og:image" content="https://plavio.site/assets/logo.png">
+  <meta name="twitter:card" content="summary">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Plavio","applicationCategory":"MultimediaApplication","operatingSystem":"Android 8.0+","softwareVersion":"0.11.4","url":"https://plavio.site/","image":"https://plavio.site/assets/logo.png","downloadUrl":"https://github.com/kotlinsyd/Plavio/releases/download/v0.11.4/Plavio-v0.11.4.apk","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"license":"https://github.com/kotlinsyd/Plavio/blob/main/LICENSE","description":"A free, open-source, mobile-only Android streaming client with addons and a built-in player."}</script>
+  <script src="app.js" defer></script>
 </head>
 <body>
-
-<header class="hero">
-  <img class="logo" src="img/logo.png" alt="Plavio logo" width="512" height="512">
-  <h1>Plavio</h1>
-  <p class="tagline">Your streaming universe.</p>
-  <p class="sub">Free &amp; open-source Android app — your addons, your streams, your player.</p>
-  <div class="dl-row">
-    <a id="dlGitlab" class="dl-btn" href="https://gitlab.com/KotlinJS5/plavio/-/releases">
-      <span class="dl-icon">⬇</span>
-      <span class="dl-text">Download APK</span>
-      <span id="dlVerLab" class="dl-ver">Browse releases</span>
-    </a>
-    <a id="dlGithub" class="dl-btn dl-gh" href="https://github.com/kotlinsyd/Plavio/releases">
-      <span class="dl-icon">⬇</span>
-      <span class="dl-text">Download from GitHub</span>
-      <span id="dlVerHub" class="dl-ver">Browse releases</span>
-    </a>
-  </div>
-  <p class="dl-note">No in-app ads · Android 8.0+ · Optional telemetry is off by default</p>
-</header>
-
-<section class="shots">
-  <h2>Take a look</h2>
-  <div class="shot-row">
-    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-home.png" alt="Home screen" loading="lazy">
-    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-live.png" alt="Live TV" loading="lazy">
-    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-search.png" alt="Search" loading="lazy">
-    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-addons.png" alt="Addons" loading="lazy">
-    <img src="https://gitlab.com/KotlinJS5/plavio/-/raw/main/screenshots/pulse-settings.png" alt="Settings" loading="lazy">
-  </div>
-</section>
-
-<section class="features">
-  <h2>Why Plavio</h2>
-  <div class="feat-grid">
-    <div class="feat"><h3>🎬 Your addons</h3><p>Install any Stremio-protocol addon via its manifest URL. Star favorites, reorder freely.</p></div>
-    <div class="feat"><h3>▶️ Built-in player</h3><p>Gesture controls, subtitles, audio tracks, resume playback, skip intro.</p></div>
-    <div class="feat"><h3>📺 Live TV</h3><p>A dedicated tab for your live streams.</p></div>
-    <div class="feat"><h3>🔄 In-app updates</h3><p>The app tells you when a new version is out and updates itself.</p></div>
-    <div class="feat"><h3>🌙 Made for the dark</h3><p>A glass-glow dark interface designed for movie nights.</p></div>
-    <div class="feat"><h3>🔓 Open source</h3><p>The code is public, with no in-app ads. Optional telemetry and cloud sync are described in the Privacy Policy.</p></div>
-  </div>
-</section>
-
-<section class="install">
-  <h2>How to install</h2>
-  <ol>
-    <li><strong>Tap one of the Download buttons</strong> above — the file saves to your phone.</li>
-    <li><strong>Open the downloaded file</strong> from your notifications or Downloads.</li>
-    <li><strong>Allow unknown sources</strong> when Android asks. Only install APKs from a source you trust; sideloaded apps are installed outside the Play Store.</li>
-    <li><strong>Tap Install</strong>, then open Plavio and enjoy.</li>
-  </ol>
-  <p class="note">Updating later is easy: the app notifies you and installs the update itself.</p>
-</section>
-
-<section class="addons">
-  <h2>Recommended addons</h2>
-  <p class="sec-sub">Copy a link, then in Plavio go to <strong>Addons → +</strong> and paste it. That's it.</p>
-  <div id="addonList" class="addon-list"></div>
-</section>
-
-<section class="faq">
-  <h2>Frequently asked questions</h2>
-  <div class="faq-list">
-    <div class="faq-item">
-      <h3>Is Plavio free?</h3>
-      <p>Plavio has no in-app advertising. Optional telemetry is off by default, and optional cloud sync requires an account. See the Privacy Policy for details.</p>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container nav">
+      <a class="brand" href="index.html" aria-label="Plavio home"><img src="assets/logo.png" width="38" height="38" alt=""><span>Plavio<span class="brand-dot">.</span></span></a>
+      <nav class="desktop-nav" aria-label="Main navigation"><a href="#experience">The app</a><a href="#addons">Addons</a><a href="#install">Get started</a><a href="#faq">FAQ</a></nav>
+      <a class="button button-small" href="#download">Get Plavio <span aria-hidden="true">↗</span></a>
     </div>
-    <div class="faq-item">
-      <h3>Does Plavio work on Android TV?</h3>
-      <p>The Plavio TV app has been discontinued. Plavio is now mobile-only — enjoy it on your phone or tablet.</p>
-    </div>
-    <div class="faq-item">
-      <h3>How do I install addons?</h3>
-      <p>Copy the addon's manifest URL, open Plavio, go to <strong>Addons</strong> and tap <strong>+</strong>, then paste the link. The addon installs instantly and its catalogs show up in the app.</p>
-    </div>
-    <div class="faq-item">
-      <h3>Is Plavio open source?</h3>
-      <p>Yes. The full source code is public on GitHub and GitLab under the MIT license — inspect it, fork it, contribute to it.</p>
-    </div>
-  </div>
-</section>
-
-<section class="links">
-  <h2>Follow the project</h2>
-  <div class="link-row">
-    <a class="pill" href="https://github.com/kotlinsyd/Plavio" target="_blank" rel="noopener">GitHub</a>
-    <a class="pill" href="https://gitlab.com/KotlinJS5/plavio" target="_blank" rel="noopener">GitLab</a>
-    <a class="pill" href="https://www.reddit.com/r/Plavio/" target="_blank" rel="noopener">Reddit</a>
-    <a class="pill" href="https://discord.gg/pbNwJKU3p" target="_blank" rel="noopener">Discord</a>
-  </div>
-</section>
-
-<footer>
-  <p>Built with ❤️ by <strong>Najam</strong></p>
-  <p class="fine">Plavio is a generic streaming client. Addons are provided by third parties.</p>
-  <p class="fine"><a href="/privacy.html">Privacy Policy</a> · <a href="/terms.html">Terms of Service</a></p>
-</footer>
-
-<script src="app.js"></script>
+  </header>
+  <main id="main">
+    <section class="hero container" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <a class="release-pill" href="https://github.com/kotlinsyd/Plavio/releases/tag/v0.11.4"><span class="status-dot" aria-hidden="true"></span> v0.11.4 is here <span class="pill-divider">/</span> See what’s new <span aria-hidden="true">↗</span></a>
+        <p class="eyebrow">YOUR STREAMING UNIVERSE</p>
+        <h1 id="hero-title">Press play.<br><span>Make it yours.</span></h1>
+        <p class="hero-description">A little more choice. A lot less clutter. Bring your addons together in a free, open-source streaming app made for your Android.</p>
+        <div class="hero-actions"><a class="button button-primary" href="https://github.com/kotlinsyd/Plavio/releases/download/v0.11.4/Plavio-v0.11.4.apk"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg> Download for Android</a><a class="text-link" href="#experience">Take a look <span aria-hidden="true">↓</span></a></div>
+        <p class="download-meta">APK v0.11.4 <span>·</span> Android 8.0+ <span>·</span> Free, always open source</p>
+        <div class="hero-note"><span class="note-line" aria-hidden="true"></span><p>No in-app ads. No account required.<br><span>Just you, your addons, and what’s next.</span></p></div>
+      </div>
+      <figure class="hero-visual">
+        <div class="orbit orbit-one" aria-hidden="true"></div><div class="orbit orbit-two" aria-hidden="true"></div>
+        <div class="visual-label"><span class="tiny-cross" aria-hidden="true">+</span> BUILT FOR THE SMALL SCREEN</div>
+        <div class="phone phone-back"><img src="assets/app-live.webp" width="1080" height="2198" alt="Plavio Live TV showing channel categories and recently watched channels"></div>
+        <div class="phone phone-front"><img src="assets/app-home.webp" width="1080" height="2198" alt="Plavio Home showing a featured title and PlavioMeta movie catalogs" fetchpriority="high"></div>
+        <figcaption><span class="status-dot" aria-hidden="true"></span> Real app. Real screenshots.</figcaption>
+      </figure>
+    </section>
+    <div class="trust-band"><div class="container trust-grid"><p><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m8 5-6 7 6 7m8-14 6 7-6 7m-3-16-2 18"/></svg> Open source <span>MIT licensed</span></p><p><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 18h4"/></svg> Android first <span>Phones & tablets</span></p><p><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></svg> Your choice <span>Telemetry off by default</span></p><p><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 8 8 8m-8 0 8-8"/></svg> No in-app ads <span>Room for what matters</span></p></div></div>
+    <section class="section container" id="experience" aria-labelledby="experience-title">
+      <div class="section-heading"><div><p class="eyebrow">LESS FRICTION. MORE WATCHING.</p><h2 id="experience-title">Everything in its<br>happy place.</h2></div><p>Find your next watch, pick up where you left off, and keep the controls close. Plavio brings it all together.</p></div>
+      <div class="feature-grid">
+        <article class="feature-card feature-player"><div class="card-topline"><span class="feature-number">01 / THE PLAYER</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 11 7-11 7V5Z"/></svg></div><h3>Less tapping.<br>More getting into it.</h3><p>Swipe to seek, adjust brightness and volume, switch subtitles or audio tracks, and resume right where you stopped.</p><div class="player-illustration" aria-hidden="true"><span class="player-play">▶</span><div class="player-track"><span></span></div><div class="player-options"><span>Subtitles</span><span>Audio</span><span>1×</span></div><span class="illustration-caption">BUILT-IN PLAYER · CONTROL ILLUSTRATION</span></div></article>
+        <article class="feature-card feature-addons"><div class="card-topline"><span class="feature-number">02 / YOUR ADDONS</span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></svg></div><h3>A home for<br>your favourites.</h3><p>Bring catalogs, metadata, subtitles, and streams together. Add a Stremio-protocol manifest URL and make your setup your own.</p><div class="addon-illustration" aria-hidden="true"><span>Catalogs</span><span>Metadata</span><span>Subtitles</span><div class="addon-center"><img src="assets/favicon.png" alt="" width="52" height="52"><span>One place.</span></div></div></article>
+        <article class="feature-compact"><span class="compact-icon" aria-hidden="true">↺</span><div><h3>Pick up the story</h3><p>Continue Watching saves your progress. Keep a watchlist for the things you’ll get to next.</p></div></article>
+        <article class="feature-compact"><span class="compact-icon" aria-hidden="true">▤</span><div><h3>Go live</h3><p>A dedicated Live tab keeps channels from your addons together, away from your movie night.</p></div></article>
+      </div>
+    </section>
+    <section class="gallery-section" aria-labelledby="gallery-title">
+      <div class="container section-heading"><div><p class="eyebrow">A CLOSER LOOK</p><h2 id="gallery-title">Dark by design.<br>Easy by nature.</h2></div><div><p>Six real screens. One familiar place for your next watch. Explore the current app, from Home to your addon setup.</p><p class="gallery-hint">Swipe or scroll to explore all six <span aria-hidden="true">→</span></p></div></div>
+      <div class="gallery-track container" tabindex="0" role="region" aria-label="App screenshot gallery; scroll horizontally to see all six screens">
+        <figure><div class="gallery-frame"><img src="assets/app-home.webp" width="1080" height="2198" loading="lazy" alt="Home screen with a featured title and PlavioMeta trending and popular movie catalogs"></div><figcaption><span>01</span><div><strong>Home</strong><p>Featured titles & movie catalogs</p></div></figcaption></figure>
+        <figure><div class="gallery-frame"><img src="assets/app-live.webp" width="1080" height="2198" loading="lazy" alt="Live TV screen with category filters, recently watched channels, and channel cards"></div><figcaption><span>02</span><div><strong>Live TV</strong><p>Categories & recently watched</p></div></figcaption></figure>
+        <figure><div class="gallery-frame"><img src="assets/app-search.webp" width="1080" height="2198" loading="lazy" alt="Search results for Money Heist with All, Movies, Series, and Live TV filters"></div><figcaption><span>03</span><div><strong>Search</strong><p>Find a title. Refine your results.</p></div></figcaption></figure>
+        <figure><div class="gallery-frame"><img src="assets/app-downloads.webp" width="1080" height="2198" loading="lazy" alt="Downloads screen showing Wi-Fi-only preference, storage used, queue controls, and an active download"></div><figcaption><span>04</span><div><strong>Downloads</strong><p>Your queue, at a glance</p></div></figcaption></figure>
+        <figure><div class="gallery-frame"><img src="assets/app-settings.webp" width="1080" height="2198" loading="lazy" alt="Settings screen showing account, integrations, playback, streams, subtitles, and Manage addons"></div><figcaption><span>05</span><div><strong>Settings</strong><p>Make the details work for you</p></div></figcaption></figure>
+        <figure><div class="gallery-frame"><img src="assets/app-addons.webp" width="1080" height="2198" loading="lazy" alt="Addons screen showing overview counts, an addon URL field, and an enabled PlavioMeta addon"></div><figcaption><span>06</span><div><strong>Addons</strong><p>Your setup, all in one place</p></div></figcaption></figure>
+      </div>
+      <p class="container gallery-disclaimer">Current app screenshots supplied by the project owner. Screens show an example setup; content and availability depend on your addons and sources.</p>
+    </section>
+    <section class="addons-section" id="addons" aria-labelledby="addons-title"><div class="container">
+      <div class="section-heading"><div><p class="eyebrow">BUILD YOUR SETUP</p><h2 id="addons-title">Good things<br>come together.</h2></div><p>Addons connect Plavio to catalogs, metadata, and sources. Start here, then choose what works for you.</p></div>
+      <div class="addon-cards">
+        <article class="addon-card"><div class="addon-card-heading"><span class="addon-symbol" aria-hidden="true">M</span><span class="badge">METADATA</span></div><h3>PlavioMeta</h3><p>Posters, trailers, rich title details, and “More like this” recommendations. Made for Plavio.</p><div class="manifest-box"><code id="meta-manifest">https://plaviometa.vercel.app/manifest.json</code><button class="copy-button" type="button" data-copy="https://plaviometa.vercel.app/manifest.json" aria-label="Copy PlavioMeta manifest URL" hidden>Copy <span aria-hidden="true">↗</span></button></div><p class="addon-footnote">In Plavio, open <strong>Addons → +</strong> and paste this URL.</p></article>
+        <article class="addon-card addon-hd"><div class="addon-card-heading"><span class="addon-symbol" aria-hidden="true">HD</span><span class="badge">STREAM ADDON</span></div><h3>PlavioHD</h3><p>Set up the PlavioHD addon using its dedicated configuration page.</p><a class="button button-dark" href="https://hd.plavio.site/configure">Configure PlavioHD <span aria-hidden="true">↗</span></a><p class="addon-footnote">The configuration page is hosted separately. If it isn’t available yet, please check back later.</p></article>
+      </div><p class="addons-disclaimer">Plavio is a streaming client, not a content provider. Third-party addons control their own content and data practices. Only access content you have the right to watch, and keep addon URLs containing private keys to yourself.</p>
+    </div></section>
+    <section class="section container install-section" id="install" aria-labelledby="install-title"><div class="install-intro"><p class="eyebrow">FROM DOWNLOAD TO PLAY</p><h2 id="install-title">A few taps.<br>You’re in.</h2><p>Plavio installs directly on your Android phone or tablet. No Play Store required.</p><a class="text-link" href="#download">Get the APK <span aria-hidden="true">↗</span></a></div><ol class="install-steps"><li><span class="step-number">01</span><div><h3>Download the APK</h3><p>Use the official download below. Open the file from your notification or Downloads folder.</p></div></li><li><span class="step-number">02</span><div><h3>Allow this installation</h3><p>If Android asks, allow “Install unknown apps” for the browser or file manager you’re using. Only install files from sources you trust.</p></div></li><li><span class="step-number">03</span><div><h3>Install. Open. Make it yours.</h3><p>Tap Install, open Plavio, and explore your addons. You can turn that installation permission off again afterward.</p></div></li></ol></section>
+    <section class="release-section container" aria-labelledby="release-title"><div><p class="eyebrow">THE LATEST / v0.11.4</p><h2 id="release-title">A little better,<br>with every release.</h2></div><div><p>The latest release brings account backup and sync, Live TV fixes, adaptive quality, a frosted-glass look, and a refreshed Sources screen.</p><p class="muted">Cloud sync is optional and requires an account. See the privacy policy for what is backed up.</p><a class="text-link" href="https://github.com/kotlinsyd/Plavio/releases/tag/v0.11.4">Read the release notes <span aria-hidden="true">↗</span></a></div></section>
+    <section class="section container faq-section" id="faq" aria-labelledby="faq-title"><div><p class="eyebrow">A FEW THINGS TO KNOW</p><h2 id="faq-title">Before you<br>press play.</h2></div><div class="faq-list">
+      <details><summary>Is Plavio really free?<span aria-hidden="true">+</span></summary><div class="faq-answer"><p>Yes. Plavio is free and open source under the MIT license, with no in-app ads. Third-party addons and services have their own terms and may have separate requirements.</p></div></details>
+      <details><summary>Which devices are supported?<span aria-hidden="true">+</span></summary><div class="faq-answer"><p>Android phones and tablets running Android 8.0 or newer. Plavio is mobile-only; the Android TV app has been discontinued. This download is not an iOS, desktop, or TV app.</p></div></details>
+      <details><summary>Do I need an account?<span aria-hidden="true">+</span></summary><div class="faq-answer"><p>No. You can use Plavio without a Plavio Cloud account. Signing in enables optional backup and sync. Ordinary library sync is not end-to-end encrypted; separately protected credential sync has its own passphrase. See the <a href="privacy.html">Privacy Policy</a> for details.</p></div></details>
+      <details><summary>How do I add an addon?<span aria-hidden="true">+</span></summary><div class="faq-answer"><p>Open <strong>Addons</strong>, tap <strong>+</strong>, and paste the addon’s manifest URL. Plavio validates the addon and adds its catalogs. Some addons are preconfigured, and you can disable addons you don’t want.</p></div></details>
+      <details><summary>What about privacy?<span aria-hidden="true">+</span></summary><div class="faq-answer"><p>Optional telemetry is off by default. The app still makes network requests to addon, metadata, update, and other providers. Those services have their own data practices. This website has no analytics scripts or embedded third-party media. Read the <a href="privacy.html">full Privacy Policy</a>.</p></div></details>
+      <details><summary>How do updates work?<span aria-hidden="true">+</span></summary><div class="faq-answer"><p>Plavio can check for a new version and offer to install it. Android may ask you to approve the installation. Automatic checks can be disabled in <strong>Settings → About</strong>, and official APKs are also available on <a href="https://github.com/kotlinsyd/Plavio/releases">GitHub Releases</a>.</p></div></details>
+    </div></section>
+    <section class="download-section" id="download" aria-labelledby="download-title"><div class="container download-inner"><img src="assets/logo.png" alt="" width="76" height="76" loading="lazy"><p class="eyebrow">YOUR NEXT WATCH STARTS HERE</p><h2 id="download-title">Meet your new<br>movie-night companion.</h2><p>Free. Open source. Made for Android.</p><a class="button button-primary" href="https://github.com/kotlinsyd/Plavio/releases/download/v0.11.4/Plavio-v0.11.4.apk"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg> Download Plavio v0.11.4</a><div class="download-alternatives"><a href="https://gitlab.com/api/v4/projects/87396069/packages/generic/plavio/0.11.4/Plavio-v0.11.4.apk">GitLab mirror <span aria-hidden="true">↗</span></a><span aria-hidden="true">·</span><a href="https://github.com/kotlinsyd/Plavio/releases">All releases <span aria-hidden="true">↗</span></a></div><p class="download-note">Android 8.0+ · Phones & tablets · Direct APK download<br>Installing outside the Play Store? <a href="#install">Read the installation guide.</a></p></div></section>
+  </main>
+  <footer class="site-footer container"><div class="footer-top"><div><a class="brand" href="index.html"><img src="assets/logo.png" width="34" height="34" alt=""><span>Plavio<span class="brand-dot">.</span></span></a><p>Your streaming universe.<br><span>Built by Najam. Open to everyone.</span></p></div><nav aria-label="Project and community"><a href="https://github.com/kotlinsyd/Plavio">GitHub ↗</a><a href="https://gitlab.com/KotlinJS5/plavio">GitLab ↗</a><a href="https://www.reddit.com/r/Plavio/">Reddit ↗</a><a href="https://discord.gg/pbNwJKU3p">Discord ↗</a></nav></div><div class="footer-bottom"><p>Plavio does not host content. Addons are provided by third parties.</p><nav aria-label="Legal"><a href="privacy.html">Privacy</a><a href="terms.html">Terms</a></nav></div></footer>
+  <div id="copy-status" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>
