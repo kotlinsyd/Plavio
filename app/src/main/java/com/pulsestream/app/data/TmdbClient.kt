@@ -144,6 +144,100 @@ object TmdbClient {
         }
     }
 
+    /** One TMDB search hit carrying the ranking signals MetaPreview lacks. */
+    data class TmdbSearchHit(
+        val title: String,
+        /** "movie" or "series" (mapped from TMDB's movie/tv). */
+        val type: String,
+        val year: Int?,
+        val popularity: Double,
+        val voteAverage: Double,
+        val voteCount: Int
+    )
+
+    /**
+     * Search TMDB and return popularity / vote data for ranking (v0.12.1).
+     * Used by StreamRepository to order merged addon search results by
+     * real popularity instead of relying on IMDb rating alone. Returns an
+     * empty list on any failure — callers treat that as "no enrichment".
+     */
+    suspend fun searchWithPopularity(apiKey: String, query: String): List<TmdbSearchHit> =
+        withContext(Dispatchers.IO) {
+            if (apiKey.isBlank() || query.trim().length < 2) return@withContext emptyList()
+            try {
+                val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+                val url = "$BASE/search/multi?api_key=$apiKey&query=$encoded&page=1&include_adult=false"
+                val response = BoundedHttp.get(url, headers = mapOf("Accept" to "application/json"))
+                val root = json.parseToJsonElement(response).jsonObject
+                val results = root["results"]?.jsonArray ?: return@withContext emptyList()
+                val out = mutableListOf<TmdbSearchHit>()
+                for (el in results.take(20)) {
+                    val obj = el.jsonObject
+                    val mediaType = obj["media_type"]?.jsonPrimitive?.content ?: continue
+                    if (mediaType != "movie" && mediaType != "tv") continue
+                    val title = obj["title"]?.jsonPrimitive?.content
+                        ?: obj["name"]?.jsonPrimitive?.content ?: continue
+                    val dateStr = obj["release_date"]?.jsonPrimitive?.content
+                        ?: obj["first_air_date"]?.jsonPrimitive?.content
+                    val year = dateStr?.take(4)?.toIntOrNull()
+                    out.add(
+                        TmdbSearchHit(
+                            title = title,
+                            type = if (mediaType == "movie") "movie" else "series",
+                            year = year,
+                            popularity = obj["popularity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                            voteAverage = obj["vote_average"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                            voteCount = obj["vote_count"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+                        )
+                    )
+                }
+                out
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { emptyList() }
+        }
+
+    /**
+     * This week's trending movies + series (v0.12.4) — backs the Search
+     * tab's "Popular right now" list. Ids use the same
+     * "tmdb:<mediaType>:<id>" shape [search] produces, which the
+     * detail-target resolver already understands. Empty on any failure.
+     */
+    suspend fun trending(apiKey: String, limit: Int = 10): List<MetaPreview> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext emptyList()
+        try {
+            val url = "$BASE/trending/all/week?api_key=$apiKey&language=en-US&page=1"
+            val response = BoundedHttp.get(url, headers = mapOf("Accept" to "application/json"))
+            val root = json.parseToJsonElement(response).jsonObject
+            val results = root["results"]?.jsonArray ?: return@withContext emptyList()
+            val out = mutableListOf<MetaPreview>()
+            for (el in results) {
+                val obj = el.jsonObject
+                val mediaType = obj["media_type"]?.jsonPrimitive?.content ?: continue
+                if (mediaType != "movie" && mediaType != "tv") continue
+                val id = obj["id"]?.jsonPrimitive?.content?.toIntOrNull() ?: continue
+                val title = obj["title"]?.jsonPrimitive?.content
+                    ?: obj["name"]?.jsonPrimitive?.content ?: continue
+                val poster = obj["poster_path"]?.jsonPrimitive?.content
+                val posterUrl = if (poster != null) "https://image.tmdb.org/t/p/w342$poster" else null
+                val backdrop = obj["backdrop_path"]?.jsonPrimitive?.content
+                val backdropUrl = if (backdrop != null) "https://image.tmdb.org/t/p/w780$backdrop" else null
+                val dateStr = obj["release_date"]?.jsonPrimitive?.content
+                    ?: obj["first_air_date"]?.jsonPrimitive?.content
+                val year = dateStr?.take(4)?.toIntOrNull()?.toString()
+                val type = if (mediaType == "movie") "movie" else "series"
+                out.add(
+                    MetaPreview(
+                        id = "tmdb:$mediaType:$id", type = type, name = title,
+                        poster = posterUrl, background = backdropUrl, releaseInfo = year
+                    )
+                )
+                if (out.size >= limit) break
+            }
+            out
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { emptyList() }
+    }
+
     suspend fun search(apiKey: String, query: String): List<MetaPreview> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank() || query.trim().length < 2) return@withContext emptyList()
         try {

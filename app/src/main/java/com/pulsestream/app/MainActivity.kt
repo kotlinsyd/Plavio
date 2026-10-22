@@ -17,7 +17,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -32,19 +36,22 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -62,6 +69,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.res.stringResource
 import androidx.compose.runtime.LaunchedEffect
@@ -80,14 +89,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.lerp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -121,7 +133,6 @@ import com.pulsestream.app.ui.screens.AddonsScreen
 import com.pulsestream.app.ui.screens.CatalogScreen
 import com.pulsestream.app.ui.screens.DetailScreen
 import com.pulsestream.app.ui.screens.FeedbackScreen
-import com.pulsestream.app.ui.screens.FeaturesGuideScreen
 import com.pulsestream.app.ui.screens.DownloadsScreen
 import com.pulsestream.app.ui.screens.HomeCatalogsScreen
 import com.pulsestream.app.ui.screens.PlaybackSettingsScreen
@@ -440,68 +451,81 @@ private data class Tab(
     val label: String,
     val icon: ImageVector,
 )
-/** One item in the floating dock: icon + tiny label, accent-glowed when selected. */
+/**
+ * One item in the floating dock (v0.12.7, owner's pick — sample A
+ * "Glass Shrink"): the icon WITH its name under it, proper size and
+ * even gaps. [labelFraction] is the tray's open amount (1 = open,
+ * 0 = shrunk): as the tray shrinks on scroll-down the name is eaten —
+ * its slot collapses and it fades and crops away — until only the
+ * icon remains; scrolling up grows it back. The accent pill sits
+ * behind the whole segment when selected.
+ */
 @Composable
 private fun DockItem(
     tab: Tab,
     selected: Boolean,
-    compact: Boolean,
+    labelFraction: Float,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val palette = LocalPalette.current
-    // Material 3 standard: fixed-size indicator pill behind the icon only,
-    // equal width for all items (weight applied at call site). No rings,
-    // no label-dependent sizing.
     Column(
         modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 2.dp)
+            .clip(RoundedCornerShape(50))
+            .then(
+                if (selected) {
+                    Modifier.background(
+                        Brush.verticalGradient(
+                            listOf(
+                                palette.accent.copy(alpha = 0.32f),
+                                palette.accent.copy(alpha = 0.12f)
+                            )
+                        ),
+                        RoundedCornerShape(50)
+                    )
+                } else {
+                    Modifier
+                }
+            )
             // No ripple: the capsule highlight on the selected tab is the
-            // feedback; a square ripple clashes with the pill indicator.
+            // feedback; a square ripple clashes with the pill shape.
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick
             )
-            .padding(vertical = if (compact) 8.dp else 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(horizontal = 3.dp, vertical = 5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
     ) {
-        // Fixed-size indicator pill (64x32dp) behind the icon — same for every tab.
+        Icon(
+            tab.icon,
+            contentDescription = tab.label,
+            tint = if (selected) palette.accent else TextSecondary,
+            modifier = Modifier.size(22.dp)
+        )
+        // The name slot: eaten as the tray shrinks — height collapses
+        // (driven by the same spring value as the capsule's own size),
+        // the text fades and is cropped by the closing slot.
         Box(
             modifier = Modifier
-                .size(width = 64.dp, height = 32.dp)
-                .clip(RoundedCornerShape(50))
-                .then(
-                    if (selected) {
-                        Modifier.background(
-                            Brush.verticalGradient(
-                                listOf(
-                                    palette.accent.copy(alpha = 0.32f),
-                                    palette.accent.copy(alpha = 0.12f)
-                                )
-                            ),
-                            RoundedCornerShape(50)
-                        )
-                    } else {
-                        Modifier
-                    }
-                ),
+                .height((15 * labelFraction).dp)
+                .clipToBounds()
+                .graphicsLayer { alpha = labelFraction },
             contentAlignment = Alignment.Center
         ) {
-            Icon(
-                tab.icon,
-                contentDescription = tab.label,
-                tint = if (selected) palette.accent else TextSecondary,
-                modifier = Modifier.size(if (compact) 22.dp else 24.dp)
-            )
-        }
-        if (!compact) {
-            Spacer(Modifier.height(4.dp))
             Text(
                 tab.label,
+                // 10sp (v0.12.8): at labelSmall the longest name —
+                // "Downloads" — clipped to "Downlo…" on-device; the
+                // smaller size + tighter segment padding fits it whole.
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                color = if (selected) palette.accent else TextSecondary.copy(alpha = 0.85f),
-                maxLines = 1
+                color = if (selected) palette.accent else TextSecondary,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -688,59 +712,145 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
             }
         }
         Box(Modifier.fillMaxSize().nestedScroll(nestedScrollConnection)) {
-            Scaffold(
-                containerColor = LocalPalette.current.background,
-                bottomBar = {
+            // Full-height content (v0.12.2; Scaffold removed v0.12.11):
+            // even with no bottomBar, the Scaffold kept reserving the
+            // bottom system inset for its content area — a solid strip
+            // under the floating dock (owner's on-device note). A plain
+            // Box now hosts the content: only the status-bar top inset
+            // is applied (screens already expect exactly that — Home
+            // shifts its list up by the same amount for the immersive
+            // hero), and the content owns every remaining pixel down
+            // to the physical bottom edge, scrolling under the dock.
+            // Tab screens carry their own extra bottom list padding so
+            // the last row can scroll clear of the capsule.
+            val shellDensity = LocalDensity.current
+            val shellStatusTop = with(shellDensity) {
+                WindowInsets.statusBars.getTop(shellDensity).toDp()
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(LocalPalette.current.background)
+                    .padding(top = shellStatusTop)
+            ) {
+                PulseNavGraph(navController, repository, listsRepository, onThemeChanged, trailerMini)
+            }
+        // Floating dock (v0.12.10, owner's order): no longer a
+        // Scaffold bottomBar — the reserved solid strip at the
+        // bottom is GONE. The screen's usable area runs the full
+        // height and cards scroll underneath the capsule, which
+        // floats over the content as an overlay. Tab screens
+        // already carry ~104dp bottom list padding, so the last
+        // row can still scroll clear of the capsule.
             if (showBottomBar) {
-                Box(
+                // One spring drives the whole shrink (v0.12.7, owner's
+                // pick: sample A "Glass Shrink"). A single Animatable
+                // morphs the capsule's width + height a little — the
+                // tray NEVER folds into a Home pill: scrolling down
+                // shrinks it slightly from both sides and from
+                // top/bottom and eats the tab names (icons stay);
+                // scrolling up grows it back with the names. Softly
+                // damped spring: gentle settle, no bounce jitter. The
+                // hysteresis latch above (compactNav) owns the trigger.
+                val foldAnim = remember { Animatable(0f) }
+                LaunchedEffect(compactNav) {
+                    foldAnim.animateTo(
+                        targetValue = if (compactNav) 1f else 0f,
+                        animationSpec = spring(dampingRatio = 0.92f, stiffness = 205f)
+                    )
+                }
+                val fold = foldAnim.value
+                // Seated at the very bottom edge (v0.12.15, owner's
+                // correction): NO navigationBarsPadding — that inset
+                // lifted the capsule off the bottom and left a dead
+                // black band of screen below it. The capsule now sits
+                // 6dp off the physical bottom edge, over the gesture
+                // zone, so almost no screen is left under it — and
+                // the list scrolls through what little remains.
+                BoxWithConstraints(
                     modifier = Modifier
+                        .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 28.dp, vertical = 12.dp),
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
+                    // End states (v0.12.7): open = nearly the FULL
+                    // width (only the 16dp side gaps), 62dp tall, five
+                    // tabs with icon + name spread evenly; shrunk = 85%
+                    // of that width, 47dp tall, names eaten, icons only.
+                    val capsuleWidth = lerp(maxWidth, maxWidth * 0.85f, fold)
+                    val capsuleHeight = lerp(62.dp, 47.dp, fold)
+                    // Capsule-fitted black backing (v0.12.9; RESTORED
+                    // v0.12.15 on the owner's correction): a black pill
+                    // EXACTLY the capsule's size and shape sits directly
+                    // behind it — same animated width/height, so it
+                    // shrinks and grows in lockstep and never shows
+                    // outside the capsule at all. The v0.12.13 removal
+                    // was a misread: the owner's "solid black" was
+                    // never this pill — it is the dead screen space
+                    // BELOW the capsule, fixed in v0.12.15 by seating
+                    // the dock at the very bottom edge.
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .width(capsuleWidth)
+                            .height(capsuleHeight)
+                            .background(Color.Black, RoundedCornerShape(50))
+                    )
                     Surface(
                         shape = RoundedCornerShape(50),
-                        // Sample F "Frosted" dock (user's pick 2026-10-20): frosted glass
-                        // reads more solid — 0.70 backing under the glass layer.
-                        color = LocalPalette.current.panel.copy(alpha = 0.70f),
-                        shadowElevation = 10.dp
+                        color = Color.Transparent,
+                        shadowElevation = 0.dp,
+                        modifier = Modifier
+                            .width(capsuleWidth)
+                            .height(capsuleHeight)
                     ) {
                         Row(
-                            // Liquid-glass dock: sheen + accent glow + specular rim over the panel colour.
+                            // Liquid-glass dock: sheen + accent glow + specular rim.
+                            // v0.12.7 (owner's order): LIGHT tinted glass
+                            // with blur — darken nearly gone (0.03), frost
+                            // up (0.12) — over the fitted black backing,
+                            // so the buttons show properly. Other glass untouched.
                             modifier = Modifier
-                                .liquidGlass(RoundedCornerShape(50))
-                                .padding(horizontal = 6.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
+                                .liquidGlass(RoundedCornerShape(50), frost = 0.12f, darken = 0.03f)
+                                .fillMaxSize()
+                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             tabs.forEach { tab ->
                                 val selected =
                                     currentDestination?.hierarchy?.any { it.route == tab.route } == true
+                                val isHome = tab.route == Routes.HOME
+                                // All five tabs stay, always (v0.12.7):
+                                // the shrink only eats the names — no tab
+                                // ever melts away or folds into a pill.
                                 DockItem(
                                     tab = tab,
                                     selected = selected,
-                                    compact = compactNav,
+                                    labelFraction = 1f - fold,
+                                    modifier = Modifier.weight(1f),
                                     onClick = {
                                         navController.navigate(tab.route) {
                                             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                                             launchSingleTop = true
                                             restoreState = true
                                         }
-                                    },
-                                    modifier = Modifier.weight(1f)
+                                        // Home (v0.12.4): tapping Home
+                                        // lands on Home scrolled to the
+                                        // very top — from any other tab,
+                                        // and when already on Home.
+                                        if (isHome) {
+                                            com.pulsestream.app.ui.screens.HomeScrollSignal
+                                                .requestScrollToTop()
+                                        }
+                                    }
                                 )
                             }
                         }
                     }
                 }
             }
-        }
-    ) { padding ->
-        Box(Modifier.padding(padding)) {
-            PulseNavGraph(navController, repository, listsRepository, onThemeChanged, trailerMini)
-        }
-    }
         // Full portrait trailer layer — floats above the current tab (which
         // stays mounted behind it). Slides/fades up on open, collapses down
         // into the mini player on swipe-down/back.
@@ -995,7 +1105,6 @@ private fun PulseNavGraph(
                 onGoToStreams = { navController.navigate(Routes.STREAMS_SETTINGS) },
                 onGoToAbout = { navController.navigate(Routes.ABOUT) },
                 onGoToFeedback = { navController.navigate(Routes.FEEDBACK) },
-                onGoToFeaturesGuide = { navController.navigate(Routes.FEATURES_GUIDE) },
                 onGoToAccount = { navController.navigate(Routes.ACCOUNT) },
                 onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) }
             )
@@ -1046,11 +1155,6 @@ private fun PulseNavGraph(
         composable(Routes.FEEDBACK) {
             FeedbackScreen(
                 repository = repository,
-                onBack = { navController.popBackStack() }
-            )
-        }
-        composable(Routes.FEATURES_GUIDE) {
-            FeaturesGuideScreen(
                 onBack = { navController.popBackStack() }
             )
         }

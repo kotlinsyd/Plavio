@@ -176,7 +176,6 @@ fun GlassIconButton(
 @Composable
 fun PosterCard(
     meta: MetaPreview,
-    badge: String? = null,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -204,20 +203,7 @@ fun PosterCard(
                 contentDescription = meta.name,
                 modifier = Modifier.fillMaxSize()
             )
-            if (badge != null) {
-                Surface(
-                    color = Color.Black.copy(alpha = 0.65f),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
-                ) {
-                    Text(
-                        text = badge,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextPrimary,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                    )
-                }
-            }
+            // Poster only — no corner tag on channel cards.
         }
         Spacer(Modifier.height(6.dp))
         Text(

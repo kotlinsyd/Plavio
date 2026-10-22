@@ -282,7 +282,7 @@ private fun DebridCard(
     currentKey: () -> String?,
     onSaveKey: (String?) -> Unit,
     modifier: Modifier = Modifier,
-    badge: String? = null,
+    tagLabel: String? = null,
     enabled: Boolean = true
 ) {
     val context = LocalContext.current
@@ -311,10 +311,10 @@ private fun DebridCard(
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary
                 )
-                if (badge != null) {
+                if (tagLabel != null) {
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        badge,
+                        tagLabel,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = palette.accent,

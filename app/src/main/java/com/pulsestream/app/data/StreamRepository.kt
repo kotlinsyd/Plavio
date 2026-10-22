@@ -724,8 +724,10 @@ class StreamRepository(
         searchRemoteProgressive(query, type).last()
 
     /**
-     * Combined search: instant local-cache matches first, then live addon
-     * results for everything the cache doesn't have.
+     * Combined search: instant local-cache matches plus live addon results,
+     * then de-duplicated across addons and RANKED (v0.12.0) — previously the
+     * raw cache order surfaced obscure old titles first (e.g. "sultan"
+     * listed 1930s titles before Salman Khan's Sultan, 2016).
      */
     suspend fun searchAll(query: String, type: String? = null): List<CachedMeta> =
         withContext(Dispatchers.IO) {
@@ -740,8 +742,206 @@ class StreamRepository(
             val seen = local.map { it.addonId + it.meta.id }.toMutableSet()
             // A remote failure must never wipe out local results.
             val remote = try { searchRemote(query, type) } catch (cancel: CancellationException) { throw cancel } catch (_: Exception) { emptyList() }
-            local + remote.filter { seen.add(it.addonId + it.meta.id) }
+            val merged = local + remote.filter { seen.add(it.addonId + it.meta.id) }
+            rankSearchResults(merged, query)
         }
+
+    /**
+     * "Popular right now" for the Search tab's landing state (v0.12.4).
+     * With a TMDB key: TMDB's weekly trending chart. Without one: the
+     * best in-app source — titles from cached catalog rows whose name/id
+     * reads as a chart (trending / popular / top — Cinemeta's "top"
+     * catalogs land in that bucket), best-scored rows first, flattened
+     * in row order and de-duplicated by title id. Empty when neither
+     * source can supply anything (the landing then shows recents only).
+     */
+    suspend fun loadPopularTitles(limit: Int = 10): List<CachedMeta> =
+        withContext(Dispatchers.IO) {
+            val key = settings.tmdbApiKey.takeIf { it.isNotBlank() }
+            if (key != null) {
+                val trending = TmdbClient.trending(key, limit)
+                if (trending.isNotEmpty()) {
+                    return@withContext trending.map { meta ->
+                        CachedMeta(
+                            addonId = "tmdb",
+                            addonName = "TMDB",
+                            baseUrl = "https://api.themoviedb.org/3",
+                            meta = meta
+                        )
+                    }
+                }
+            }
+            val rows = runCatching { loadCatalogRowsCached() }.getOrDefault(emptyList())
+            if (rows.isEmpty()) return@withContext emptyList()
+            fun chartScore(row: CatalogRow): Int {
+                val text = "${row.catalogName} ${row.catalogId}".lowercase()
+                var score = 0
+                if ("trending" in text) score += 3
+                if ("popular" in text) score += 3
+                if ("top" in text) score += 2
+                if ("featured" in text) score += 1
+                return score
+            }
+            rows.filter { it.type == "movie" || it.type == "series" }
+                .map { it to chartScore(it) }
+                .filter { it.second > 0 }
+                .sortedByDescending { it.second }
+                .flatMap { (row, _) -> row.items.map { row to it } }
+                .distinctBy { it.second.id }
+                .take(limit)
+                .map { (row, meta) ->
+                    CachedMeta(
+                        addonId = row.addonId,
+                        addonName = row.addonName,
+                        baseUrl = row.baseUrl,
+                        meta = meta
+                    )
+                }
+        }
+
+    private val searchYearPattern = Regex("(?<!\\d)(18\\d{2}|19\\d{2}|20\\d{2})(?!\\d)")
+
+    private fun searchYearOf(releaseInfo: String?): Int? =
+        releaseInfo?.let { searchYearPattern.find(it)?.value?.toIntOrNull() }
+
+    private fun searchRatingOf(imdbRating: String?): Double? =
+        imdbRating?.substringBefore('/')?.trim()?.toDoubleOrNull()?.takeIf { it in 0.0..10.0 }
+
+    /** Lowercase, punctuation-stripped title form for match/dedupe comparisons. */
+    private fun normalizeSearchTitle(raw: String): String =
+        raw.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim().replace(Regex("\\s+"), " ")
+
+    // TMDB popularity enrichment cache (v0.12.1): one entry per normalized
+    // query, 10-minute TTL — repeat searches and progressive re-ranks never
+    // refetch, and a TMDB outage costs at most one bounded wait per query.
+    private val tmdbPopularityCache =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<TmdbClient.TmdbSearchHit>>>()
+
+    /**
+     * TMDB popularity hits for [query], or an empty list when no TMDB key
+     * is configured or the lookup fails/times out. Bounded at 2.5s so
+     * enrichment can never make search feel slower than the addon fetches
+     * it already waits for; failures are silently ignored by design.
+     */
+    private suspend fun tmdbPopularityFor(query: String): List<TmdbClient.TmdbSearchHit> {
+        val key = settings.tmdbApiKey.takeIf { it.isNotBlank() } ?: return emptyList()
+        val cacheKey = normalizeSearchTitle(query)
+        val now = System.currentTimeMillis()
+        tmdbPopularityCache[cacheKey]?.let { (ts, hits) ->
+            if (now - ts < 10 * 60 * 1000L) return hits
+        }
+        val hits = withTimeoutOrNull(2_500L) {
+            TmdbClient.searchWithPopularity(key, query)
+        } ?: emptyList()
+        if (tmdbPopularityCache.size > 32) tmdbPopularityCache.clear()
+        tmdbPopularityCache[cacheKey] = now to hits
+        return hits
+    }
+
+    /**
+     * Search ordering: exact title match first, then prefix match, then
+     * contains. Within a tier: TMDB popularity, then TMDB vote average
+     * (v0.12.1 — only when a TMDB key is configured and hits matched);
+     * otherwise/without a key, higher IMDb rating first (the closest
+     * popularity signal MetaPreview carries), newer year as the next
+     * tiebreak, preferred metadata source after that. The sort is stable,
+     * so equal rows keep their incoming (provider) order. Typo tolerance
+     * is untouched — ranking only reorders what the existing search
+     * already found.
+     *
+     * Before ranking, the same title offered by several addons (e.g.
+     * PlavioMeta and Cinemeta both carrying tt… ids) collapses into ONE
+     * row — the preferred source's copy. Entries whose known years
+     * conflict (remakes) are never merged.
+     */
+    private suspend fun rankSearchResults(results: List<CachedMeta>, query: String): List<CachedMeta> {
+        if (results.size < 2) return results
+        val q = normalizeSearchTitle(query)
+        val byAddonId = try { enabledAddons().associateBy { it.id } } catch (_: Exception) { emptyMap() }
+        fun addonRank(cm: CachedMeta): Int = byAddonId[cm.addonId]?.let(::metaRank) ?: 2
+        fun bestOf(group: List<CachedMeta>): CachedMeta = group.minWithOrNull(
+            compareBy<CachedMeta> { addonRank(it) }
+                .thenByDescending { searchRatingOf(it.meta.imdbRating) ?: -1.0 }
+                .thenByDescending { searchYearOf(it.meta.releaseInfo) ?: 0 }
+        ) ?: group.first()
+
+        // Cross-addon dedupe by (normalized title, type).
+        val groups = LinkedHashMap<Pair<String, String>, MutableList<CachedMeta>>()
+        for (cm in results) {
+            groups.getOrPut(normalizeSearchTitle(cm.meta.name) to cm.meta.type) { mutableListOf() }.add(cm)
+        }
+        val deduped = ArrayList<CachedMeta>(groups.size)
+        for ((_, group) in groups) {
+            if (group.size == 1) {
+                deduped += group[0]
+                continue
+            }
+            val byYear = group.groupBy { searchYearOf(it.meta.releaseInfo) }
+            val knownYears = byYear.keys.filterNotNull().sorted()
+            if (knownYears.size <= 1) {
+                deduped += bestOf(group)
+            } else {
+                // Remakes: one merged row per distinct known year;
+                // year-less copies join the newest bucket.
+                knownYears.forEachIndexed { index, year ->
+                    val yearless: List<CachedMeta> =
+                        if (index == knownYears.lastIndex) byYear[null].orEmpty() else emptyList()
+                    deduped += bestOf(byYear[year].orEmpty() + yearless)
+                }
+            }
+        }
+
+        fun matchTier(name: String): Int {
+            val n = normalizeSearchTitle(name)
+            return when {
+                q.isEmpty() -> 2
+                n == q -> 0
+                n.startsWith(q) -> 1
+                n.contains(q) -> 2
+                else -> 3
+            }
+        }
+
+        // TMDB popularity enrichment (v0.12.1, owner's "best fit" call):
+        // when a TMDB key is configured, rank by TMDB popularity + vote
+        // average — the signals that actually separate Salman Khan's
+        // Sultan (2016) from the 1930s namesakes. Matching is by
+        // normalized title + type, preferring a year-equal hit when the
+        // result's year is known. No key / no hits → the v0.12.0
+        // IMDb-rating order below applies unchanged.
+        val tmdbHits = tmdbPopularityFor(query)
+        if (tmdbHits.isEmpty()) {
+            return deduped.sortedWith(
+                compareBy<CachedMeta> { matchTier(it.meta.name) }
+                    .thenByDescending { searchRatingOf(it.meta.imdbRating) ?: -1.0 }
+                    .thenByDescending { searchYearOf(it.meta.releaseInfo) ?: 0 }
+                    .thenBy { addonRank(it) }
+            )
+        }
+        val popularityOf = java.util.IdentityHashMap<CachedMeta, Double>()
+        val voteOf = java.util.IdentityHashMap<CachedMeta, Double>()
+        for (cm in deduped) {
+            val title = normalizeSearchTitle(cm.meta.name)
+            val year = searchYearOf(cm.meta.releaseInfo)
+            val candidates = tmdbHits.filter {
+                normalizeSearchTitle(it.title) == title && it.type == cm.meta.type
+            }
+            val hit = candidates.firstOrNull { year != null && it.year == year }
+                ?: candidates.maxByOrNull { it.popularity }
+            if (hit != null) {
+                popularityOf[cm] = hit.popularity
+                voteOf[cm] = hit.voteAverage
+            }
+        }
+        return deduped.sortedWith(
+            compareBy<CachedMeta> { matchTier(it.meta.name) }
+                .thenByDescending { popularityOf[it] ?: -1.0 }
+                .thenByDescending { voteOf[it] ?: -1.0 }
+                .thenByDescending { searchRatingOf(it.meta.imdbRating) ?: -1.0 }
+                .thenByDescending { searchYearOf(it.meta.releaseInfo) ?: 0 }
+                .thenBy { addonRank(it) }
+        )
+    }
 
     /** In-memory manifest cache so Home/Live/search don't refetch manifests per load. */
     private val manifestCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, AddonManifest>>()
@@ -1462,7 +1662,7 @@ class StreamRepository(
     suspend fun ensurePreinstalledAddons() = withContext(Dispatchers.IO) {
         val targets = listOf(
             "https://plaviometa.vercel.app/manifest.json",
-            "https://plaviohd.vercel.app/manifest.json",
+            "https://hd.plavio.site/manifest.json",
             "https://v3-cinemeta.strem.io/manifest.json",
             "https://opensubtitles-v3.strem.io/manifest.json",
             "https://subsense.nepiraw.com/manifest.json"
@@ -1475,8 +1675,9 @@ class StreamRepository(
                 // configured URL (including options/query/key) is never replaced.
                 val existing = db.addonDao().getAll().firstOrNull { it.id == manifest.id }
                 val legacyPlavioHd = "https://plaviohd.edon.workers.dev/manifest.json"
-                if (url == "https://plaviohd.vercel.app/manifest.json" &&
-                    existing?.baseUrl == legacyPlavioHd) {
+                val previousPlavioHd = "https://plaviohd.vercel.app/manifest.json"
+                if (url == "https://hd.plavio.site/manifest.json" &&
+                    (existing?.baseUrl == legacyPlavioHd || existing?.baseUrl == previousPlavioHd)) {
                     db.addonDao().upsert(existing.copy(baseUrl = baseUrl))
                     invalidateAddonCaches(existing.id)
                 }

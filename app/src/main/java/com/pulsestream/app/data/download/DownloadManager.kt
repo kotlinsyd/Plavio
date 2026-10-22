@@ -2,6 +2,7 @@ package com.pulsestream.app.data.download
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.StatFs
 import android.util.Log
@@ -77,6 +78,38 @@ class DownloadManager private constructor(private val appContext: Context) {
     private val recoveryLock = Any()
     @Volatile private var recoveryRunning = false
 
+    // Wi-Fi auto-resume (v0.12.1 fix): a download parked by the Wi-Fi-only
+    // policy (or paused by a mid-download Wi-Fi drop) used to sit forever
+    // until the user manually resumed it — nothing re-triggered it when
+    // Wi-Fi returned. This callback relaunches exactly those items.
+    @Volatile private var wifiCallbackRegistered = false
+    private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (isOnWifi()) resumeWifiBlockedDownloads()
+        }
+    }
+
+    private fun ensureWifiCallback() {
+        if (wifiCallbackRegistered) return
+        wifiCallbackRegistered = true
+        runCatching {
+            val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            cm.registerDefaultNetworkCallback(wifiCallback)
+        }.onFailure { wifiCallbackRegistered = false }
+    }
+
+    private fun resumeWifiBlockedDownloads() {
+        scope.launch {
+            val items = withContext(Dispatchers.IO) {
+                dao.getAll().filter {
+                    it.status == "QUEUED" ||
+                        (it.status == "PAUSED" && it.error?.startsWith("Wi-Fi disconnected") == true)
+                }
+            }
+            items.forEach { resumeDownload(it.id) }
+        }
+    }
+
     private val _activeDownloads = MutableStateFlow<Map<String, DownloadProgress>>(emptyMap())
     val activeDownloads: StateFlow<Map<String, DownloadProgress>> = _activeDownloads.asStateFlow()
 
@@ -100,6 +133,15 @@ class DownloadManager private constructor(private val appContext: Context) {
     suspend fun startDownload(url: String, title: String, headers: Map<String, String> = emptyMap()): String {
         require(!isAdaptiveDownloadUrl(url)) {
             "Offline downloads currently support progressive media files only. HLS/DASH adaptive streams cannot be saved as complete offline downloads."
+        }
+        // Drop stale CANCELLED rows for this URL (left by older versions
+        // whose cancel kept the row) so re-downloading starts clean.
+        withContext(Dispatchers.IO) {
+            dao.getAll().filter { it.url == url && it.status == "CANCELLED" }.forEach { stale ->
+                runCatching { File(stale.filePath).delete() }
+                runCatching { metadataFile(stale).delete() }
+                dao.deleteById(stale.id)
+            }
         }
         val existing = withContext(Dispatchers.IO) { dao.getByUrl(url) }
         if (existing != null && existing.status != "CANCELLED") {
@@ -182,6 +224,13 @@ class DownloadManager private constructor(private val appContext: Context) {
         }
     }
 
+    /**
+     * Cancel = remove entirely (v0.12.1 fix): stop the job, delete the
+     * partial file AND the database row. Previously the row was left
+     * behind as an invisible CANCELLED zombie that nothing ever cleaned
+     * up, while the UI's ✕ button didn't even call this (it opened the
+     * delete dialog — see DownloadsScreen fix).
+     */
     fun cancelDownload(id: String) {
         val active = synchronized(jobs) { jobs.remove(id).also { it?.cancel() } }
         scope.launch {
@@ -191,7 +240,7 @@ class DownloadManager private constructor(private val appContext: Context) {
                 if (item != null) {
                     runCatching { File(item.filePath).delete() }
                     runCatching { metadataFile(item).delete() }
-                    dao.updateStatus(id, "CANCELLED")
+                    dao.deleteById(id)
                 }
             }
             _activeDownloads.value = _activeDownloads.value - id
@@ -228,6 +277,7 @@ class DownloadManager private constructor(private val appContext: Context) {
     }
 
     private fun launchDownload(item: DownloadItem) {
+        ensureWifiCallback()
         synchronized(jobs) {
             if (jobs[item.id]?.isActive == true) return
             _activeDownloads.value = _activeDownloads.value.toMutableMap().apply {

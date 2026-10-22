@@ -10,18 +10,23 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
@@ -41,6 +46,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -48,6 +55,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusRequester
@@ -59,7 +67,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -88,7 +99,22 @@ import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+
+/**
+ * Dock → Home scroll-to-top signal (v0.12.4): the bottom dock's Home tab
+ * bumps [requests] whenever it's tapped while unfolded; HomeScreen
+ * collects it and smooth-scrolls its list to the very top. A plain
+ * counter (not an event bus) so a tap that lands while Home is being
+ * restored from the back stack still takes effect on arrival.
+ */
+object HomeScrollSignal {
+    val requests = MutableStateFlow(0)
+    fun requestScrollToTop() {
+        requests.value += 1
+    }
+}
 
 sealed interface HomeUiState {
     data object Loading : HomeUiState
@@ -182,6 +208,14 @@ fun HomeScreen(
 
     LaunchedEffect(catalogVersion) { vm.load() }
 
+    // The status-bar inset the Scaffold already padded away above this
+    // screen: the Content list shifts up by exactly this amount so the
+    // immersive hero reaches the very top of the screen, under the
+    // status bar (v0.12.4, Sample C).
+    val density = LocalDensity.current
+    val statusBarDp = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
+    val statusBarPx = with(density) { statusBarDp.roundToPx() }
+
     // Android TV: initial D-pad focus target (the hero card).
     val isTv = rememberIsTv()
     val heroFocus = remember { FocusRequester() }
@@ -190,68 +224,13 @@ fun HomeScreen(
     var heroFocusDone by remember { mutableStateOf(false) }
 
     GlowBackground {
-        Column(Modifier.fillMaxSize()) {
-            // Header
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column {
-                    Text(
-                        text = "Plavio",
-                        style = MaterialTheme.typography.headlineLarge.copy(
-                            fontWeight = FontWeight.Black,
-                            brush = LocalPalette.current.gradient
-                        )
-                    )
-                    Text(
-                        text = "Your streaming universe",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
-                }
-                // Single button for saved content: Watchlist + My Lists
-                // (both serve the same purpose — saved titles).
-                var savedMenuOpen by remember { mutableStateOf(false) }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box {
-                        IconButton(onClick = { savedMenuOpen = true }) {
-                            Icon(
-                                Icons.Filled.Bookmark,
-                                contentDescription = "Saved",
-                                tint = TextSecondary
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = savedMenuOpen,
-                            onDismissRequest = { savedMenuOpen = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Watchlist") },
-                                leadingIcon = {
-                                    Icon(Icons.Filled.Bookmark, contentDescription = null)
-                                },
-                                onClick = {
-                                    savedMenuOpen = false
-                                    onGoToWatchlist()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("My Lists") },
-                                leadingIcon = {
-                                    Icon(Icons.Filled.FormatListBulleted, contentDescription = null)
-                                },
-                                onClick = {
-                                    savedMenuOpen = false
-                                    onGoToLists()
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-
+        // No header (v0.12.3, owner's order): the "Plavio" wordmark +
+        // tagline row is gone, so the screen starts clear and the hero
+        // poster owns the full top of the screen. The one functional
+        // control the header held — the Saved (Watchlist / My Lists)
+        // button — floats overlaid at the top end (below, after the
+        // content states).
+        Box(Modifier.fillMaxSize()) {
             when (val state = vm.uiState) {
                 is HomeUiState.Loading -> LoadingState("Loading your catalogs…")
                 is HomeUiState.Error -> ErrorState(state.message, onRetry = { vm.load() })
@@ -265,6 +244,21 @@ fun HomeScreen(
                     // Hero carousel data: computed once per row-set, outside the
                     // LazyColumn DSL (remember can't run inside the list scope).
                     val featured = remember(state.rows) { featuredTitles(state.rows) }
+                    // Dock Home-tap → scroll to the very top (v0.12.4).
+                    // handledScrollRequest is saveable so a request fired
+                    // while Home sat in the back stack is honoured once,
+                    // on return, and never replayed on later visits.
+                    val homeListState = rememberLazyListState()
+                    var handledScrollRequest by rememberSaveable {
+                        mutableStateOf(HomeScrollSignal.requests.value)
+                    }
+                    val scrollRequests by HomeScrollSignal.requests.collectAsState()
+                    LaunchedEffect(scrollRequests) {
+                        if (scrollRequests != handledScrollRequest) {
+                            handledScrollRequest = scrollRequests
+                            runCatching { homeListState.animateScrollToItem(0) }
+                        }
+                    }
                     // TV: land D-pad focus on the hero once content is in.
                     LaunchedEffect(isTv, featured.size) {
                         if (isTv && featured.isNotEmpty() && !heroFocusDone) {
@@ -293,16 +287,65 @@ fun HomeScreen(
                         }
                     ) {
                     LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 16.dp)
+                        state = homeListState,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // Full-bleed BOTH ends (v0.12.12): the column
+                            // is measured statusBarPx TALLER than its
+                            // parent and placed shifted up by the same
+                            // amount, so the hero reaches the screen's
+                            // top edge AND the viewport reaches the
+                            // physical bottom edge — cards scroll under
+                            // and below the floating dock to the very
+                            // edge. The old plain .offset() shifted the
+                            // column up WITHOUT the extra height, ending
+                            // the viewport short of the bottom and
+                            // leaving a solid strip under the dock.
+                            .layout { measurable, constraints ->
+                                val placeable = measurable.measure(
+                                    constraints.copy(
+                                        minHeight = constraints.maxHeight + statusBarPx,
+                                        maxHeight = constraints.maxHeight + statusBarPx
+                                    )
+                                )
+                                layout(placeable.width, placeable.height) {
+                                    placeable.place(0, -statusBarPx)
+                                }
+                            },
+                        // Extra bottom room so the last row scrolls clear
+                        // of the floating dock (content now runs under it).
+                        contentPadding = PaddingValues(bottom = 104.dp)
                     ) {
                         // Hero carousel: featured titles with backdrop art, first item
                         // so it's the first thing on screen. Explicit key keeps it
                         // stable while rows refresh underneath.
                         if (featured.isNotEmpty()) {
                             item(key = "hero_carousel") {
-                                HeroCarousel(featured, onOpenDetail, heroFocus)
-                                Spacer(Modifier.height(8.dp))
+                                // Pinned hero (v0.12.5, owner's order): the
+                                // hero stays at the top while the catalog
+                                // sheet scrolls UP AND OVER it. The hero is
+                                // still a normal list item (pager swipe,
+                                // tap and TV focus untouched), but its draw
+                                // position is counter-translated by exactly
+                                // its scrolled-off amount, so it visually
+                                // never leaves the top; the sections below
+                                // are drawn after it, hence over it. At rest
+                                // the translation is 0 and the first section
+                                // starts exactly at the hero's bottom
+                                // border — the round-5 -22dp static overlap
+                                // (which also left a 22dp dead band in the
+                                // layout under the first row) is gone.
+                                Box(
+                                    Modifier.graphicsLayer {
+                                        val heroInfo = homeListState.layoutInfo
+                                            .visibleItemsInfo
+                                            .firstOrNull { it.key == "hero_carousel" }
+                                        translationY = if (heroInfo != null && heroInfo.offset < 0)
+                                            -heroInfo.offset.toFloat() else 0f
+                                    }
+                                ) {
+                                    HeroCarousel(featured, onOpenDetail, heroFocus)
+                                }
                             }
                         }
                         if (watching.isNotEmpty()) {
@@ -310,6 +353,14 @@ fun HomeScreen(
                             // Flow emits, so an index-based default key would
                             // reshuffle every row below it on each emission.
                             item(key = "continue_watching") {
+                              Column(
+                                // Scroll-over sheet (v0.12.5): sections
+                                // carry the solid app background so the
+                                // sheet reads cleanly (headers stay
+                                // legible) while it slides over the
+                                // pinned hero.
+                                Modifier.background(LocalPalette.current.background)
+                              ) {
                                 SectionTitle("Continue Watching")
                                 LazyRow(
                                     contentPadding = PaddingValues(horizontal = 16.dp),
@@ -342,18 +393,26 @@ fun HomeScreen(
                                         }
                                     }
                                 }
-                                Spacer(Modifier.height(8.dp))
+                                Spacer(Modifier.height(4.dp))
+                              }
                             }
                         }
                         // Watchlist intentionally NOT shown here (v0.8.21):
                         // bookmarked titles live only in the Watchlist tab.
-                        state.rows.forEach { row ->
+                        state.rows.forEachIndexed { rowIndex, row ->
                             // THE v0.3.0 scroll-crash fix: the key MUST include the
                             // catalog TYPE. Cinemeta declares the same catalog ids
                             // ("top", "year", "imdbRating") for both movie and
                             // series — without the type, two rows shared one key
                             // and LazyColumn threw, closing the app on scroll.
                             item(key = "${row.addonId}|${row.type}|${row.catalogId}") {
+                              Column(
+                                // Scroll-over sheet (v0.12.5): same solid
+                                // background as Continue Watching — the
+                                // whole sheet slides over the pinned hero
+                                // as one readable surface.
+                                Modifier.background(LocalPalette.current.background)
+                              ) {
                                 SectionTitle(
                                     row.catalogName,
                                     // Don't repeat the addon name when the catalog name
@@ -379,11 +438,64 @@ fun HomeScreen(
                                         )
                                     }
                                 }
-                                Spacer(Modifier.height(8.dp))
+                                Spacer(Modifier.height(4.dp))
+                              }
                             }
                         }
                     }
                     }
+                }
+            }
+
+            // Saved button, floating over the top end of the screen (it
+            // was the header row's only functional control): one button
+            // for Watchlist + My Lists (both serve the same purpose —
+            // saved titles). The glass circle keeps it readable over the
+            // hero poster it now floats on.
+            var savedMenuOpen by remember { mutableStateOf(false) }
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(12.dp)
+            ) {
+                Box(
+                    Modifier
+                        .size(42.dp)
+                        .liquidGlass(CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    IconButton(onClick = { savedMenuOpen = true }) {
+                        Icon(
+                            Icons.Filled.Bookmark,
+                            contentDescription = "Saved",
+                            tint = TextPrimary
+                        )
+                    }
+                }
+                DropdownMenu(
+                    expanded = savedMenuOpen,
+                    onDismissRequest = { savedMenuOpen = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Watchlist") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Bookmark, contentDescription = null)
+                        },
+                        onClick = {
+                            savedMenuOpen = false
+                            onGoToWatchlist()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("My Lists") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.FormatListBulleted, contentDescription = null)
+                        },
+                        onClick = {
+                            savedMenuOpen = false
+                            onGoToLists()
+                        }
+                    )
                 }
             }
         }
@@ -478,6 +590,17 @@ private fun featuredTitles(rows: List<CatalogRow>, max: Int = 6): List<FeaturedT
  * Home. Auto-advances every 5s on mobile (pausing while the user is touching
  * it); never auto-advances on TV to avoid stealing frames from D-pad input.
  * Tap opens the title's detail screen.
+ *
+ * v0.12.4 (owner's Sample C — "immersive"): the pager is now truly
+ * full-bleed — edge-to-edge with no side padding, no rounded frame —
+ * the list itself is shifted up under the status bar so the art owns
+ * the screen's top edge; the swipe dots moved INSIDE the poster
+ * (animated, active = elongated mint pill).
+ *
+ * v0.12.5 (owner's order): ~20% taller again — 380dp (was 316dp) — and
+ * the hero is PINNED: it stays at the top while the catalog sheet
+ * scrolls up and over it (the pin lives on the hero's list item in
+ * [HomeScreen]; the pager itself is unchanged).
  */
 @Composable
 private fun HeroCarousel(
@@ -503,15 +626,12 @@ private fun HeroCarousel(
         }
     }
 
-    Column {
+    Box {
         HorizontalPager(
             state = pagerState,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(232.dp)
-                .padding(horizontal = 16.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .border(1.dp, GlassBorder, RoundedCornerShape(22.dp)),
+                .height(380.dp),
             key = { index -> "hero_${featured[index].meta.id}_$index" }
         ) { index ->
             val item = featured[index]
@@ -519,7 +639,7 @@ private fun HeroCarousel(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .tvFocusRing(RoundedCornerShape(22.dp))
+                    .tvFocusRing(RoundedCornerShape(0.dp))
                     .clickable { onOpenDetail(item.addonId, meta.type, meta.id) }
                     .then(if (heroFocus != null && index == 0) Modifier.focusRequester(heroFocus) else Modifier)
                     .focusable()
@@ -573,26 +693,32 @@ private fun HeroCarousel(
                 }
             }
         }
-        // Position dots.
+        // Swipe dots INSIDE the poster's lower edge (v0.12.4): the active
+        // dot stretches into an elongated mint pill, animated.
         if (featured.size > 1) {
             Row(
                 Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp),
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 18.dp),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 repeat(featured.size) { i ->
                     val active = i == pagerState.currentPage
+                    val dotWidth by animateDpAsState(
+                        targetValue = if (active) 18.dp else 6.dp,
+                        animationSpec = tween(320),
+                        label = "heroDot$i"
+                    )
                     Box(
                         Modifier
                             .padding(horizontal = 3.dp)
-                            .width(if (active) 18.dp else 6.dp)
+                            .width(dotWidth)
                             .height(6.dp)
                             .clip(RoundedCornerShape(50))
                             .background(
                                 if (active) LocalPalette.current.accent
-                                else Color.White.copy(alpha = 0.28f)
+                                else Color.White.copy(alpha = 0.35f)
                             )
                     )
                 }

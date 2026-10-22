@@ -508,11 +508,6 @@ class SettingsStore(context: Context) {
         get() = prefs.getString(KEY_THEME_MODE, "dark") ?: "dark"
         set(value) = prefs.edit().putString(KEY_THEME_MODE, value).apply()
 
-    /** Stream badge pack key (custom pack "custom:<name>"). Empty = no badges. */
-    var streamCardStyle: String
-        get() = prefs.getString(KEY_CARD_STYLE, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_CARD_STYLE, value).apply()
-
     /**
      * Preferred subtitle languages (ISO 639-1 codes, up to 2).
      * Empty = no preference (first available subtitle is used).
@@ -826,7 +821,6 @@ class SettingsStore(context: Context) {
         private const val KEY_ACCENT = "accent_theme"
         private const val KEY_AMOLED = "amoled_black"
         private const val KEY_THEME_MODE = "theme_mode"
-        private const val KEY_CARD_STYLE = "stream_card_style"
         private const val KEY_PREINSTALL_PREFIX = "preinstall_done_"
         private const val KEY_SIMKL_TOKEN = "simkl_token"
         private const val KEY_SIMKL_USERNAME = "simkl_username"

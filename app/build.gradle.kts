@@ -18,8 +18,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 91
-        versionName = "0.11.4"
+        versionCode = 92
+        versionName = "0.11.5"
     }
 
     // Publishing is explicit and must never silently use an unsigned/debug artifact.

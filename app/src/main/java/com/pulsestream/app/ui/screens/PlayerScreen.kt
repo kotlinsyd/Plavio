@@ -18,7 +18,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +38,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.ArrowBack
@@ -91,6 +91,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -102,6 +103,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -134,6 +137,7 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
@@ -184,7 +188,6 @@ import com.pulsestream.app.ui.components.DotsLoadingIndicator
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.components.StreamCard
-import com.pulsestream.app.ui.components.LocalBadgeStyleKey
 import com.pulsestream.app.ui.components.StreamList
 import com.pulsestream.app.ui.components.rememberStreamBrowserState
 import com.pulsestream.app.ui.theme.LocalPalette
@@ -692,6 +695,12 @@ fun PlayerScreen(
     var volumePercent by remember { mutableIntStateOf(0) }
     var speed by remember { mutableFloatStateOf(1f) }
     var speedMenuOpen by remember { mutableStateOf(false) }
+    /** True while the hold-for-speed gesture is boosting playback (v0.12.0). */
+    var holdSpeedActive by remember { mutableStateOf(false) }
+    /** Current hold-boost step (2..5) shown in the hold pill (v0.12.1). */
+    var holdSpeedStep by remember { mutableIntStateOf(2) }
+    /** Main-thread scope for the delayed single-tap toggle in videoGestures. */
+    val gestureUiScope = rememberCoroutineScope()
     var indicator by remember { mutableStateOf<PlayerIndicator?>(null) }
     var indicatorTick by remember { mutableIntStateOf(0) }
 
@@ -709,6 +718,9 @@ fun PlayerScreen(
     var tracksOpen by remember { mutableStateOf(false) }
     var tracksMode by remember { mutableStateOf("subs") } // "subs" or "audio"
     var trackTick by remember { mutableIntStateOf(0) }
+    /** Set when the user hand-picks an audio track — the preferred-language
+     * auto-select then leaves their pick alone for this player session. */
+    var userPickedAudio by remember { mutableStateOf(false) }
 
     /**
      * Attaches resolved (downloaded + format-sniffed) subtitles to the current
@@ -873,12 +885,72 @@ fun PlayerScreen(
     }
 
     fun applyAudioSelection(opt: TrackOption?) {
+        // A manual pick (including "Auto", which hands selection back) is
+        // the user's word for this session — auto-select steps aside.
+        userPickedAudio = true
         val params = player.trackSelectionParameters.buildUpon()
         if (opt == null) params.clearOverridesOfType(C.TRACK_TYPE_AUDIO)
         else params.setOverrideForType(TrackSelectionOverride(opt.group, listOf(opt.trackIndex)))
         player.trackSelectionParameters = params.build()
         trackTick++
         pokeIndicator(PlayerIndicator.Message(if (opt == null) "Audio: Auto" else "Audio: ${opt.label}"))
+    }
+
+    /**
+     * Tightened preferred-audio enforcement (v0.12.0): buildExo only passes
+     * the Settings > Playback language as a track-selector *hint*, which
+     * the selector could outvote (channel count / role flags), so the
+     * chosen language sometimes didn't play even when present. Now the
+     * preference is applied as a hard TrackSelectionOverride for the first
+     * audio track whose language matches, re-applied whenever the track
+     * set changes (playback start, source switch, late track arrivals).
+     * No matching track → parameters stay untouched (graceful fallback to
+     * the default selection).
+     */
+    fun applyPreferredAudioLanguage() {
+        if (userPickedAudio) return
+        val pref = settings.preferredAudioLanguage?.takeIf { it.isNotBlank() } ?: return
+        val p = player
+        // Already playing the preferred language — nothing to tighten.
+        val alreadySelected = p.currentTracks.groups
+            .filter { it.type == C.TRACK_TYPE_AUDIO && it.isSelected }
+            .any { g ->
+                (0 until g.length).any { i ->
+                    g.isTrackSelected(i) && subtitleLangMatches(g.getTrackFormat(i).language, pref)
+                }
+            }
+        if (alreadySelected) return
+        val match = p.currentTracks.groups
+            .filter { it.type == C.TRACK_TYPE_AUDIO }
+            .firstNotNullOfOrNull { g ->
+                (0 until g.length).firstOrNull { i ->
+                    subtitleLangMatches(g.getTrackFormat(i).language, pref)
+                }?.let { idx -> g to idx }
+            } ?: return
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setPreferredAudioLanguages(pref)
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+            .setOverrideForType(TrackSelectionOverride(match.first.mediaTrackGroup, listOf(match.second)))
+            .build()
+        trackTick++
+    }
+
+    // Apply the preferred audio language on player (re)creation and on
+    // every track-set change for that player.
+    LaunchedEffect(player) {
+        userPickedAudio = false
+        val listener = object : Player.Listener {
+            override fun onTracksChanged(tracks: Tracks) {
+                applyPreferredAudioLanguage()
+            }
+        }
+        player.addListener(listener)
+        applyPreferredAudioLanguage()
+        try {
+            kotlinx.coroutines.awaitCancellation()
+        } finally {
+            player.removeListener(listener)
+        }
     }
 
     fun applySubtitleSelection(opt: TrackOption?) {
@@ -1493,94 +1565,178 @@ fun PlayerScreen(
     }
 
     /**
-     * Full gesture set for the video surface: tap, double-tap, and
-     * directional swipes. Disabled while the controls lock is on.
+     * Full gesture set for the video surface in ONE pointerInput handler:
+     * tap (toggle controls), double-tap (±10s seek), directional drags
+     * (seek / volume / brightness) and hold-for-speed with slide steps.
+     *
+     * v0.12.1 regression fix: v0.12.0 stacked THREE separate detectors
+     * (tap + a second detectTapGestures for the hold + drag) on this same
+     * node. Concurrent detectors share PointerInputChange consumption, so
+     * the tap detector's wait-for-up was cancelled by its siblings on every
+     * tap — controls never appeared and every control (incl. Back) was
+     * unreachable; only the hold still fired. A single unified state
+     * machine removes that whole class of interference: nothing else on
+     * this node consumes pointer changes.
+     *
+     * Hold-for-speed (GitHub issue #2 + owner's slide extension): a press
+     * held ~350ms without dragging engages 2x; while still holding, each
+     * ~60dp of rightward slide steps up (2x → 3x → 4x → max 5x), sliding
+     * left steps back down (floor 2x). Release restores the exact speed
+     * that was playing before the hold. Disabled while locked (tap only
+     * shows the locked hint, as before).
      */
-    fun Modifier.videoGestures(): Modifier = this
-        .pointerInput(player, locked) {
-            detectTapGestures(
-                onTap = {
-                    if (locked) pokeIndicator(PlayerIndicator.Message("Locked — tap the lock icon to unlock"))
-                    else toggleControls()
-                },
-                onDoubleTap = { offset ->
-                    if (!locked) {
-                        if (offset.x < size.width / 2f) seekByWithFeedback(-10_000)
-                        else seekByWithFeedback(10_000)
-                    }
-                }
-            )
+    fun Modifier.videoGestures(): Modifier = this.pointerInput(player, locked) {
+        if (locked) {
+            detectTapGestures(onTap = {
+                pokeIndicator(PlayerIndicator.Message("Locked — tap the lock icon to unlock"))
+            })
+            return@pointerInput
         }
-        .pointerInput(player, locked) {
-            if (locked) return@pointerInput
+        var lastTapUpMs = 0L
+        var pendingToggle: Job? = null
+        awaitEachGesture {
+            val down = awaitFirstDown()
+            val downPos = down.position
+            val downTime = down.uptimeMillis
             val slop = viewConfiguration.touchSlop
-            var mode = -1 // 0 = seek, 1 = volume, 2 = brightness
-            var startX = 0f
+            val stepPx = 60.dp.toPx()
+            val holdThresholdMs = 350L
+            var lastEventMs = downTime
+            var lastPos = downPos
             var accX = 0f
             var accY = 0f
+            // Drag state (same semantics as the old drag detector):
+            // -1 undecided, 0 = seek, 1 = volume, 2 = brightness.
+            var dragMode = -1
             var seekBase = 0L
             var seekTarget = -1L
             var volBase = 0
             var brightBase = 0.5f
-            detectDragGestures(
-                onDragStart = { offset ->
-                    startX = offset.x
-                    accX = 0f
-                    accY = 0f
-                    mode = -1
-                    seekTarget = -1L
-                    seekBase = player.currentPosition
-                    volBase = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                    brightBase = activity?.window?.attributes
-                        ?.screenBrightness?.takeIf { it >= 0 } ?: 0.5f
-                },
-                onDragEnd = {
-                    if (mode == 0 && seekTarget >= 0) player.seekTo(seekTarget)
-                    mode = -1
-                },
-                onDragCancel = { mode = -1 },
-                onDrag = { change, dragAmount ->
-                    change.consume()
-                    accX += dragAmount.x
-                    accY += dragAmount.y
-                    if (mode == -1 && (abs(accX) > slop || abs(accY) > slop)) {
-                        mode = if (abs(accX) > abs(accY)) 0
-                        else if (startX < size.width / 2f) 2 else 1
+            // Hold state.
+            var holdEngaged = false
+            var prevSpeed = 1f
+            var slideBaseX = 0f
+            var upChange: androidx.compose.ui.input.pointer.PointerInputChange? = null
+
+            while (upChange == null) {
+                val event = if (!holdEngaged && dragMode == -1) {
+                    // Still a tap/hold candidate: wake up at the hold
+                    // threshold even if no further pointer event arrives.
+                    val remaining = (downTime + holdThresholdMs - lastEventMs).coerceAtLeast(0L)
+                    withTimeoutOrNull(remaining) { awaitPointerEvent() }
+                } else {
+                    awaitPointerEvent()
+                }
+                if (event == null) {
+                    // Threshold reached with the finger still down and no
+                    // drag in progress: engage the speed hold.
+                    holdEngaged = true
+                    prevSpeed = player.playbackParameters.speed
+                    slideBaseX = accX
+                    holdSpeedStep = 2
+                    runCatching { player.setPlaybackSpeed(2f) }
+                    holdSpeedActive = true
+                    continue
+                }
+                val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                lastEventMs = change.uptimeMillis
+                if (!change.pressed) {
+                    // Pointer went up (Compose 1.7 no longer distinguishes
+                    // a system cancel here — it also arrives as !pressed).
+                    upChange = change
+                    break
+                }
+                val delta = change.position - lastPos
+                lastPos = change.position
+                accX += delta.x
+                accY += delta.y
+                if (holdEngaged) {
+                    // Slide right = step up, left = step down (floor 2x).
+                    val step = 2 + ((accX - slideBaseX) / stepPx).toInt().coerceIn(0, 3)
+                    if (step != holdSpeedStep) {
+                        holdSpeedStep = step
+                        runCatching { player.setPlaybackSpeed(step.toFloat()) }
                     }
-                    when (mode) {
-                        0 -> { // horizontal swipe: seek proportional to swipe distance
-                            val dur = player.duration
-                            if (dur > 0) {
-                                seekTarget = (seekBase + accX / size.width * dur)
-                                    .toLong().coerceIn(0L, dur)
-                                val delta = seekTarget - player.currentPosition
-                                pokeIndicator(
-                                    PlayerIndicator.Seek(
-                                        (if (delta >= 0) "+" else "−") + formatMs(abs(delta))
+                } else {
+                    if (dragMode == -1 && (abs(accX) > slop || abs(accY) > slop)) {
+                        dragMode = if (abs(accX) > abs(accY)) 0
+                        else if (downPos.x < size.width / 2f) 2 else 1
+                        seekBase = player.currentPosition
+                        seekTarget = -1L
+                        volBase = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                        brightBase = activity?.window?.attributes
+                            ?.screenBrightness?.takeIf { it >= 0 } ?: 0.5f
+                    }
+                    if (dragMode != -1) {
+                        change.consume()
+                        when (dragMode) {
+                            0 -> { // horizontal swipe: seek proportional to swipe distance
+                                val dur = player.duration
+                                if (dur > 0) {
+                                    seekTarget = (seekBase + accX / size.width * dur)
+                                        .toLong().coerceIn(0L, dur)
+                                    val deltaMs = seekTarget - player.currentPosition
+                                    pokeIndicator(
+                                        PlayerIndicator.Seek(
+                                            (if (deltaMs >= 0) "+" else "−") + formatMs(abs(deltaMs))
+                                        )
                                     )
-                                )
+                                }
                             }
-                        }
-                        1 -> { // vertical swipe, right half: volume
-                            val v = (volBase - accY / size.height * maxVolume)
-                                .roundToInt().coerceIn(0, maxVolume)
-                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0)
-                            volumePercent = v * 100 / maxVolume.coerceAtLeast(1)
-                            pokeIndicator(PlayerIndicator.Volume(volumePercent))
-                        }
-                        2 -> { // vertical swipe, left half: brightness
-                            val b = (brightBase - accY / size.height).coerceIn(0.01f, 1f)
-                            activity?.window?.let { w ->
-                                val lp = w.attributes
-                                lp.screenBrightness = b
-                                w.attributes = lp
+                            1 -> { // vertical swipe, right half: volume
+                                val v = (volBase - accY / size.height * maxVolume)
+                                    .roundToInt().coerceIn(0, maxVolume)
+                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0)
+                                volumePercent = v * 100 / maxVolume.coerceAtLeast(1)
+                                pokeIndicator(PlayerIndicator.Volume(volumePercent))
                             }
-                            pokeIndicator(PlayerIndicator.Brightness((b * 100).toInt()))
+                            2 -> { // vertical swipe, left half: brightness
+                                val b = (brightBase - accY / size.height).coerceIn(0.01f, 1f)
+                                activity?.window?.let { w ->
+                                    val lp = w.attributes
+                                    lp.screenBrightness = b
+                                    w.attributes = lp
+                                }
+                                pokeIndicator(PlayerIndicator.Brightness((b * 100).toInt()))
+                            }
                         }
                     }
                 }
-            )
+            }
+
+            // Gesture finished — settle the outcome.
+            when {
+                holdEngaged -> {
+                    holdSpeedActive = false
+                    runCatching { player.setPlaybackSpeed(prevSpeed) }
+                }
+                dragMode == 0 -> {
+                    if (seekTarget >= 0) player.seekTo(seekTarget)
+                }
+                dragMode == -1 -> {
+                    // A tap: a second tap inside the double-tap window
+                    // seeks ±10s by side; a lone tap toggles the controls
+                    // once the window expires (same timing as the old
+                    // detectTapGestures behaviour).
+                    val now = upChange?.uptimeMillis ?: downTime
+                    val window = viewConfiguration.doubleTapTimeoutMillis
+                    if (lastTapUpMs != 0L && now - lastTapUpMs <= window) {
+                        pendingToggle?.cancel()
+                        pendingToggle = null
+                        lastTapUpMs = 0L
+                        if (downPos.x < size.width / 2f) seekByWithFeedback(-10_000)
+                        else seekByWithFeedback(10_000)
+                    } else {
+                        lastTapUpMs = now
+                        pendingToggle = gestureUiScope.launch {
+                            delay(window.toLong())
+                            toggleControls()
+                        }
+                    }
+                }
+            }
         }
+    }
 
     /** Tap-only gestures for the controls overlay (slider drags stay clean). */
     fun Modifier.tapGestures(): Modifier = this.pointerInput(player, locked) {
@@ -2169,6 +2325,39 @@ fun PlayerScreen(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Hold-for-speed pill: pinned top-center only while the hold boost
+        // is active, showing the current step (2x..5x); never consumes touches.
+        if (holdSpeedActive) {
+            Box(
+                Modifier.fillMaxSize().padding(top = 24.dp),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.62f),
+                    shape = RoundedCornerShape(50)
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Filled.FastForward,
+                            contentDescription = null,
+                            tint = LocalPalette.current.accent,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "${holdSpeedStep}x",
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }

@@ -37,11 +37,10 @@
     <string name="settings_section_appearance">Appearance</string>
     <string name="settings_appearance_title">Appearance</string>
     <string name="settings_appearance_sub">Accent color and AMOLED black</string>
-    <string name="settings_badges_title">Stream Badges</string>
 
     <string name="settings_section_account">Account</string>
     <string name="settings_account_title">Account</string>
-    <string name="settings_account_sub">Plavio Cloud login and profiles</string>
+    <string name="settings_account_sub">Backup &amp; sync with your Google account</string>
     <string name="settings_backup_title">Backup &amp; Restore</string>
     <string name="settings_backup_sub">Save or restore everything to a file</string>
 

@@ -16,7 +16,9 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -45,6 +47,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -66,9 +72,16 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -89,6 +102,9 @@ import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.Subtitle
 import com.pulsestream.app.data.Video
 import com.pulsestream.app.data.streamQualityLabel
+import com.pulsestream.app.data.SUBTITLE_LANGUAGE_OPTIONS
+import com.pulsestream.app.ui.components.availableStreamQualities
+import com.pulsestream.app.ui.components.parseStreamInfo
 import com.pulsestream.app.ui.components.ErrorState
 import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.liquidGlass
@@ -100,7 +116,6 @@ import com.pulsestream.app.ui.components.pickAutoplayStream
 import com.pulsestream.app.ui.components.rememberStreamBrowserState
 import com.pulsestream.app.ui.components.StreamCard
 import com.pulsestream.app.ui.components.StreamList
-import com.pulsestream.app.ui.components.LocalBadgeStyleKey
 import com.pulsestream.app.ui.components.streamListItems
 import com.pulsestream.app.ui.components.DownloadConfirmDialog
 import com.pulsestream.app.ui.components.StreamTab
@@ -398,6 +413,7 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(
     repository: StreamRepository,
@@ -517,7 +533,7 @@ private fun BackBar(onBack: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun DetailContent(
     vm: DetailViewModel,
@@ -542,6 +558,16 @@ private fun DetailContent(
     // Shared stream-browser state: addon tabs + filtered list stay in sync as
     // sources stream in progressively.
     val allStreams = (vm.streamsState as? StreamsUiState.Content)?.streams ?: emptyList()
+    // Hero fact stack (v0.12.5, owner's Sample E "Right-Side Stack" —
+    // replaces the v0.12.4 stat-tile grid): best quality, top audio,
+    // languages, subtitles and stream/addon counts computed across the
+    // loaded streams (see heroFactRows), drawn INSIDE the hero at its
+    // lower-right. Recomputed as streams stream in; any row whose data
+    // is absent is simply not shown.
+    val allSubtitles = (vm.streamsState as? StreamsUiState.Content)?.subtitles ?: emptyList()
+    val heroFacts = remember(allStreams, allSubtitles) {
+        heroFactRows(allStreams, allSubtitles)
+    }
     val browserState = rememberStreamBrowserState(allStreams, repository.settings)
     // Mini floating source-picker card (the button next to Play opens this
     // instead of scrolling to the sources section).
@@ -568,50 +594,35 @@ private fun DetailContent(
         }
     }
 
-    // Badge pack for stream rows comes from the Appearance setting.
-    androidx.compose.runtime.CompositionLocalProvider(
-        LocalBadgeStyleKey provides repository.settings.streamCardStyle
-    ) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 24.dp)
     ) {
         item {
-            Box(Modifier.fillMaxWidth().height(260.dp)) {
-                SafePosterImage(
-                    model = meta.background ?: meta.poster,
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize()
-                )
-                Box(
-                    Modifier.fillMaxSize().background(
-                        Brush.verticalGradient(
-                            listOf(Color.Transparent, Color(0xFF0A0A12)),
-                            startY = 200f
-                        )
-                    )
-                )
-                IconButton(
-                    onClick = onBack,
-                    modifier = Modifier.padding(8.dp).align(Alignment.TopStart)
-                        .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
-                ) {
-                    Icon(Icons.Filled.ArrowBack, "Back", tint = TextPrimary)
-                }
-                // Action buttons: watchlist + add to list — top-right corner
+            // Poster Duo (Sample G; owner's pick v0.12.14): no
+            // backdrop hero — actions on a plain top row, poster
+            // card on the left, title + stacked facts on the right.
+            // Replaces Sample D's Poster Credits hero.
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Row(
-                    modifier = Modifier.padding(8.dp).align(Alignment.TopEnd),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
+                    ) {
+                        Icon(Icons.Filled.ArrowBack, "Back", tint = TextPrimary)
+                    }
+                    Spacer(Modifier.weight(1f))
                     IconButton(
                         onClick = {
                             scope.launch {
                                 repository.toggleWatchlist(addonId, meta.type, meta.id, meta.name, meta.poster)
                             }
                         },
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
+                        modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
                     ) {
                         Icon(
                             if (watchItem != null) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
@@ -619,10 +630,10 @@ private fun DetailContent(
                             tint = TextPrimary
                         )
                     }
+                    Spacer(Modifier.width(8.dp))
                     IconButton(
                         onClick = { showAddToList = true },
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
+                        modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
                     ) {
                         Icon(
                             Icons.Filled.PlaylistAdd,
@@ -631,57 +642,75 @@ private fun DetailContent(
                         )
                     }
                 }
-            }
-        }
-        item {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                SafePosterImage(
-                    model = meta.poster,
-                    contentDescription = meta.name,
-                    modifier = Modifier
-                        .width(110.dp).height(165.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
-                )
-                Spacer(Modifier.width(16.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(meta.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = TextPrimary)
-                    Spacer(Modifier.height(6.dp))
-                    val info = listOfNotNull(
-                        meta.releaseInfo?.take(4),
-                        meta.imdbRating?.let { "★ $it" },
-                        meta.type.replaceFirstChar { it.uppercase() }
-                    ).joinToString("  •  ")
-                    if (info.isNotBlank()) {
-                        Text(info, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        itemsIndexed(meta.genres.take(5), key = { index, genre -> "${genre}_$index" }) { _, genre ->
-                            Box(
-                                Modifier.liquidGlass(RoundedCornerShape(50))
-                                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                            ) {
-                                Text(genre, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth()) {
+                    SafePosterImage(
+                        model = meta.poster ?: meta.background,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .width(132.dp)
+                            .height(198.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            meta.name,
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val duoMetaLine = buildList {
+                            meta.imdbRating?.takeIf { it.isNotBlank() }?.let { add("\u2605 $it IMDb") }
+                            meta.releaseInfo?.takeIf { it.isNotBlank() }?.let { add(it) }
+                            if (meta.genres.isNotEmpty()) add(meta.genres.take(2).joinToString(" / "))
+                        }.joinToString("  \u00b7  ")
+                        if (duoMetaLine.isNotBlank()) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                duoMetaLine,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextSecondary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        heroFacts.forEach { fact ->
+                            val duoLabel = when {
+                                fact.label == "Best quality" -> "Quality"
+                                fact.label.startsWith("Streams") -> "Streams"
+                                else -> fact.label
+                            }
+                            val duoValue = if (fact.label.startsWith("Streams")) {
+                                val addons = fact.label.substringAfter("\u00b7 ", "").trim()
+                                if (addons.isNotBlank()) "${fact.value} \u00b7 $addons" else fact.value
+                            } else fact.value
+                            Row(Modifier.padding(vertical = 3.dp)) {
+                                Text(
+                                    duoLabel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextSecondary,
+                                    modifier = Modifier.width(84.dp)
+                                )
+                                Text(
+                                    duoValue,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
                 }
             }
         }
-        if (!meta.description.isNullOrBlank()) {
-            item {
-                Text(
-                    meta.description!!,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp),
-                    maxLines = 6,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
         item {
+          Column {
             val canPlay = vm.streamsState !is StreamsUiState.Error
             // Resume: check if there's playback progress for this title
             val continueWatching by repository.continueWatching.collectAsState(initial = emptyList())
@@ -699,6 +728,46 @@ private fun DetailContent(
                 resumeProgress = if (hasResume) resumeProgress else null,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).focusRequester(playButtonFocus)
             )
+            Text(
+                "Press & hold Watch Now for sources",
+                style = MaterialTheme.typography.labelMedium,
+                color = TextSecondary,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+            )
+          }
+        }
+        if (!meta.description.isNullOrBlank()) {
+            item {
+                Column {
+                    Text(
+                        meta.description!!,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp),
+                        maxLines = 6,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (meta.genres.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            Modifier.padding(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            meta.genres.take(4).forEach { genre ->
+                                Text(
+                                    genre,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TextPrimary,
+                                    modifier = Modifier
+                                        .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(50))
+                                        .padding(horizontal = 11.dp, vertical = 5.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Trailers section: horizontal cards like "You May Like"
         if (meta.trailerStreams.isNotEmpty()) {
@@ -1157,9 +1226,18 @@ private fun DetailContent(
         onDownload = { stream -> downloadStream = stream }
     )
 
-    // Full-page source picker (long-press Play): title header + addon tabs + streams.
+    // Source picker (long-press Play): Bottom Sheet (Sample M;
+    // owner's pick v0.12.14) — slides over the detail page, which
+    // stays dimmed behind it. Same picker body, sheet mode.
     if (fullPageSourceOpen) {
+      ModalBottomSheet(
+        onDismissRequest = { fullPageSourceOpen = false },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = LocalPalette.current.background,
+        dragHandle = { BottomSheetDefaults.DragHandle() }
+      ) {
         FullPageSourcePicker(
+            inSheet = true,
             meta = meta,
             streams = allStreams,
             loading = vm.streamsState is StreamsUiState.Loading,
@@ -1174,6 +1252,7 @@ private fun DetailContent(
             },
             onDownload = { stream -> downloadStream = stream }
         )
+      }
     }
 
     // Download confirmation dialog
@@ -1197,12 +1276,145 @@ private fun DetailContent(
             onDismiss = { showAddToList = false }
         )
     }
-    } // CompositionLocalProvider (badge style)
 }
 
 @Composable
 private fun rememberSeasonList(meta: MetaDetail): List<Int> {
     return meta.videos.map { it.season }.distinct().sorted()
+}
+
+// ---------------------------------------------------------------------------
+// Hero stat tiles (v0.12.4, Sample C)
+// ---------------------------------------------------------------------------
+
+/** Display names scanned for in stream text, from the app's canonical language list. */
+private val HERO_LANGUAGE_NAMES: List<String> = SUBTITLE_LANGUAGE_OPTIONS.map { it.second }
+
+/** Premium-first ordering for audio format tags. */
+private val HERO_AUDIO_RANK: List<String> = listOf(
+    "Atmos", "TrueHD", "DTS-HDMA", "DTS-HD", "DTS", "DD+", "DD5.1", "DD", "Dolby", "AAC5.1", "AAC"
+)
+
+/** Value accent for a stat tile: gold rating, mint languages, plain rest. */
+private enum class HeroTileKind { PLAIN, GOLD, MINT }
+
+/** One Sample E hero fact row: a small-caps light label + a bold value. */
+private data class HeroFactRow(
+    val label: String,
+    val value: String,
+    val kind: HeroTileKind = HeroTileKind.PLAIN
+)
+
+@Composable
+private fun HeroFactRowView(fact: HeroFactRow, shadow: Shadow) {
+    val valueColor = when (fact.kind) {
+        HeroTileKind.GOLD -> Color(0xFFFFD166)
+        HeroTileKind.MINT -> LocalPalette.current.accent
+        HeroTileKind.PLAIN -> TextPrimary
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            fact.label.uppercase(),
+            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp, shadow = shadow),
+            color = TextSecondary,
+            maxLines = 1
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            fact.value,
+            style = MaterialTheme.typography.titleSmall.copy(shadow = shadow),
+            fontWeight = FontWeight.ExtraBold,
+            color = valueColor,
+            maxLines = 1
+        )
+    }
+}
+
+/** ISO 639-2 → 639-1 for the subtitle codes addons most often print. */
+private val SUBTITLE_CODE3_TO_2: Map<String, String> = mapOf(
+    "eng" to "EN", "hin" to "HI", "urd" to "UR", "ara" to "AR", "spa" to "ES",
+    "fra" to "FR", "fre" to "FR", "deu" to "DE", "ger" to "DE", "ita" to "IT",
+    "por" to "PT", "rus" to "RU", "jpn" to "JA", "kor" to "KO", "zho" to "ZH",
+    "chi" to "ZH", "tam" to "TA", "tel" to "TE", "mar" to "MR", "ben" to "BN",
+    "pan" to "PA", "guj" to "GU", "tur" to "TR", "per" to "FA", "fas" to "FA",
+    "ind" to "ID", "msa" to "MS", "may" to "MS", "tha" to "TH", "vie" to "VI",
+    "ukr" to "UK", "pol" to "PL", "nld" to "NL", "dut" to "NL"
+)
+
+/** Short display code ("EN") for a subtitle language tag of any shape. */
+private fun subtitleDisplayCode(raw: String): String {
+    val code = raw.trim().lowercase()
+    if (code.length == 2) return code.uppercase()
+    SUBTITLE_CODE3_TO_2[code]?.let { return it }
+    // Some addons print full names ("English") instead of codes.
+    SUBTITLE_LANGUAGE_OPTIONS.firstOrNull { it.second.equals(code, ignoreCase = true) }
+        ?.let { return it.first.uppercase() }
+    return code.take(3).uppercase()
+}
+
+/**
+ * Fact rows for the detail hero's right-side stack (v0.12.5, Sample E —
+ * replaces the v0.12.4 stat tiles; same computations): what the loaded
+ * addons offer for this title, known BEFORE pressing play, computed
+ * across the loaded streams — best quality, top audio format, audio
+ * languages (stream name/title/filename text is the only place addons
+ * print languages, word-matched against the canonical names,
+ * English/Hindi leading as in v0.12.3), subtitle count from the stream
+ * result, and the stream / addon counts. The IMDb rating is NOT a row
+ * here — it sits in the hero's bottom-left meta line. Absent data
+ * yields no row — never a placeholder.
+ */
+private fun heroFactRows(
+    streams: List<StreamItem>,
+    subtitles: List<Subtitle>
+): List<HeroFactRow> {
+    if (streams.isEmpty()) return emptyList()
+    val rows = mutableListOf<HeroFactRow>()
+
+    availableStreamQualities(streams).firstOrNull()?.let { quality ->
+        rows += HeroFactRow("Best quality", if (quality == "4K") "4K UHD" else quality)
+    }
+
+    val topAudio = streams.mapNotNull { parseStreamInfo(it).audio }.distinct()
+        .minByOrNull { tag ->
+            HERO_AUDIO_RANK.indexOfFirst { tag.equals(it, ignoreCase = true) }
+                .let { rank -> if (rank < 0) Int.MAX_VALUE else rank }
+        }
+    topAudio?.let { rows += HeroFactRow("Top audio", it) }
+
+    val haystack = streams.joinToString("\n") { stream ->
+        listOfNotNull(stream.title, stream.name, stream.filename).joinToString(" ")
+    }
+    if (haystack.isNotBlank()) {
+        val found = HERO_LANGUAGE_NAMES.filter { name ->
+            Regex("""\b${Regex.escape(name)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(haystack)
+        }
+        // English and Hindi lead (the owner's most-wanted pair), the
+        // rest follow the canonical list order.
+        val lead = listOf("English", "Hindi")
+        val ordered = lead.filter { it in found } + found.filter { it !in lead }
+        if (ordered.isNotEmpty()) {
+            val codes = ordered.map { name ->
+                SUBTITLE_LANGUAGE_OPTIONS.firstOrNull { it.second == name }?.first?.uppercase()
+                    ?: name.take(2).uppercase()
+            }
+            val extra = if (ordered.size > 2) " +${ordered.size - 2}" else ""
+            rows += HeroFactRow(
+                "Languages",
+                codes.take(2).joinToString(" · ") + extra,
+                HeroTileKind.MINT
+            )
+        }
+    }
+
+    val subCodes = subtitles.map { subtitleDisplayCode(it.lang) }.distinct()
+    if (subCodes.isNotEmpty()) {
+        rows += HeroFactRow("Subtitles", "${subCodes.size}")
+    }
+
+    val addonCount = streams.map { it.addonKey() }.distinct().size
+    rows += HeroFactRow("Streams · $addonCount addons", "${streams.size}")
+    return rows
 }
 
 private data class PlaybackIds(
@@ -1534,35 +1746,60 @@ internal fun FullPageSourcePicker(
     onBack: () -> Unit,
     onRetry: () -> Unit,
     onPick: (StreamItem) -> Unit,
-    onDownload: ((StreamItem) -> Unit)? = null
+    onDownload: ((StreamItem) -> Unit)? = null,
+    inSheet: Boolean = false
 ) {
     val palette = LocalPalette.current
     val browserState = rememberStreamBrowserState(streams)
     androidx.activity.compose.BackHandler(onBack = onBack)
-    GlowBackground {
-        Column(Modifier.fillMaxSize().tvSheetFocus()) {
-            Row(
-                Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
-                }
+    val pickerBody: @Composable () -> Unit = {
+        Column(
+            (if (inSheet) Modifier.fillMaxWidth().fillMaxHeight(0.85f)
+             else Modifier.fillMaxSize()).tvSheetFocus()
+        ) {
+            if (inSheet) {
+                // Sheet header (Sample M): "<Title> · choose a source".
+                // The sheet's drag handle sits above this; no back /
+                // close row and no banner inside the sheet.
                 Text(
-                    "Choose stream",
+                    buildAnnotatedString {
+                        append(meta.name)
+                        withStyle(SpanStyle(color = TextSecondary, fontWeight = FontWeight.Normal)) {
+                            append("  \u00b7  choose a source")
+                        }
+                    },
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary,
-                    modifier = Modifier.weight(1f)
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 6.dp)
                 )
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close stream picker", tint = TextSecondary)
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                    }
+                    Text(
+                        "Choose stream",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close stream picker", tint = TextSecondary)
+                    }
                 }
             }
             LazyColumn(
                 modifier = Modifier.fillMaxSize().testTag("stream-picker-list"),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
+                if (!inSheet) {
                 item(key = "poster") {
                     // Design I banner (user's approved design): full-width backdrop
                     // with gradient into the page background, title + count below.
@@ -1613,6 +1850,7 @@ internal fun FullPageSourcePicker(
                             )
                         }
                     }
+                }
                 }
                 item(key = "filters") {
                     Text(
@@ -1698,6 +1936,7 @@ internal fun FullPageSourcePicker(
             }
         }
     }
+    if (inSheet) pickerBody() else GlowBackground { pickerBody() }
 }
 
 /** TMDB recommendation item. */

@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.ClosedCaption
@@ -51,6 +53,7 @@ import androidx.compose.material.icons.filled.Style
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Button
@@ -74,6 +77,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,19 +91,19 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pulsestream.app.BuildConfig
 import com.pulsestream.app.R
-import com.pulsestream.app.data.BadgePacks
 import com.pulsestream.app.data.StreamRepository
+import com.pulsestream.app.data.cloud.GoogleDriveSyncManager
 import com.pulsestream.app.data.simkl.SimklApi
 import com.pulsestream.app.data.update.UpdateChecker
 import com.pulsestream.app.data.update.UpdateInfo
 import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.components.UpdatePrompt
-import com.pulsestream.app.ui.components.BadgePackPreview
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.AccentTheme
@@ -110,6 +114,7 @@ import com.pulsestream.app.ui.theme.TextSecondary
 import com.pulsestream.app.ui.tv.tvFocusRing
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SettingsScreen(
     repository: StreamRepository,
@@ -122,17 +127,182 @@ fun SettingsScreen(
     onGoToStreams: () -> Unit = {},
     onGoToAbout: () -> Unit = {},
     onGoToFeedback: () -> Unit = {},
-    onGoToFeaturesGuide: () -> Unit = {},
     onGoToAccount: () -> Unit = {},
     onGoToIntegrations: () -> Unit = {}
 ) {
     val settings = repository.settings
     val context = LocalContext.current
-    var badgeStyleKey by remember { mutableStateOf(settings.streamCardStyle) }
-    val badgeStyleLabel = BadgePacks.labelForKey(context, badgeStyleKey)
-    var showBadgeStyleDialog by remember { mutableStateOf(false) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var telemetryEnabled by remember { mutableStateOf(com.pulsestream.app.data.TelemetryConsent.enabled(context)) }
+
+    // ---- Sample F (v0.12.4): searchable compact root screen ----
+    // The account card reads the same sync manager the Account screen
+    // uses; this screen is recreated on every visit, so the values are
+    // fresh each time it opens.
+    var settingsQuery by rememberSaveable { mutableStateOf("") }
+    val syncManager = remember { GoogleDriveSyncManager(context, repository.settings, repository) }
+    val signedIn = remember { syncManager.isSignedIn() }
+    val accountEmail = remember { syncManager.getAccountEmail() }
+    val lastBackup = remember { syncManager.getLastBackupTime() }
+    val accountName = remember(accountEmail) { accountEmail?.let { deriveDisplayName(it) } }
+    val installedAddons by repository.addons.collectAsState(initial = emptyList())
+    val enabledAddons = remember(installedAddons) { installedAddons.count { it.enabled } }
+    val reducedMotion by com.pulsestream.app.data.MotionPreferences.reduced.collectAsState()
+
+    val sectionAccount = stringResource(R.string.settings_section_account)
+    val sectionPlayback = stringResource(R.string.settings_section_playback)
+    val sectionContent = stringResource(R.string.settings_section_content)
+    val sectionAppearance = stringResource(R.string.settings_section_appearance)
+    val sectionHelp = "Help & About"
+
+    // Every root entry as data, so the search field filters the very
+    // rows the sections render. Destinations and behaviour are exactly
+    // the pre-restructure ones — presentation only. The old Account nav
+    // row is gone: the account card above the list IS the account entry.
+    val entries = listOf(
+        SettingsEntry(sectionAccount, "Integrations",
+            "integrations torbox debrid real-debrid alldebrid premiumize link accounts api keys") {
+            SettingsNavRow(
+                icon = Icons.Filled.Link,
+                title = "Integrations",
+                subtitle = "TorBox debrid and more",
+                onClick = onGoToIntegrations,
+                compact = true
+            )
+        },
+        SettingsEntry(sectionPlayback, stringResource(R.string.settings_playback_title),
+            "playback autoplay next episode screen skip intro audio resume buffer") {
+            SettingsNavRow(
+                icon = Icons.Filled.PlayArrow,
+                title = stringResource(R.string.settings_playback_title),
+                subtitle = stringResource(R.string.settings_playback_sub),
+                onClick = onGoToPlayback,
+                compact = true
+            )
+        },
+        SettingsEntry(sectionPlayback, stringResource(R.string.settings_streams_title),
+            "streams sources source limits quality order autoplay rule providers") {
+            SettingsNavRow(
+                icon = Icons.Filled.VideoLibrary,
+                title = stringResource(R.string.settings_streams_title),
+                subtitle = stringResource(R.string.settings_streams_sub),
+                onClick = onGoToStreams,
+                compact = true
+            )
+        },
+        SettingsEntry(sectionPlayback, stringResource(R.string.settings_subtitles_title),
+            "subtitles captions preferred languages appearance font size") {
+            SettingsNavRow(
+                icon = Icons.Filled.ClosedCaption,
+                title = stringResource(R.string.settings_subtitles_title),
+                subtitle = stringResource(R.string.settings_subtitles_sub),
+                onClick = onGoToSubtitles,
+                compact = true
+            )
+        },
+        SettingsEntry(sectionContent, stringResource(R.string.settings_addons_title),
+            "addons manage extensions plugins install sources manifest") {
+            SettingsStaticRow(
+                icon = Icons.Filled.Extension,
+                title = stringResource(R.string.settings_addons_title),
+                subtitle = stringResource(
+                    R.string.settings_addons_sub,
+                    installedAddons.size,
+                    enabledAddons
+                ),
+                trailing = {
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = "Open addons",
+                        tint = TextSecondary
+                    )
+                },
+                onClick = onGoToAddons,
+                compact = true
+            )
+        },
+        SettingsEntry(sectionContent, stringResource(R.string.settings_home_catalogs_title),
+            "home catalogs rows arrange visibility home screen order") {
+            SettingsNavRow(
+                icon = Icons.Filled.GridView,
+                title = stringResource(R.string.settings_home_catalogs_title),
+                subtitle = stringResource(R.string.settings_home_catalogs_sub),
+                onClick = onGoToHomeCatalogs,
+                compact = true
+            )
+        },
+        SettingsEntry(sectionAppearance, stringResource(R.string.settings_appearance_title),
+            "appearance accent color amoled black theme dark light") {
+            SettingsNavRow(
+                icon = Icons.Filled.Contrast,
+                title = stringResource(R.string.settings_appearance_title),
+                subtitle = stringResource(R.string.settings_appearance_sub),
+                onClick = onGoToAppearance,
+                compact = true
+            )
+        },
+        SettingsEntry(sectionAppearance, "Reduced motion",
+            "reduced motion animations accessibility pause hero slides pulses") {
+            SettingsToggleRow(
+                icon = Icons.Filled.Contrast,
+                title = "Reduced motion",
+                subtitle = "Pause automatic hero slides and decorative pulses; also respects Android animation settings.",
+                checked = reducedMotion,
+                onCheckedChange = { com.pulsestream.app.data.MotionPreferences.setReduced(context, it) },
+                compact = true
+            )
+        },
+        SettingsEntry(sectionHelp, "Source health",
+            "source health diagnostics session status timing report providers") {
+            SettingsNavRow(
+                icon = Icons.Filled.Info,
+                title = "Source health",
+                subtitle = "Redacted status and timing for this session",
+                onClick = { showDiagnostics = true },
+                compact = true
+            )
+        },
+        SettingsEntry(sectionHelp, "Optional analytics & crash reports",
+            "analytics crash reports firebase telemetry privacy usage data optional") {
+            SettingsToggleRow(
+                icon = Icons.Filled.Info,
+                title = "Optional analytics & crash reports",
+                subtitle = "Off by default. Share usage and crash data with Firebase.",
+                checked = telemetryEnabled,
+                onCheckedChange = {
+                    com.pulsestream.app.data.TelemetryConsent.setEnabled(context, it)
+                    telemetryEnabled = it
+                },
+                compact = true
+            )
+        },
+        SettingsEntry(sectionHelp, stringResource(R.string.settings_feedback_title),
+            "feedback send bug report feature request support") {
+            SettingsNavRow(
+                icon = Icons.Filled.Feedback,
+                title = stringResource(R.string.settings_feedback_title),
+                subtitle = stringResource(R.string.settings_feedback_sub),
+                onClick = onGoToFeedback,
+                compact = true
+            )
+        },
+        SettingsEntry(sectionHelp, stringResource(R.string.settings_about_title),
+            "about version website updates app info check") {
+            SettingsNavRow(
+                icon = Icons.Filled.Info,
+                title = stringResource(R.string.settings_about_title),
+                subtitle = stringResource(R.string.settings_about_sub),
+                onClick = onGoToAbout,
+                compact = true
+            )
+        }
+    )
+    val normalizedQuery = settingsQuery.trim().lowercase()
+    val visibleEntries = if (normalizedQuery.isEmpty()) entries
+        else entries.filter { entry ->
+            entry.title.lowercase().contains(normalizedQuery) ||
+                entry.searchText.contains(normalizedQuery)
+        }
 
     if (showDiagnostics) {
         val entries by com.pulsestream.app.data.SourceDiagnostics.entries.collectAsState()
@@ -162,18 +332,6 @@ fun SettingsScreen(
         )
     }
 
-    if (showBadgeStyleDialog) {
-        BadgeStyleDialog(
-            initial = badgeStyleKey,
-            onDismiss = { showBadgeStyleDialog = false },
-            onSelect = { key ->
-                badgeStyleKey = key
-                settings.streamCardStyle = key
-                showBadgeStyleDialog = false
-            }
-        )
-    }
-
     GlowBackground {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -199,145 +357,151 @@ fun SettingsScreen(
             }
 
 
-            // ---- Account ----
-            item { SettingsSectionHeader(stringResource(R.string.settings_section_account)) }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Person,
-                    title = stringResource(R.string.settings_account_title),
-                    subtitle = stringResource(R.string.settings_account_sub),
-                    onClick = onGoToAccount
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Link,
-                    title = "Integrations",
-                    subtitle = "TorBox debrid and more",
-                    onClick = onGoToIntegrations
-                )
-            }
-            // ---- Playback: everything that affects how video plays ----
-            item { SettingsSectionHeader(stringResource(R.string.settings_section_playback)) }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.PlayArrow,
-                    title = stringResource(R.string.settings_playback_title),
-                    subtitle = stringResource(R.string.settings_playback_sub),
-                    onClick = onGoToPlayback
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.VideoLibrary,
-                    title = stringResource(R.string.settings_streams_title),
-                    subtitle = stringResource(R.string.settings_streams_sub),
-                    onClick = onGoToStreams
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.ClosedCaption,
-                    title = stringResource(R.string.settings_subtitles_title),
-                    subtitle = stringResource(R.string.settings_subtitles_sub),
-                    onClick = onGoToSubtitles
-                )
+            // ---- Settings search (Sample F) ----
+            item(key = "settings_search") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .liquidGlass(RoundedCornerShape(50))
+                ) {
+                    OutlinedTextField(
+                        value = settingsQuery,
+                        onValueChange = { settingsQuery = it },
+                        placeholder = { Text("Search settings", color = TextSecondary) },
+                        leadingIcon = { Icon(Icons.Filled.Search, null, tint = TextSecondary) },
+                        trailingIcon = if (settingsQuery.isNotEmpty()) {
+                            {
+                                IconButton(onClick = { settingsQuery = "" }) {
+                                    Icon(Icons.Filled.Close, "Clear search", tint = TextSecondary)
+                                }
+                            }
+                        } else null,
+                        singleLine = true,
+                        shape = RoundedCornerShape(50),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color.Transparent,
+                            unfocusedBorderColor = Color.Transparent,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = LocalPalette.current.accent,
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
 
-            // ---- Content: addons and home catalogs ----
-            item { SettingsSectionHeader(stringResource(R.string.settings_section_content)) }
-            item {
-                val installedAddons by repository.addons.collectAsState(initial = emptyList())
-                val enabledAddons = remember(installedAddons) { installedAddons.count { it.enabled } }
-                SettingsStaticRow(
-                    icon = Icons.Filled.Extension,
-                    title = stringResource(R.string.settings_addons_title),
-                    subtitle = stringResource(
-                        R.string.settings_addons_sub,
-                        installedAddons.size,
-                        enabledAddons
-                    ),
-                    trailing = {
+            // ---- Account card (Sample F): signed-in Google account,
+            // name + email only, plus sync status. This card IS the
+            // account/backup entry — it opens the same Account screen
+            // the old nav row did, with every backup/restore action
+            // intact there. No product name for the sync feature is
+            // shown anywhere in Settings (owner's order, v0.12.4).
+            item(key = "account_card") {
+                GlassCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 5.dp),
+                    onClick = onGoToAccount
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(LocalPalette.current.accent.copy(alpha = 0.20f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (signedIn) {
+                                Text(
+                                    (accountName?.firstOrNull()?.uppercase() ?: "P"),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = LocalPalette.current.accent
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Filled.Person,
+                                    contentDescription = null,
+                                    tint = LocalPalette.current.accent
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (signedIn) (accountName ?: "Signed in") else "Not signed in",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                when {
+                                    signedIn && accountEmail != null -> accountEmail
+                                    signedIn -> "Google account"
+                                    else -> "Tap to sign in and enable backup & sync"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                if (signedIn) {
+                                    lastBackup?.let { "Last backup: $it" }
+                                        ?: "Signed in · backup & sync on"
+                                } else "Backup & sync off",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
                         Icon(
                             Icons.Filled.ChevronRight,
-                            contentDescription = "Open addons",
+                            contentDescription = null,
                             tint = TextSecondary
                         )
-                    },
-                    onClick = onGoToAddons
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.GridView,
-                    title = stringResource(R.string.settings_home_catalogs_title),
-                    subtitle = stringResource(R.string.settings_home_catalogs_sub),
-                    onClick = onGoToHomeCatalogs
-                )
+                    }
+                }
             }
 
-            // ---- Appearance ----
-            item { SettingsSectionHeader(stringResource(R.string.settings_section_appearance)) }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Contrast,
-                    title = stringResource(R.string.settings_appearance_title),
-                    subtitle = stringResource(R.string.settings_appearance_sub),
-                    onClick = onGoToAppearance
-                )
-            }
-            item {
-                val reduced by com.pulsestream.app.data.MotionPreferences.reduced.collectAsState()
-                SettingsToggleRow(icon = Icons.Filled.Contrast, title = "Reduced motion",
-                    subtitle = "Pause automatic hero slides and decorative pulses; also respects Android animation settings.",
-                    checked = reduced, onCheckedChange = { com.pulsestream.app.data.MotionPreferences.setReduced(context, it) })
-            }
-            item(key = "badgestyle") {
-                SettingsNavRow(
-                    icon = Icons.Filled.Style,
-                    title = stringResource(R.string.settings_badges_title),
-                    subtitle = badgeStyleLabel,
-                    onClick = { showBadgeStyleDialog = true }
-                )
-            }
-
-            // ---- Help & About ----
-            item { SettingsSectionHeader("Help & About") }
-            item {
-                SettingsNavRow(icon = Icons.Filled.Info, title = "Source health",
-                    subtitle = "Redacted status and timing for this session", onClick = { showDiagnostics = true })
-            }
-            item {
-                SettingsToggleRow(icon = Icons.Filled.Info, title = "Optional analytics & crash reports",
-                    subtitle = "Off by default. Share usage and crash data with Firebase.",
-                    checked = telemetryEnabled, onCheckedChange = {
-                        com.pulsestream.app.data.TelemetryConsent.setEnabled(context, it)
-                        telemetryEnabled = it
-                    })
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Book,
-                    title = "Features Guide",
-                    subtitle = "Learn what Plavio can do",
-                    onClick = onGoToFeaturesGuide
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Feedback,
-                    title = stringResource(R.string.settings_feedback_title),
-                    subtitle = stringResource(R.string.settings_feedback_sub),
-                    onClick = onGoToFeedback
-                )
-            }
-            item {
-                SettingsNavRow(
-                    icon = Icons.Filled.Info,
-                    title = stringResource(R.string.settings_about_title),
-                    subtitle = stringResource(R.string.settings_about_sub),
-                    onClick = onGoToAbout
-                )
+            // ---- Entries: sticky section headers when browsing; a
+            // flat filtered list while searching (Sample F) ----
+            if (normalizedQuery.isEmpty()) {
+                entries.groupBy { it.section }.forEach { (section, sectionEntries) ->
+                    stickyHeader(key = "section_$section") {
+                        SettingsSectionHeader(section)
+                    }
+                    items(sectionEntries, key = { "entry_${it.title}" }) { entry ->
+                        entry.content()
+                    }
+                }
+            } else {
+                items(visibleEntries, key = { "entry_${it.title}" }) { entry ->
+                    entry.content()
+                }
+                if (visibleEntries.isEmpty()) {
+                    item(key = "no_settings_match") {
+                        Text(
+                            "No settings match \"${settingsQuery.trim()}\"",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 32.dp, vertical = 24.dp)
+                        )
+                    }
+                }
             }
 
             item(key = "credit") {
@@ -348,7 +512,7 @@ fun SettingsScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "Made with 💜 by Kotlinsyd",
+                        text = "Made with 💚 by Kotlinsyd",
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.SemiBold
                         ),
@@ -441,6 +605,28 @@ fun SimklPinDialog(
     )
 }
 
+/** One root Settings entry for the Sample F searchable list (v0.12.4). */
+private data class SettingsEntry(
+    val section: String,
+    val title: String,
+    /** Extra lowercase keywords the settings search matches against. */
+    val searchText: String,
+    val content: @Composable () -> Unit
+)
+
+/**
+ * Display name for the Settings account card, derived from the account
+ * email's local part ("syed.najam" → "Syed Najam") — the sync layer
+ * exposes only the email address, so the name is derived at display
+ * time and never stored.
+ */
+private fun deriveDisplayName(email: String): String =
+    email.substringBefore('@')
+        .split('.', '_', '-', '+')
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { part -> part.replaceFirstChar { c -> c.uppercase() } }
+        .ifBlank { email }
+
 /** Small-caps section header, Pulse style. */
 @Composable
 fun SettingsSectionHeader(title: String) {
@@ -474,18 +660,31 @@ fun SettingsToggleRow(
     title: String,
     subtitle: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    compact: Boolean = false
 ) {
     GlassCard(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
+        modifier = Modifier.fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = if (compact) 3.dp else 5.dp),
         onClick = { onCheckedChange(!checked) }
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(14.dp),
+            Modifier.fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = if (compact) 9.dp else 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            SettingsIconTile(icon, title)
-            Spacer(Modifier.width(14.dp))
+            if (compact) {
+                Icon(
+                    icon,
+                    contentDescription = title,
+                    tint = LocalPalette.current.accent,
+                    modifier = Modifier.size(21.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+            } else {
+                SettingsIconTile(icon, title)
+                Spacer(Modifier.width(14.dp))
+            }
             Column(Modifier.weight(1f)) {
                 Text(
                     title,
@@ -519,18 +718,31 @@ fun SettingsNavRow(
     icon: ImageVector,
     title: String,
     subtitle: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    compact: Boolean = false
 ) {
     GlassCard(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
+        modifier = Modifier.fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = if (compact) 3.dp else 5.dp),
         onClick = onClick
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(14.dp),
+            Modifier.fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = if (compact) 9.dp else 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            SettingsIconTile(icon, title)
-            Spacer(Modifier.width(14.dp))
+            if (compact) {
+                Icon(
+                    icon,
+                    contentDescription = title,
+                    tint = LocalPalette.current.accent,
+                    modifier = Modifier.size(21.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+            } else {
+                SettingsIconTile(icon, title)
+                Spacer(Modifier.width(14.dp))
+            }
             Column(Modifier.weight(1f)) {
                 Text(
                     title,
@@ -563,21 +775,33 @@ fun SettingsStaticRow(
     subtitle: String,
     trailing: @Composable () -> Unit,
     dimmed: Boolean = false,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
+    compact: Boolean = false
 ) {
     GlassCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 5.dp)
+            .padding(horizontal = 16.dp, vertical = if (compact) 3.dp else 5.dp)
             .alpha(if (dimmed) 0.6f else 1f),
         onClick = onClick
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(14.dp),
+            Modifier.fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = if (compact) 9.dp else 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            SettingsIconTile(icon, title)
-            Spacer(Modifier.width(14.dp))
+            if (compact) {
+                Icon(
+                    icon,
+                    contentDescription = title,
+                    tint = LocalPalette.current.accent,
+                    modifier = Modifier.size(21.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+            } else {
+                SettingsIconTile(icon, title)
+                Spacer(Modifier.width(14.dp))
+            }
             Column(Modifier.weight(1f)) {
                 Text(
                     title,
@@ -648,7 +872,7 @@ fun AboutCard() {
                         // Devices with no browser must not force-close.
                         runCatching {
                             context.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse("https://plaviomedia.vercel.app"))
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://www.plavio.site"))
                             )
                         }
                     }
@@ -662,7 +886,7 @@ fun AboutCard() {
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = "plaviomedia.vercel.app",
+                    text = "plavio.site",
                     style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
                     color = LocalPalette.current.accent,
                     textAlign = TextAlign.Center
@@ -865,257 +1089,5 @@ private fun SocialIconRow() {
                 )
             }
         }
-    }
-}
-/** Single-select dialog for the stream badge pack, with live previews + custom import. */
-@Composable
-private fun BadgeStyleDialog(
-    initial: String,
-    onDismiss: () -> Unit,
-    onSelect: (String) -> Unit
-) {
-    val context = LocalContext.current
-    var selected by remember { mutableStateOf(initial) }
-    var customPacks by remember { mutableStateOf(BadgePacks.listCustomPacks(context)) }
-    var importError by remember { mutableStateOf<String?>(null) }
-    val accent = LocalPalette.current.accent
-
-    // System file picker for a badge-pack JSON.
-    val pickJson = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val text = runCatching {
-            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-        }.getOrNull()
-        if (text.isNullOrBlank()) {
-            importError = "Couldn't read that file."
-            return@rememberLauncherForActivityResult
-        }
-        val name = runCatching {
-            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (c.moveToFirst() && idx >= 0) c.getString(idx) else null
-            }
-        }.getOrNull() ?: "custom.json"
-        val err = BadgePacks.importCustomPack(context, name, text)
-        if (err != null) {
-            importError = err
-        } else {
-            importError = null
-            customPacks = BadgePacks.listCustomPacks(context)
-        }
-    }
-
-    // If the selected pack was deleted, clear the selection.
-    LaunchedEffect(customPacks) {
-        if (selected.startsWith(BadgePacks.CUSTOM_PREFIX) &&
-            customPacks.none { it.key == selected }) {
-            selected = ""
-        }
-    }
-
-    // URL import state
-    var urlInput by remember { mutableStateOf("") }
-    var isDownloading by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Stream Badges", color = TextPrimary) },
-        text = {
-            Column {
-                Text(
-                    "Badge pack used for stream info badges.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary
-                )
-                if (importError != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        importError!!,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFEF4444)
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
-                LazyColumn(
-                    modifier = Modifier.heightIn(max = 380.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp)
-                ) {
-                    if (customPacks.isEmpty()) {
-                        item(key = "empty") {
-                            Text(
-                                "No badge packs yet. Import one via file or link below.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                                modifier = Modifier.padding(vertical = 8.dp)
-                            )
-                        }
-                    }
-                    items(customPacks, key = { it.key }) { pack ->
-                        BadgePackRow(
-                            packKey = pack.key,
-                            label = pack.name,
-                            sublabel = "${pack.filterCount} badges · imported",
-                            isSelected = pack.key == selected,
-                            onSelect = { selected = pack.key },
-                            onDelete = {
-                                BadgePacks.deleteCustomPack(context, pack.key)
-                                customPacks = BadgePacks.listCustomPacks(context)
-                            }
-                        )
-                    }
-                    item(key = "import-file") {
-                        OutlinedButton(
-                            onClick = { pickJson.launch("application/json") },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(50)
-                        ) {
-                            Icon(
-                                Icons.Filled.Upload,
-                                contentDescription = null,
-                                tint = accent,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text("Upload badge JSON file", color = TextPrimary)
-                        }
-                    }
-                    item(key = "import-url") {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            OutlinedTextField(
-                                value = urlInput,
-                                onValueChange = { urlInput = it },
-                                label = { Text("Paste badge JSON link") },
-                                placeholder = { Text("https://example.com/badges.json") },
-                                singleLine = true,
-                                enabled = !isDownloading,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(50),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = accent,
-                                    focusedLabelColor = accent
-                                )
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Button(
-                                onClick = {
-                                    val url = urlInput.trim()
-                                    if (url.isBlank()) {
-                                        importError = "Paste a link first."
-                                        return@Button
-                                    }
-                                    isDownloading = true
-                                    importError = null
-                                    scope.launch {
-                                        val err = BadgePacks.importCustomPackFromUrl(context, url)
-                                        isDownloading = false
-                                        if (err != null) {
-                                            importError = err
-                                        } else {
-                                            importError = null
-                                            urlInput = ""
-                                            customPacks = BadgePacks.listCustomPacks(context)
-                                        }
-                                    }
-                                },
-                                enabled = !isDownloading,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(50)
-                            ) {
-                                if (isDownloading) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(18.dp),
-                                        color = Color.White,
-                                        strokeWidth = 2.dp
-                                    )
-                                } else {
-                                    Icon(
-                                        Icons.Filled.Link,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                                Spacer(Modifier.width(8.dp))
-                                Text(if (isDownloading) "Downloading..." else "Import from link")
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSelect(selected) }) {
-                Text("Done", color = LocalPalette.current.accent, fontWeight = FontWeight.Bold)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = TextSecondary)
-            }
-        }
-    )
-}
-
-@Composable
-private fun BadgePackRow(
-    packKey: String,
-    label: String,
-    sublabel: String?,
-    isSelected: Boolean,
-    onSelect: () -> Unit,
-    onDelete: (() -> Unit)?
-) {
-    val accent = LocalPalette.current.accent
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .border(
-                if (isSelected) 1.5.dp else 1.dp,
-                if (isSelected) accent else GlassBorder,
-                RoundedCornerShape(12.dp)
-            )
-            .clickable(onClick = onSelect)
-            .tvFocusRing(RoundedCornerShape(12.dp))
-            .padding(10.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(
-                selected = isSelected,
-                onClick = onSelect,
-                colors = RadioButtonDefaults.colors(selectedColor = accent)
-            )
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    label,
-                    color = TextPrimary,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                )
-                if (sublabel != null) {
-                    Text(
-                        sublabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextSecondary
-                    )
-                }
-            }
-            if (onDelete != null) {
-                IconButton(onClick = onDelete) {
-                    Icon(
-                        Icons.Filled.Delete,
-                        contentDescription = "Remove badge pack",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        // Sample badges from the pack — non-interactive.
-        BadgePackPreview(packKey = packKey, label = "", modifier = Modifier.fillMaxWidth())
     }
 }

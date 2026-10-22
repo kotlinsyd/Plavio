@@ -934,18 +934,18 @@ private fun AddonCard(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Badge(text = if (addon.enabled) "Active" else "Disabled")
+                MetaPill(text = if (addon.enabled) "Active" else "Disabled")
                 val resourceCount = try {
                     org.json.JSONArray(addon.resources ?: "[]").length()
                 } catch (e: Exception) { 0 }
                 if (resourceCount > 0) {
-                    Badge(text = "$resourceCount resource${if (resourceCount == 1) "" else "s"}")
+                    MetaPill(text = "$resourceCount resource${if (resourceCount == 1) "" else "s"}")
                 }
                 val catalogEstimate = try {
                     org.json.JSONArray(addon.types ?: "[]").length() * 3
                 } catch (e: Exception) { 0 }
                 if (catalogEstimate > 0) {
-                    Badge(text = "$catalogEstimate catalogs")
+                    MetaPill(text = "$catalogEstimate catalogs")
                 }
             }
 
@@ -1004,9 +1004,9 @@ private fun AddonCard(
     }
 }
 
-/** Small pill badge for addon metadata. */
+/** Small pill tag for addon metadata. */
 @Composable
-private fun Badge(text: String) {
+private fun MetaPill(text: String) {
     Surface(
         shape = RoundedCornerShape(50),
         color = Color.White.copy(alpha = 0.06f),
@@ -1094,7 +1094,7 @@ private fun AddonLogo(addon: InstalledAddon, size: androidx.compose.ui.unit.Dp) 
 }
 
 @Composable
-private fun PreinstalledBadge() {
+private fun PreinstalledPill() {
     Surface(
         color = Color.Transparent,
         shape = RoundedCornerShape(50),

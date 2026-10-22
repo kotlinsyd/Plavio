@@ -50,9 +50,22 @@ fun Modifier.topSheen(alpha: Float = 0.06f, fraction: Float = 0.35f): Modifier =
         onDrawBehind { drawRect(brush) }
     }
 
-/** Applies the full liquid-glass treatment (fill, sheen, accent glow, rim) clipped to [shape]. */
+/**
+ * Applies the full liquid-glass treatment (fill, sheen, accent glow, rim) clipped to [shape].
+ *
+ * [darken] (v0.12.3, dock-only): extra dark tint layered over the clear
+ * fill — raises the fill alphas and lays a translucent black wash on top.
+ * The dock dropped it in v0.12.4, then v0.12.5 brought back a measured
+ * 0.10 (owner's order: a little more blur AND ~10% more dark).
+ *
+ * [frost] (v0.12.4, dock only): raises the diffusion wash alphas so the
+ * glass reads more frosted — foreground icons stay legible over bright
+ * content. This codebase's glass is deliberately
+ * performance-first (no live backdrop-blur pass), so the wash is how
+ * "more blur" is expressed. Default 0 keeps every other surface as-is.
+ */
 @Composable
-fun Modifier.liquidGlass(shape: Shape = RoundedCornerShape(28.dp)): Modifier {
+fun Modifier.liquidGlass(shape: Shape = RoundedCornerShape(28.dp), darken: Float = 0f, frost: Float = 0f): Modifier {
     val palette = LocalPalette.current
     val tint = palette.accent2
     return this
@@ -60,27 +73,36 @@ fun Modifier.liquidGlass(shape: Shape = RoundedCornerShape(28.dp)): Modifier {
         .background(
             Brush.verticalGradient(
                 listOf(
-                    // Sample F "Frosted Clean" + cut edges + pills (user's pick
-                    // 2026-10-20): milky frosted fill — the background reads as
-                    // diffused color through the panel, not sharp detail.
-                    liquidGlassTopSurface(palette.background).copy(alpha = 0.62f),
-                    liquidGlassBottomSurface(palette.background).copy(alpha = 0.74f)
+                    // Clear glass (v0.12.0, user's order): the fill drops to
+                    // ~0.26/0.34 alpha so roughly 75% of what's behind the
+                    // panel shows through — mirror-like clarity instead of
+                    // the old milky frost (was 0.62/0.74).
+                    liquidGlassTopSurface(palette.background).copy(alpha = (0.26f + darken).coerceAtMost(0.85f)),
+                    liquidGlassBottomSurface(palette.background).copy(alpha = (0.34f + darken).coerceAtMost(0.9f))
                 )
             ),
             shape
         )
-        // Frost wash: a soft white diffusion layer that sells the frosted look.
+        .then(
+            if (darken > 0f) {
+                Modifier.background(Color.Black.copy(alpha = darken * 0.6f), shape)
+            } else {
+                Modifier
+            }
+        )
+        // Whisper of diffusion only — the heavy frost wash is gone.
+        // [frost] thickens the wash slightly (dock, v0.12.4).
         .drawWithCache {
             val wash = Brush.verticalGradient(
                 colors = listOf(
-                    Color.White.copy(alpha = 0.10f),
-                    Color.White.copy(alpha = 0.03f),
-                    Color.White.copy(alpha = 0.07f)
+                    Color.White.copy(alpha = (0.04f + frost).coerceAtMost(0.3f)),
+                    Color.White.copy(alpha = (0.015f + frost * 0.5f).coerceAtMost(0.2f)),
+                    Color.White.copy(alpha = (0.03f + frost).coerceAtMost(0.3f))
                 )
             )
             onDrawBehind { drawRect(wash) }
         }
-        .topSheen(alpha = 0.12f, fraction = 0.35f)
+        .topSheen(alpha = 0.09f, fraction = 0.35f)
         .drawWithCache {
             if (size.minDimension <= 0f) {
                 // Zero-size layout pass: a radial gradient needs a positive radius.

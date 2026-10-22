@@ -14,7 +14,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -73,9 +76,6 @@ fun SearchScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var selectedType by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedGenre by rememberSaveable { mutableStateOf<String?>(null) }
-    var yearFilter by rememberSaveable { mutableStateOf(SearchYearFilter.ANY) }
-    var ratingFilter by rememberSaveable { mutableStateOf(SearchRatingFilter.ANY) }
-    var refinementsExpanded by rememberSaveable { mutableStateOf(false) }
     // The query+type combo the saved genre belongs to — resets the genre
     // when the search moves on (replaces the old remember(query) reset).
     var genreOwner by rememberSaveable { mutableStateOf("") }
@@ -87,32 +87,22 @@ fun SearchScreen(
     val genres = remember(queryResults) {
         queryResults.flatMap { it.meta.genres }.distinct().sorted().take(14)
     }
-    val refinedResults = remember(queryResults, yearFilter, ratingFilter) {
-        filterSearchRefinements(
-            queryResults,
-            yearFilter = yearFilter,
-            ratingFilter = ratingFilter,
-            releaseInfo = { it.meta.releaseInfo },
-            imdbRating = { it.meta.imdbRating }
-        )
+    // "Refine" (year / IMDb-rating filters) removed in v0.12.0 — user's
+    // call: useless. Only the genre chips below still filter the results.
+    val visibleResults = remember(queryResults, selectedGenre) {
+        if (selectedGenre == null) queryResults
+        else queryResults.filter { selectedGenre in it.meta.genres }
     }
-    val visibleResults = remember(refinedResults, selectedGenre) {
-        if (selectedGenre == null) refinedResults
-        else refinedResults.filter { selectedGenre in it.meta.genres }
-    }
-    val activeRefinementCount =
-        (if (selectedGenre != null) 1 else 0) +
-            (if (yearFilter != SearchYearFilter.ANY) 1 else 0) +
-            (if (ratingFilter != SearchRatingFilter.ANY) 1 else 0)
-    val metadataRefinementActive =
-        yearFilter != SearchYearFilter.ANY || ratingFilter != SearchRatingFilter.ANY
     val clearRefinements = {
         selectedGenre = null
-        yearFilter = SearchYearFilter.ANY
-        ratingFilter = SearchRatingFilter.ANY
     }
     val appContext = LocalContext.current.applicationContext
     var history by remember { mutableStateOf(SearchHistory.get(appContext)) }
+    // "Popular right now" for the landing state (v0.12.4, Sample B):
+    // TMDB trending with a key, in-app chart catalogs without one;
+    // empty when no source can supply titles (recents then stand alone).
+    var popular by remember { mutableStateOf<List<CachedMeta>>(emptyList()) }
+    LaunchedEffect(Unit) { popular = repository.loadPopularTitles(10) }
 
     // Debounced live search: instant local-cache hits, then addon results.
     LaunchedEffect(query, selectedType) {
@@ -175,66 +165,23 @@ fun SearchScreen(
                 )
             }
             Spacer(Modifier.height(8.dp))
-            // Category chips — filter the search by content type.
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                items(SEARCH_TYPES, key = { it.second }) { (type, label) ->
-                    FilterChip(
-                        modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
-                        // Re-tapping a selected chip toggles it back off.
-                        selected = selectedType == type,
-                        onClick = { selectedType = if (selectedType == type) null else type },
-                        label = { Text(label) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = LocalPalette.current.accent.copy(alpha = 0.25f),
-                            selectedLabelColor = TextPrimary,
-                            containerColor = Color.White.copy(alpha = 0.06f),
-                            labelColor = TextSecondary
-                        )
-                    )
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            // Keep the added metadata filters tucked away until requested, so
-            // search results remain visible on smaller phone screens.
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                TextButton(onClick = { refinementsExpanded = !refinementsExpanded }) {
-                    Text(
-                        if (activeRefinementCount > 0) "Refine ($activeRefinementCount)" else "Refine",
-                        color = LocalPalette.current.accent
-                    )
-                }
-                if (activeRefinementCount > 0) {
-                    TextButton(onClick = clearRefinements) {
-                        Text("Clear filters", color = TextSecondary)
-                    }
-                }
-            }
-            if (refinementsExpanded) {
-                Text(
-                    "Year",
-                    color = TextSecondary,
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(start = 16.dp, top = 2.dp)
-                )
+            // Category chips — filter the search by content type. Sample B
+            // (v0.12.4): the LANDING state is only bar → recents →
+            // popular, so the type chips live in the searching/results
+            // states only.
+            if (query.trim().length >= 2) {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    items(SearchYearFilter.entries, key = { it.name }) { filter ->
+                    items(SEARCH_TYPES, key = { it.second }) { (type, label) ->
                         FilterChip(
                             modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
-                            selected = yearFilter == filter,
-                            onClick = { yearFilter = filter },
-                            label = { Text(filter.label) },
+                            // Re-tapping a selected chip toggles it back off.
+                            selected = selectedType == type,
+                            onClick = { selectedType = if (selectedType == type) null else type },
+                            label = { Text(label) },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = LocalPalette.current.accent.copy(alpha = 0.25f),
                                 selectedLabelColor = TextPrimary,
@@ -244,40 +191,7 @@ fun SearchScreen(
                         )
                     }
                 }
-                Text(
-                    "IMDb rating",
-                    color = TextSecondary,
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(start = 16.dp, top = 2.dp)
-                )
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    items(SearchRatingFilter.entries, key = { it.name }) { filter ->
-                        FilterChip(
-                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
-                            selected = ratingFilter == filter,
-                            onClick = { ratingFilter = filter },
-                            label = { Text(filter.label) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = LocalPalette.current.accent.copy(alpha = 0.25f),
-                                selectedLabelColor = TextPrimary,
-                                containerColor = Color.White.copy(alpha = 0.06f),
-                                labelColor = TextSecondary
-                            )
-                        )
-                    }
-                }
-                if (yearFilter != SearchYearFilter.ANY || ratingFilter != SearchRatingFilter.ANY) {
-                    Text(
-                        "Titles with unknown year or rating are hidden while that filter is active.",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                    )
-                }
+                Spacer(Modifier.height(8.dp))
             }
             // Discover: genre chips derived from the results, filtering locally.
             if (genres.isNotEmpty() && query.trim().length >= 2) {
@@ -319,56 +233,94 @@ fun SearchScreen(
             }
             when {
                 query.trim().length < 2 -> {
-                    if (history.isEmpty()) {
-                        Box(
-                            Modifier.fillMaxSize(), contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                "Type at least 2 characters to search\nacross your installed addons.",
-                                color = TextSecondary,
-                                textAlign = TextAlign.Center,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(32.dp)
-                            )
-                        }
-                    } else {
-                        Column(
-                            modifier = Modifier.fillMaxSize().padding(16.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    "Recent searches",
-                                    color = TextSecondary,
-                                    style = MaterialTheme.typography.labelLarge
-                                )
-                                TextButton(
-                                    onClick = {
-                                        SearchHistory.clear(appContext)
-                                        history = emptyList()
-                                    }
+                    // Sample B landing (v0.12.4): capsule bar (above) →
+                    // recent searches as capsule chips → "Popular right
+                    // now" numbered list. One scrolling column so both
+                    // sections fit small screens; bottom padding keeps
+                    // the last row clear of the floating dock.
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 104.dp)
+                    ) {
+                        if (history.isNotEmpty()) {
+                            item(key = "recent_header") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text("Clear", color = TextSecondary)
+                                    Text(
+                                        "Recent searches",
+                                        color = TextSecondary,
+                                        style = MaterialTheme.typography.labelLarge
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            SearchHistory.clear(appContext)
+                                            history = emptyList()
+                                        }
+                                    ) {
+                                        Text("Clear", color = TextSecondary)
+                                    }
                                 }
                             }
-                            Spacer(Modifier.height(8.dp))
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                items(history, key = { it }) { past ->
-                                    FilterChip(
-                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
-                                        selected = false,
-                                        onClick = { query = past },
-                                        label = { Text(past) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            containerColor = Color.White.copy(alpha = 0.06f),
-                                            labelColor = TextSecondary
+                            item(key = "recent_chips") {
+                                LazyRow(
+                                    contentPadding = PaddingValues(horizontal = 16.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    items(history, key = { it }) { past ->
+                                        FilterChip(
+                                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
+                                            selected = false,
+                                            onClick = { query = past },
+                                            label = { Text(past) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                containerColor = Color.White.copy(alpha = 0.06f),
+                                                labelColor = TextSecondary
+                                            )
                                         )
+                                    }
+                                }
+                            }
+                        }
+                        if (popular.isNotEmpty()) {
+                            item(key = "popular_header") {
+                                Text(
+                                    "Popular right now",
+                                    color = TextPrimary,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(
+                                        start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp
+                                    )
+                                )
+                            }
+                            itemsIndexed(
+                                popular,
+                                key = { index, item -> "pop_${item.addonId}_${item.meta.id}_$index" }
+                            ) { index, item ->
+                                PopularRow(rank = index + 1, item = item) {
+                                    onOpenDetail(item.addonId, item.meta.type, item.meta.id)
+                                }
+                            }
+                        }
+                        if (history.isEmpty() && popular.isEmpty()) {
+                            item(key = "landing_hint") {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(32.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "Type at least 2 characters to search\nacross your installed addons.",
+                                        color = TextSecondary,
+                                        textAlign = TextAlign.Center,
+                                        style = MaterialTheme.typography.bodyMedium
                                     )
                                 }
                             }
@@ -399,7 +351,8 @@ fun SearchScreen(
                 }
                 else -> LazyVerticalGrid(
                     columns = GridCells.Adaptive(110.dp),
-                    contentPadding = PaddingValues(16.dp),
+                    // Bottom 104dp: last row scrolls clear of the floating dock.
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 104.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxSize()
@@ -411,23 +364,13 @@ fun SearchScreen(
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Text(
-                                    if (activeRefinementCount > 0) "No titles match these filters."
-                                    else "No $selectedGenre titles in these results.",
+                                    "No $selectedGenre titles in these results.",
                                     color = TextSecondary,
                                     style = MaterialTheme.typography.bodyMedium,
                                     textAlign = TextAlign.Center
                                 )
-                                if (metadataRefinementActive) {
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        "Some titles may have no release year or IMDb rating; unknown values are excluded by active filters.",
-                                        color = TextSecondary,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        textAlign = TextAlign.Center
-                                    )
-                                    TextButton(onClick = clearRefinements) {
-                                        Text("Clear filters", color = LocalPalette.current.accent)
-                                    }
+                                TextButton(onClick = clearRefinements) {
+                                    Text("Show all genres", color = LocalPalette.current.accent)
                                 }
                             }
                         }
@@ -443,6 +386,54 @@ fun SearchScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * One "Popular right now" row (Sample B): mint rank number, title, and a
+ * right-aligned "Movie · 2024" / "Series · 2023" tag (year omitted when
+ * the source didn't provide one).
+ */
+@Composable
+private fun PopularRow(rank: Int, item: CachedMeta, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .tvFocusRing(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "$rank",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.ExtraBold,
+            color = LocalPalette.current.accent,
+            modifier = Modifier.width(30.dp)
+        )
+        Text(
+            item.meta.name,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = TextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        val typeLabel = when (item.meta.type) {
+            "movie" -> "Movie"
+            "series" -> "Series"
+            else -> item.meta.type.replaceFirstChar { it.uppercase() }
+        }
+        val year = item.meta.releaseInfo
+            ?.filter { it.isDigit() }
+            ?.take(4)
+            ?.takeIf { it.length == 4 }
+        Text(
+            if (year != null) "$typeLabel · $year" else typeLabel,
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary
+        )
     }
 }
 

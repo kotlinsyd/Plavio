@@ -24,7 +24,6 @@ object Routes {
     const val INTEGRATIONS = "integrations"
     const val ABOUT = "about"
     const val FEEDBACK = "feedback"
-    const val FEATURES_GUIDE = "features_guide"
     const val DOWNLOADS = "downloads"
     const val LICENSES = "licenses"
     const val SETTINGS = "settings"

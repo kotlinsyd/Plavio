@@ -63,8 +63,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.pulsestream.app.data.BadgePack
-import com.pulsestream.app.data.BadgePacks
 import com.pulsestream.app.data.StreamItem
 import com.pulsestream.app.ui.theme.AppPalette
 import com.pulsestream.app.ui.theme.GlassBorder
@@ -88,6 +86,12 @@ data class ParsedStreamInfo(
 
 private val QUALITY_RE = Regex("""\b(2160p|1440p|1080p|720p|480p|360p)\b""", RegexOption.IGNORE_CASE)
 private val FOUR_K_RE = Regex("""\b(4K|UHD)\b""", RegexOption.IGNORE_CASE)
+// Named quality labels (AIOStreams-style formatters print these instead of
+// numeric tags): FHD = 1080p, HD = 720p, SD = 480p. Word boundaries keep
+// HDRip / HDCAM / HDTV from matching the bare HD rule.
+private val FHD_RE = Regex("""\bFHD\b""", RegexOption.IGNORE_CASE)
+private val HD_RE = Regex("""\bHD\b""", RegexOption.IGNORE_CASE)
+private val SD_RE = Regex("""\bSD\b""", RegexOption.IGNORE_CASE)
 private val SOURCE_RE =
     Regex("""\b(Blu[-\s]?Ray|BRRip|WEB[-\s]?DL|WEBRip|HDRip|HDCAM|HDTS|\bTS\b|CAM)\b""", RegexOption.IGNORE_CASE)
 private val CODEC_RE = Regex("""\b(x265|HEVC|x264|AVC|AV1|VP9)\b""", RegexOption.IGNORE_CASE)
@@ -103,6 +107,10 @@ fun parseStreamInfo(stream: StreamItem): ParsedStreamInfo {
     if (haystack.isBlank()) return ParsedStreamInfo()
     val quality = FOUR_K_RE.find(haystack)?.value?.uppercase()
         ?: QUALITY_RE.find(haystack)?.value?.lowercase()
+        ?: if (FHD_RE.containsMatchIn(haystack)) "1080p"
+        else if (HD_RE.containsMatchIn(haystack)) "720p"
+        else if (SD_RE.containsMatchIn(haystack)) "480p"
+        else null
     val source = SOURCE_RE.find(haystack)?.value
         ?.replace(Regex("""[-\s]+"""), "-")?.uppercase()
         ?.replace("BLU-RAY", "BluRay")?.replace("WEB-DL", "WEB-DL")
@@ -128,6 +136,9 @@ fun normalizeStreamQuality(quality: String?): String? {
     val value = quality?.trim()?.lowercase()?.replace(" ", "") ?: return null
     return when (value) {
         "4k", "uhd", "2160p" -> "4K"
+        "fhd" -> "1080p"
+        "hd" -> "720p"
+        "sd" -> "480p"
         "1440p", "1080p", "720p", "480p", "360p" -> value
         else -> null
     }
@@ -542,32 +553,12 @@ fun QualityPills(state: StreamBrowserState, modifier: Modifier = Modifier, compa
 }
 
 // ---------------------------------------------------------------------------
+// Stream rows
 // ---------------------------------------------------------------------------
-// Stream badge packs — user-selectable in Appearance settings (v0.8.31+)
-// ---------------------------------------------------------------------------
-// Each stream row shows the title plus image badges matched against the
-// stream's title via the selected pack's regex filters. One clean layout.
-
-/** Loads the user's selected badge pack (cached). Null when unavailable. */
-@Composable
-private fun rememberBadgePack(): BadgePack? {
-    val context = LocalContext.current
-    // The raw setting key: a built-in pack key or "custom:<name>".
-    val styleKey = LocalBadgeStyleKey.current
-    return remember(styleKey) { BadgePacks.loadByKey(context, styleKey) }
-}
 
 /**
- * Provides the badge-style key down the stream-list tree. Screens set this
- * from `repository.settings.streamCardStyle` (now a badge-pack key).
- */
-val LocalBadgeStyleKey: androidx.compose.runtime.ProvidableCompositionLocal<String> =
-    androidx.compose.runtime.compositionLocalOf { "black" }
-
-/**
- * Single stream row: title, badge strip, and a compact quality/size info
- * line. Badges come from the selected pack; the info line stays because
- * badges don't cover everything (e.g. exact file size).
+ * Single stream row: the full title/filename line plus the download
+ * action.
  */
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
@@ -579,29 +570,13 @@ fun StreamCard(
     compact: Boolean = false
 ) {
     val palette = LocalPalette.current
-    val pack = rememberBadgePack()
     val unresolvedTorrent = stream.url.startsWith("infohash:", true) || stream.url.startsWith("magnet:", true)
-    val badges = remember(stream, pack) {
-        if (pack != null) BadgePacks.match(pack, stream) else emptyList()
-    }
     val info = remember(stream) { parseStreamInfo(stream) }
     // Full filename display (user's order): show the complete title/name,
     // never truncated. Prefer title (usually the full filename).
     val display = remember(stream) { streamDisplayModel(stream) }
     val fullName = display.headline
-    // Language tags from title (Hindi, English, etc.)
-    val languages = remember(stream) {
-        val haystack = listOfNotNull(stream.title, stream.name).joinToString(" ")
-        val found = mutableListOf<String>()
-        val langRe = Regex("""\b(Hindi|English|Tamil|Telugu|Malayalam|Kannada|Punjabi|Bengali|Marathi|Gujarati|Urdu|Arabic|Spanish|French|German|Italian|Portuguese|Russian|Japanese|Korean|Chinese|Turkish)\b""", RegexOption.IGNORE_CASE)
-        langRe.findAll(haystack).forEach { m ->
-            val lang = m.value.lowercase().replaceFirstChar { it.uppercase() }
-            if (!found.contains(lang)) found.add(lang)
-        }
-        found.take(3)
-    }
     val shape = RoundedCornerShape(20.dp)
-    val is4K = display.metadata.any { normalizeStreamQuality(it) == "4K" }
 
     if (compact) {
         CompactStreamCard(
@@ -631,101 +606,16 @@ fun StreamCard(
                 .tvFocusRing(shape)
                 .padding(20.dp)
         ) {
-            // Title row with 4K ribbon — full name, bigger text (user's order).
-            Box(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = fullName,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary,
-                    lineHeight = 24.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(end = if (is4K) 52.dp else 0.dp)
-                )
-                if (is4K) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .background(
-                                palette.accent,
-                                RoundedCornerShape(8.dp)
-                            )
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "4K",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.Black
-                        )
-                    }
-                }
-            }
-
-            // Spec chips
-            val chips = buildList {
-                display.provider?.let { add(it to false) }
-                display.metadata.forEach { add(it to true) }
-                val missingLanguages = languages.filterNot {
-                    comparableStreamLabel(fullName).contains(comparableStreamLabel(it))
-                }
-                if (missingLanguages.isNotEmpty()) add(missingLanguages.joinToString(" + ") to false)
-            }
-            if (chips.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                androidx.compose.foundation.layout.FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    chips.forEach { (label, highlighted) ->
-                        Box(
-                            modifier = Modifier
-                                .background(
-                                    if (highlighted) palette.accent.copy(alpha = 0.15f)
-                                    else Color.White.copy(alpha = 0.06f),
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .border(
-                                    1.dp,
-                                    if (highlighted) palette.accent.copy(alpha = 0.3f)
-                                    else Color.White.copy(alpha = 0.08f),
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .padding(horizontal = 10.dp, vertical = 5.dp)
-                        ) {
-                            Text(
-                                text = label,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (highlighted) palette.accent else TextSecondary
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Badges (provider logos)
-            if (badges.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    badges.forEach { badge ->
-                        AsyncImage(
-                            model = badge.imageUrl,
-                            contentDescription = badge.name,
-                            modifier = Modifier.height(15.dp),
-                            contentScale = ContentScale.FillHeight
-                        )
-                    }
-                }
-            }
+            // Title — full name, bigger text (user's order). The
+            // title/filename line is the whole row content.
+            Text(
+                text = fullName,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary,
+                lineHeight = 24.sp,
+                modifier = Modifier.fillMaxWidth()
+            )
 
             // Bottom row: download button only (no URLs — user's order).
             if (onDownload != null) {
@@ -785,44 +675,16 @@ private fun CompactStreamCard(
             if (unresolvedTorrent) {
                 Text("Torrent source · cached debrid link required", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
             }
-            if (selected || display.provider != null || display.metadata.isNotEmpty()) {
+            // The "Playing" state stays as PLAIN TEXT only — no chip
+            // background/border, no decoration on stream rows.
+            if (selected) {
                 Spacer(Modifier.height(4.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    if (selected) {
-                        Text(
-                            text = "Playing",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            modifier = Modifier.background(palette.accent.copy(alpha = 0.24f), RoundedCornerShape(6.dp))
-                                .border(1.dp, palette.accent.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                    display.provider?.let { provider ->
-                        Text(
-                            text = provider,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextSecondary,
-                            modifier = Modifier.border(1.dp, GlassBorder, RoundedCornerShape(6.dp))
-                                .padding(horizontal = 6.dp, vertical = 2.dp),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    display.metadata.forEach { detail ->
-                        Text(
-                            text = detail,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextSecondary,
-                            modifier = Modifier.border(1.dp, GlassBorder, RoundedCornerShape(6.dp))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                }
+                Text(
+                    text = "Playing",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.accent
+                )
             }
         }
         if (onDownload != null) {
@@ -846,54 +708,12 @@ private fun CompactStreamCard(
     }
 }
 
-/**
- * Non-interactive badge-pack preview for the Appearance settings picker:
- * sample badges from the pack.
- */
-@Composable
-fun BadgePackPreview(
-    packKey: String,
-    label: String,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    val pack = remember(packKey) { BadgePacks.loadByKey(context, packKey) }
-    val sampleBadges = remember(pack) {
-        // Show a spread of badges from different groups.
-        val seen = mutableSetOf<String>()
-        pack?.filters?.filter { it.pattern != null && seen.add(it.groupId) }
-            ?.take(6) ?: emptyList()
-    }
-    Column(modifier = modifier) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimary
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            sampleBadges.forEach { badge ->
-                AsyncImage(
-                    model = badge.imageUrl,
-                    contentDescription = badge.name,
-                    modifier = Modifier.height(24.dp),
-                    contentScale = ContentScale.FillHeight
-                )
-            }
-        }
-    }
-}
 // ---------------------------------------------------------------------------
 // List-level rendering: container adapts to the chosen style
 // ---------------------------------------------------------------------------
 
 /**
- * Stream list: one clean layout of badge rows. The badge pack comes from
- * [LocalBadgeStyleKey], set by screens from the user's Appearance setting.
+ * Stream list: one clean layout — title/filename rows only.
  */
 @Composable
 fun StreamList(

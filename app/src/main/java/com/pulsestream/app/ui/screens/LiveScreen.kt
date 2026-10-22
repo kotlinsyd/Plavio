@@ -7,19 +7,25 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -28,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -55,9 +62,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -78,6 +90,7 @@ import com.pulsestream.app.ui.components.LoadingState
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.components.PosterCard
 import com.pulsestream.app.ui.components.SectionTitle
+import com.pulsestream.app.ui.tv.tvFocusRing
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.GlassWhite
 import com.pulsestream.app.ui.theme.TextPrimary
@@ -161,6 +174,7 @@ private fun channelKey(row: CatalogRow, meta: MetaPreview) = "${row.addonId}|${m
  * favorites, recently-watched channels, category chips that actually
  * filter, long-press to pin, and a top-right M3U import.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LiveScreen(
     onPlay: (PlaybackRequest) -> Unit,
@@ -410,41 +424,209 @@ fun LiveScreen(
                 }
 
                 @Composable
-                fun ChannelCard(row: CatalogRow, meta: MetaPreview, badge: String = "LIVE") {
+                fun ChannelCard(row: CatalogRow, meta: MetaPreview) {
                     val key = channelKey(row, meta)
                     val pinned = key in repository.settings.liveFavorites
                     val busy = resolvingKey == key
-                    Box(contentAlignment = Alignment.Center) {
-                        // The long-press lives ON the card itself: an inner
-                        // clickable under an outer combinedClickable consumes
-                        // the press, which is why pinning never fired.
-                        PosterCard(
-                            meta = meta,
-                            badge = badge,
-                            onClick = { playChannel(row, meta, flatList) },
-                            onLongClick = { vm.toggleFavorite(key); favVersion++ }
-                        )
-                        if (pinned) {
-                            Surface(
-                                color = Color.Black.copy(alpha = 0.65f),
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(6.dp)
-                            ) {
+                    // Channel tile (v0.12.4 Sample C; resized v0.12.5):
+                    // a logo tile + name below. v0.12.5 (owner's order):
+                    // the tile now matches the Home catalog PosterCard
+                    // footprint exactly — 128dp wide with a 180dp art
+                    // box — because the old 132×76 landscape tile read
+                    // far too small next to Home's cards. Channel art
+                    // is wide logos, so it stays ContentScale.Fit,
+                    // centered inside the taller box. The
+                    // long-press lives ON the tile itself (an inner
+                    // clickable under an outer combinedClickable would
+                    // consume the press, which is why pinning once
+                    // never fired).
+                    Column(
+                        modifier = Modifier
+                            .width(128.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .focusable()
+                            .tvFocusRing(RoundedCornerShape(14.dp))
+                            .combinedClickable(
+                                onClick = { playChannel(row, meta, flatList) },
+                                onLongClick = { vm.toggleFavorite(key); favVersion++ }
+                            )
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color.White.copy(alpha = 0.06f))
+                                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            val art = meta.background ?: meta.logo ?: meta.poster
+                            if (art != null) {
+                                AsyncImage(
+                                    model = art,
+                                    contentDescription = meta.name,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(10.dp),
+                                    contentScale = ContentScale.Fit
+                                )
+                            } else {
+                                Text(
+                                    meta.name.take(2).uppercase(),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextSecondary
+                                )
+                            }
+                            if (pinned) {
                                 Icon(
                                     Icons.Filled.Star, "Pinned",
                                     tint = Color(0xFFFFD54F),
                                     modifier = Modifier
-                                        .padding(4.dp)
+                                        .align(Alignment.TopEnd)
+                                        .padding(5.dp)
                                         .size(14.dp)
+                                )
+                            }
+                            if (busy) {
+                                CircularProgressIndicator(
+                                    color = LocalPalette.current.accent,
+                                    modifier = Modifier.padding(8.dp)
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            LiveDot()
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                meta.name,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                @Composable
+                fun FeaturedChannelCard(row: CatalogRow, meta: MetaPreview) {
+                    val key = channelKey(row, meta)
+                    val busy = resolvingKey == key
+                    // Sample C featured card (v0.12.4): one wide 16:9
+                    // card for whatever is on now — tap plays through
+                    // the same path as every channel tile; long-press
+                    // pins/unpins like the tiles.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .aspectRatio(16f / 9f)
+                            .clip(RoundedCornerShape(18.dp))
+                            .border(1.dp, GlassBorder, RoundedCornerShape(18.dp))
+                            .focusable()
+                            .tvFocusRing(RoundedCornerShape(18.dp))
+                            .combinedClickable(
+                                onClick = { playChannel(row, meta, flatList) },
+                                onLongClick = { vm.toggleFavorite(key); favVersion++ }
+                            )
+                    ) {
+                        val art = meta.background ?: meta.logo ?: meta.poster
+                        if (art != null) {
+                            AsyncImage(
+                                model = art,
+                                contentDescription = meta.name,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        } else {
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(Color(0xFF14324A), Color(0xFF0B1A2C))
+                                        )
+                                    )
+                            )
+                        }
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color.Transparent,
+                                            Color.Black.copy(alpha = 0.78f)
+                                        ),
+                                        startY = 140f
+                                    )
+                                )
+                        )
+                        if (meta.logo != null && meta.logo != art) {
+                            AsyncImage(
+                                model = meta.logo,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(12.dp)
+                                    .height(26.dp)
+                                    .widthIn(max = 110.dp),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                        Column(
+                            Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(14.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                LiveDot()
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    "LIVE NOW",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        letterSpacing = 1.2.sp
+                                    ),
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = LocalPalette.current.accent
+                                )
+                                Text(
+                                    "  ·  ${row.catalogName}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.75f),
+                                    maxLines = 1
+                                )
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                meta.name,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            meta.description?.takeIf { it.isNotBlank() }?.let { desc ->
+                                Text(
+                                    desc,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
                         if (busy) {
                             CircularProgressIndicator(
                                 color = LocalPalette.current.accent,
-                                modifier = Modifier.padding(8.dp)
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .padding(8.dp)
                             )
                         }
                     }
@@ -477,9 +659,30 @@ fun LiveScreen(
                         }
                     }
                 }
+                // Featured channel (v0.12.4, Sample C): the first channel
+                // of the first non-empty category — Sports preferred when
+                // present — taken from the UNFILTERED browsing set. Shown
+                // as the wide card at the top of the tab only while
+                // browsing (no search text or category chip narrowing
+                // the list).
+                val featuredRow = remember(categories, visibleRows, query, category) {
+                    val browsing = query.isBlank() && category == null
+                    if (!browsing) null
+                    else {
+                        val sportsName = categories.firstOrNull {
+                            it.equals("Sports", ignoreCase = true)
+                        }
+                        sportsName?.let { name ->
+                            visibleRows.firstOrNull { it.catalogName == name }
+                        } ?: visibleRows.firstOrNull()
+                    }
+                }
+                val featuredChannel = featuredRow?.items?.firstOrNull()
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 16.dp)
+                    // Extra bottom room so the last row scrolls clear of
+                    // the floating dock (content now runs under it).
+                    contentPadding = PaddingValues(bottom = 104.dp)
                 ) {
                     // ---- Category chips ----
                     if (categories.size > 1 || (categories.size == 1 && category != null)) {
@@ -524,6 +727,13 @@ fun LiveScreen(
                                 ) { _, (row, meta) -> ChannelCard(row, meta) }
                             }
                             Spacer(Modifier.height(8.dp))
+                        }
+                    }
+                    // ---- Featured (Sample C) ----
+                    if (featuredRow != null && featuredChannel != null) {
+                        item(key = "live|featured") {
+                            FeaturedChannelCard(featuredRow, featuredChannel)
+                            Spacer(Modifier.height(14.dp))
                         }
                     }
                     // ---- Recently watched ----

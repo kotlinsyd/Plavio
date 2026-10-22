@@ -16,16 +16,20 @@ val GlassWhite = Color.White.copy(alpha = 0.10f)
 val GlassBorder = Color.White.copy(alpha = 0.18f)
 
 /** Opaque neutral fills used by the shared liquid-glass surface treatment. */
-fun liquidGlassTopSurface(background: Color): Color = lerp(background, Color.White, 0.19f)
-fun liquidGlassBottomSurface(background: Color): Color = lerp(background, Color.White, 0.11f)
+fun liquidGlassTopSurface(background: Color): Color = lerp(background, Color.White, 0.10f)
+fun liquidGlassBottomSurface(background: Color): Color = lerp(background, Color.White, 0.06f)
 
 /**
- * Accent color themes. PULSE is the default neon cyan/magenta identity;
- * the others re-skin every accent in the app (buttons, toggles, progress,
- * glows, selected states) through [LocalPalette].
+ * Accent color themes. PULSE is the default identity — since v0.12.7 it
+ * carries the startup logo's own colors (owner's order: the green from
+ * the startup animation, used in the app wherever possible): mint
+ * #3DDC97 primary, cyan #38BDF8 secondary, the pair the splash wordmark
+ * and its sweep line are drawn in. The others re-skin every accent in
+ * the app (buttons, toggles, progress, glows, selected states) through
+ * [LocalPalette].
  */
 enum class AccentTheme(val label: String, val primary: Color, val secondary: Color) {
-    PULSE("Pulse", Color(0xFF22D3EE), Color(0xFFE879F9)),
+    PULSE("Pulse", Color(0xFF3DDC97), Color(0xFF38BDF8)),
     CRIMSON("Crimson", Color(0xFFF43F5E), Color(0xFFFB923C)),
     OCEAN("Ocean", Color(0xFF38BDF8), Color(0xFF6366F1)),
     EMERALD("Emerald", Color(0xFF34D399), Color(0xFF22D3EE)),

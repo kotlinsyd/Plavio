@@ -107,7 +107,7 @@ private fun LegalRows(
                         context.startActivity(
                             Intent(
                                 Intent.ACTION_VIEW,
-                                Uri.parse("https://plaviomedia.vercel.app/privacy.html")
+                                Uri.parse("https://www.plavio.site/privacy.html")
                             )
                         )
                     }
@@ -122,7 +122,7 @@ private fun LegalRows(
                         context.startActivity(
                             Intent(
                                 Intent.ACTION_VIEW,
-                                Uri.parse("https://plaviomedia.vercel.app/terms.html")
+                                Uri.parse("https://www.plavio.site/terms.html")
                             )
                         )
                     }
