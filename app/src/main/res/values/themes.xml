@@ -2,7 +2,7 @@
 <resources>
     <style name="Theme.PulseStream" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">#0A0A12</item>
-        <item name="android:statusBarColor">#0A0A12</item>
-        <item name="android:navigationBarColor">#0A0A12</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 </resources>

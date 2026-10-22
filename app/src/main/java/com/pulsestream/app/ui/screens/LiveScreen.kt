@@ -951,7 +951,7 @@ private fun chipColors() = FilterChipDefaults.filterChipColors(
     selectedLeadingIconColor = LocalPalette.current.accent
 )
 
-/** Live indicator: a red dot with a white center, gently pulsing. */
+/** Live indicator: a mint-green dot with a white center, gently pulsing (owner's order 2026-10-22: green, following the app theme). */
 @Composable
 private fun LiveDot(modifier: Modifier = Modifier) {
     val reduced = com.pulsestream.app.data.rememberReducedMotion()
@@ -970,7 +970,7 @@ private fun LiveDot(modifier: Modifier = Modifier) {
             Modifier
                 .size(15.dp)
                 .clip(CircleShape)
-                .background(Color(0xFFEF4444).copy(alpha = alpha))
+                .background(Color(0xFF3DDC97).copy(alpha = alpha))
         )
         Box(
             Modifier

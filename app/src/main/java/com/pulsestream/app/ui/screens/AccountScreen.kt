@@ -21,14 +21,18 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -72,6 +76,12 @@ fun AccountScreen(
     var message by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshTick by remember { mutableStateOf(0) }
+    // Custom username (owner's order 2026-10-22): a name of the
+    // user's own choice, shown in the app instead of the Gmail
+    // address acting as the account name.
+    var editingName by remember { mutableStateOf(false) }
+    var nameDraft by remember { mutableStateOf("") }
+    val profileName = remember(refreshTick) { repository.settings.profileUserName }
 
     val isSignedIn = remember(refreshTick) { sync.isSignedIn() }
     val accountEmail = remember(refreshTick) { sync.getAccountEmail() }
@@ -288,7 +298,7 @@ fun AccountScreen(
                                 )
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        "Signed in",
+                                        profileName.ifBlank { "Signed in" },
                                         style = MaterialTheme.typography.titleMedium
                                     )
                                     Text(
@@ -346,6 +356,19 @@ fun AccountScreen(
                             }
 
                             OutlinedButton(
+                                onClick = {
+                                    nameDraft = profileName
+                                    editingName = true
+                                },
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.Edit, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text(if (profileName.isBlank()) "Set Username" else "Edit Username")
+                            }
+
+                            OutlinedButton(
                                 onClick = ::doSignOut,
                                 enabled = !busy,
                                 modifier = Modifier.fillMaxWidth()
@@ -373,6 +396,40 @@ fun AccountScreen(
                             )
                         }
                     }
+                }
+
+                if (editingName) {
+                    AlertDialog(
+                        onDismissRequest = { editingName = false },
+                        title = { Text("Username") },
+                        text = {
+                            Column {
+                                Text(
+                                    "This name is shown in the app instead of your Gmail address.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                OutlinedTextField(
+                                    value = nameDraft,
+                                    onValueChange = { nameDraft = it },
+                                    singleLine = true,
+                                    label = { Text("Your name") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                repository.settings.profileUserName = nameDraft
+                                editingName = false
+                                refreshTick++
+                            }) { Text("Save") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { editingName = false }) { Text("Cancel") }
+                        }
+                    )
                 }
             }
         }

@@ -133,7 +133,7 @@ fun SettingsScreen(
     val settings = repository.settings
     val context = LocalContext.current
     var showDiagnostics by remember { mutableStateOf(false) }
-    var telemetryEnabled by remember { mutableStateOf(com.pulsestream.app.data.TelemetryConsent.enabled(context)) }
+    var telemetryEnabled by remember { mutableStateOf(com.pulsestream.app.data.AppStats.enabled(context)) }
 
     // ---- Sample F (v0.12.4): searchable compact root screen ----
     // The account card reads the same sync manager the Account screen
@@ -144,7 +144,12 @@ fun SettingsScreen(
     val signedIn = remember { syncManager.isSignedIn() }
     val accountEmail = remember { syncManager.getAccountEmail() }
     val lastBackup = remember { syncManager.getLastBackupTime() }
-    val accountName = remember(accountEmail) { accountEmail?.let { deriveDisplayName(it) } }
+    // The user's own chosen username (set in Account) wins over the
+    // email-derived name (owner's order 2026-10-22).
+    val profileUserName = remember { settings.profileUserName }
+    val accountName = remember(accountEmail, profileUserName) {
+        profileUserName.takeIf { it.isNotBlank() } ?: accountEmail?.let { deriveDisplayName(it) }
+    }
     val installedAddons by repository.addons.collectAsState(initial = emptyList())
     val enabledAddons = remember(installedAddons) { installedAddons.count { it.enabled } }
     val reducedMotion by com.pulsestream.app.data.MotionPreferences.reduced.collectAsState()
@@ -262,15 +267,15 @@ fun SettingsScreen(
                 compact = true
             )
         },
-        SettingsEntry(sectionHelp, "Optional analytics & crash reports",
-            "analytics crash reports firebase telemetry privacy usage data optional") {
+        SettingsEntry(sectionHelp, "Anonymous usage counting",
+            "anonymous counting installs online users privacy usage data own server") {
             SettingsToggleRow(
                 icon = Icons.Filled.Info,
-                title = "Optional analytics & crash reports",
-                subtitle = "Off by default. Share usage and crash data with Firebase.",
+                title = "Anonymous usage counting",
+                subtitle = "On by default. Counts installs and active users on Plavio's own server — a random ID only, no personal data, no Google.",
                 checked = telemetryEnabled,
                 onCheckedChange = {
-                    com.pulsestream.app.data.TelemetryConsent.setEnabled(context, it)
+                    com.pulsestream.app.data.AppStats.setEnabled(context, it)
                     telemetryEnabled = it
                 },
                 compact = true
@@ -839,20 +844,9 @@ fun AboutCard() {
                 contentDescription = "Plavio logo",
                 modifier = Modifier.size(88.dp).clip(RoundedCornerShape(26.dp))
             )
-            Spacer(Modifier.height(14.dp))
-            Text(
-                text = "Plavio",
-                style = MaterialTheme.typography.headlineSmall.copy(
-                    fontWeight = FontWeight.Black,
-                    brush = LocalPalette.current.gradient
-                )
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "Version ${BuildConfig.VERSION_NAME}",
-                style = MaterialTheme.typography.labelLarge,
-                color = TextSecondary
-            )
+            // Name + version text REMOVED (owner's order 2026-10-22):
+            // the logo already says Plavio, and the updater card below
+            // already shows the version — the pair only duplicated both.
             Spacer(Modifier.height(14.dp))
             Text(
                 text = "A beautiful open-source streaming app with a built-in " +

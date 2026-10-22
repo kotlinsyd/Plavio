@@ -56,8 +56,6 @@ private val OSS_LIBRARIES = listOf(
     OssLibrary("Media3 ExoPlayer", "Apache License 2.0", "https://developer.android.com/media/media3/exoplayer"),
     OssLibrary("OkHttp", "Apache License 2.0", "https://square.github.io/okhttp/"),
     OssLibrary("Coil", "Apache License 2.0", "https://coil-kt.github.io/coil/"),
-    OssLibrary("Firebase Crashlytics", "Apache License 2.0", "https://firebase.google.com/docs/crashlytics"),
-    OssLibrary("Firebase Analytics", "Apache License 2.0", "https://firebase.google.com/docs/analytics"),
     OssLibrary("NewPipeExtractor", "GNU GPL v3.0", "https://github.com/TeamNewPipe/NewPipeExtractor"),
     OssLibrary("FFmpeg (audio decoders)", "LGPL 2.1 or later", "https://ffmpeg.org"),
 )

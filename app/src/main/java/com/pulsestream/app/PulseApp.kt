@@ -77,12 +77,15 @@ class PulseApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         installCrashCatcher()
         super.onCreate()
-        com.pulsestream.app.data.TelemetryConsent.apply(this)
         com.pulsestream.app.data.MotionPreferences.initialize(this)
         val db = openDatabase()
         database = db
         settings = SettingsStore(this)
         repository = StreamRepository(db, StremioApi(), settings)
+        // Anonymous install/session counting on the owner's own
+        // stats server (open-source backend, no Google — his order
+        // 2026-10-22). Fire-and-forget; never blocks startup.
+        appScope.launch { com.pulsestream.app.data.AppStats.trackLaunch(this@PulseApp) }
         // Quietly install the bundled addons (PlavioMeta + PlavioHD + Cinemeta + subtitles) on first launch.
         appScope.launch { repository.ensurePreinstalledAddons() }
         // Fill in addon logos for installs from before logos were stored.

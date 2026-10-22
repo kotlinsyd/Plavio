@@ -493,6 +493,15 @@ class SettingsStore(context: Context) {
             else prefs.edit().putString(KEY_TRAKT_USERNAME, value).apply()
         }
 
+    /**
+     * User-chosen display name for the Account area (owner's order
+     * 2026-10-22): when set, the app shows this name instead of
+     * presenting the Gmail address as the account name.
+     */
+    var profileUserName: String
+        get() = prefs.getString(KEY_PROFILE_USER_NAME, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_PROFILE_USER_NAME, value.trim()).apply()
+
     /** Accent color theme name (see AccentTheme). */
     var accentName: String
         get() = prefs.getString(KEY_ACCENT, AccentTheme.PULSE.name) ?: AccentTheme.PULSE.name
@@ -819,6 +828,7 @@ class SettingsStore(context: Context) {
         private const val KEY_SHOW_SKIP = "show_skip_button"
         private const val KEY_SUBTITLE_LANGS = "subtitle_languages"
         private const val KEY_ACCENT = "accent_theme"
+        private const val KEY_PROFILE_USER_NAME = "profile_user_name"
         private const val KEY_AMOLED = "amoled_black"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_PREINSTALL_PREFIX = "preinstall_done_"

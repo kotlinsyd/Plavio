@@ -79,7 +79,7 @@ fun WatchlistScreen(
                 } else {
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive(140.dp), modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 72.dp),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 104.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         items(displayed, key = { it.key }) { item ->

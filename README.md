@@ -92,7 +92,7 @@ app/src/main/java/com/pulsestream/app/
 
 ## Data use and privacy
 
-Plavio can be used without any account. Optional Google sign-in enables automatic backup of your settings, watchlist, Continue Watching, lists and addon setup to your own Google Drive (a private app folder only Plavio can see); signing in on another device restores everything. Optional telemetry is disabled by default; enabling it allows Firebase Analytics/Crashlytics collection and optional install-statistics requests. See the [Privacy Policy](site/privacy.html) for details.
+Plavio can be used without any account. Optional Google sign-in enables automatic backup of your settings, watchlist, Continue Watching, lists and addon setup to your own Google Drive (a private app folder only Plavio can see); signing in on another device restores everything. Anonymous install and activity counting runs on Plavio's own server — no Google analytics — and can be turned off in Settings. See the [Privacy Policy](site/privacy.html) for details.
 
 The app ships with configured addons. Addon URLs and requests can contain credentials or viewing/search identifiers; addon operators receive the requests sent to their servers. Do not publicly share an addon URL containing a key or token. Addon bundle sharing blocks URLs that appear to contain credentials, but detection is heuristic and not exhaustive.
 

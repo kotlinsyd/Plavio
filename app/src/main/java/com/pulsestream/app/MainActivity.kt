@@ -52,6 +52,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -79,7 +80,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -87,6 +92,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -290,11 +301,33 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // No dark scrim behind the gesture bar (owner's order
+        // 2026-10-22): Android's navigation-bar contrast enforcement
+        // paints a black layer behind the system navigation area, so
+        // the app background never reached the physical bottom edge
+        // around the floating dock. Off — the app's own background
+        // now runs edge to edge, around and below the capsule.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         handleAddonDeepLink(intent)
         handleNotificationRoute(intent)
         // Safety net: (re)schedule the episode check on cold start.
         // Idempotent (KEEP) and a no-op when alerts are disabled.
         EpisodeNotifications.ensureScheduled(this)
+        // Anonymous-stats heartbeat (the owner's own open-source
+        // counting, 2026-10-22): while the app is on screen, one tiny
+        // ping every 5 minutes — this is what makes "online now" on
+        // his stats server true. RESUMED only, so time in the
+        // background never counts as online.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (true) {
+                    delay(5 * 60 * 1000L)
+                    com.pulsestream.app.data.AppStats.heartbeat(this@MainActivity)
+                }
+            }
+        }
         // PiP play/pause RemoteAction receiver (explicit intent, not exported).
         val pipFilter = IntentFilter(ACTION_PIP_TOGGLE)
         ContextCompat.registerReceiver(this, pipReceiver, pipFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -466,7 +499,8 @@ private fun DockItem(
     selected: Boolean,
     labelFraction: Float,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    labelSizeDp: Float = 10f
 ) {
     val palette = LocalPalette.current
     Column(
@@ -503,7 +537,7 @@ private fun DockItem(
         Icon(
             tab.icon,
             contentDescription = tab.label,
-            tint = if (selected) palette.accent else TextSecondary,
+            tint = if (selected) palette.accent else Color.White.copy(alpha = 0.9f),
             modifier = Modifier.size(22.dp)
         )
         // The name slot: eaten as the tray shrinks — height collapses
@@ -518,11 +552,18 @@ private fun DockItem(
         ) {
             Text(
                 tab.label,
-                // 10sp (v0.12.8): at labelSmall the longest name —
-                // "Downloads" — clipped to "Downlo…" on-device; the
-                // smaller size + tighter segment padding fits it whole.
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                color = if (selected) palette.accent else TextSecondary,
+                // Label size (v0.12.16, owner's order): computed by
+                // the dock from the tray's real width and passed in
+                // as DP, then converted back to SP through the
+                // density — so the drawn size is the same on every
+                // device and ignores the system font-size setting.
+                // That setting is what still clipped "Downloads" to
+                // "Downlo…" on another phone at a fixed 10sp. The
+                // full word now always fits, on every screen.
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = with(LocalDensity.current) { labelSizeDp.dp.toSp() }
+                ),
+                color = if (selected) palette.accent else Color.White.copy(alpha = 0.9f),
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis
@@ -698,6 +739,17 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
         val showBottomBar = tabs.any { it.route == currentDestination?.route }
         // Scroll-aware nav: compact (icons only) when scrolling down, like Nuvio.
         var compactNav by remember { mutableStateOf(false) }
+        // Real frosted-glass backdrop (v0.12.20): the page content is
+        // recorded once into a graphics layer, then a second layer
+        // replays it with a RenderEffect blur; the dock draws that
+        // blurred copy behind itself (clipped to the capsule, aligned
+        // by root positions). Needs Android 12+ (RenderEffect); older
+        // phones keep the darker solid tint instead.
+        val blurSupported = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+        val contentLayer = androidx.compose.ui.graphics.rememberGraphicsLayer()
+        val blurLayer = androidx.compose.ui.graphics.rememberGraphicsLayer()
+        var contentOriginPx by remember { mutableStateOf(Offset.Zero) }
+        var dockOriginPx by remember { mutableStateOf(Offset.Zero) }
         val nestedScrollConnection = remember {
             object : NestedScrollConnection {
                 override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
@@ -732,6 +784,20 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                     .fillMaxSize()
                     .background(LocalPalette.current.background)
                     .padding(top = shellStatusTop)
+                    .onGloballyPositioned { contentOriginPx = it.positionInRoot() }
+                    .drawWithContent {
+                        if (!blurSupported || !showBottomBar) {
+                            drawContent()
+                        } else {
+                            contentLayer.record { this@drawWithContent.drawContent() }
+                            drawLayer(contentLayer)
+                            val r = 22.dp.toPx()
+                            blurLayer.renderEffect = androidx.compose.ui.graphics.BlurEffect(
+                                r, r, androidx.compose.ui.graphics.TileMode.Clamp
+                            )
+                            blurLayer.record { drawLayer(contentLayer) }
+                        }
+                    }
             ) {
                 PulseNavGraph(navController, repository, listsRepository, onThemeChanged, trailerMini)
             }
@@ -760,18 +826,24 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                     )
                 }
                 val fold = foldAnim.value
-                // Seated at the very bottom edge (v0.12.15, owner's
-                // correction): NO navigationBarsPadding — that inset
-                // lifted the capsule off the bottom and left a dead
-                // black band of screen below it. The capsule now sits
-                // 6dp off the physical bottom edge, over the gesture
-                // zone, so almost no screen is left under it — and
-                // the list scrolls through what little remains.
+                // Seated at the bottom edge (v0.12.15) and lifted a
+                // little in v0.12.16 (owner's order 2026-10-22): the
+                // capsule floated 6dp off the physical bottom — a
+                // stretch for one-hand thumbs. It now floats 16dp
+                // up. The content still owns every pixel to the
+                // physical edge and scrolls underneath it; only the
+                // capsule's seat moved.
                 BoxWithConstraints(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                        // v0.12.18: lifted above the system gesture pill /
+                        // 3-button bar (navigationBarsPadding) plus a 10dp
+                        // float, so the capsule never collides with system
+                        // buttons — while the CONTENT still runs to the
+                        // physical edge behind it (clear bottom, like Nuvio).
+                        .navigationBarsPadding()
+                        .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 10.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     // End states (v0.12.7): open = nearly the FULL
@@ -780,6 +852,17 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                     // of that width, 47dp tall, names eaten, icons only.
                     val capsuleWidth = lerp(maxWidth, maxWidth * 0.85f, fold)
                     val capsuleHeight = lerp(62.dp, 47.dp, fold)
+                    // Per-tab width in the OPEN tray drives the label
+                    // size (v0.12.16): narrower tray → slightly smaller
+                    // labels, so all five full words always fit.
+                    val perTabDp = (maxWidth / 5).value
+                    val labelSizeDp = when {
+                        perTabDp >= 76f -> 10.5f
+                        perTabDp >= 70f -> 10f
+                        perTabDp >= 64f -> 9.5f
+                        perTabDp >= 58f -> 9f
+                        else -> 8.5f
+                    }
                     // Capsule-fitted black backing (v0.12.9; RESTORED
                     // v0.12.15 on the owner's correction): a black pill
                     // EXACTLY the capsule's size and shape sits directly
@@ -795,7 +878,22 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                             .align(Alignment.Center)
                             .width(capsuleWidth)
                             .height(capsuleHeight)
-                            .background(Color.Black, RoundedCornerShape(50))
+                            .clip(RoundedCornerShape(50))
+                            .onGloballyPositioned { dockOriginPx = it.positionInRoot() }
+                            .drawBehind {
+                                if (blurSupported) {
+                                    val d = dockOriginPx - contentOriginPx
+                                    translate(-d.x, -d.y) {
+                                        drawLayer(blurLayer)
+                                    }
+                                }
+                            }
+                            // Dark tint over the blur keeps white icons/labels
+                            // readable on bright posters; heavier when no blur.
+                            .background(
+                                Color.Black.copy(alpha = if (blurSupported) 0.38f else 0.66f),
+                                RoundedCornerShape(50)
+                            )
                     )
                     Surface(
                         shape = RoundedCornerShape(50),
@@ -829,6 +927,7 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                                     tab = tab,
                                     selected = selected,
                                     labelFraction = 1f - fold,
+                                    labelSizeDp = labelSizeDp,
                                     modifier = Modifier.weight(1f),
                                     onClick = {
                                         navController.navigate(tab.route) {
@@ -970,11 +1069,14 @@ private fun PulseNavGraph(
             }
             SplashScreen(
                 onDone = {
-                    val next = if (repository.settings.onboardingDone) {
-                        Routes.HOME
-                    } else {
-                        Routes.ONBOARDING
+                    // Welcome/onboarding guide REMOVED (owner's order
+                    // 2026-10-22): a fresh install goes straight to
+                    // Home — no popup guide. The flag is settled so
+                    // nothing can route into the retired flow again.
+                    if (!repository.settings.onboardingDone) {
+                        repository.settings.onboardingDone = true
                     }
+                    val next = Routes.HOME
                     navController.navigate(next) {
                         popUpTo(Routes.SPLASH) { inclusive = true }
                     }

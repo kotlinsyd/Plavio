@@ -5,8 +5,6 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
-    alias(libs.plugins.google.services)
-    alias(libs.plugins.firebase.crashlytics)
 }
 
 android {
@@ -18,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 92
-        versionName = "0.11.5"
+        versionCode = 121
+        versionName = "0.12.20"
     }
 
     // Publishing is explicit and must never silently use an unsigned/debug artifact.
@@ -114,11 +112,10 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     // Google Drive sync via AccountManager + REST API (no Play Services needed)
     // (user's order: replaces Supabase with Google login + Drive sync)
-    // Optional crash reporting; disabled until explicit device-local consent.
-    implementation(platform(libs.firebase.bom))
-    implementation(libs.firebase.crashlytics)
-    // Optional analytics; disabled until explicit device-local consent.
-    implementation("com.google.firebase:firebase-analytics")
+    // No Firebase / Google analytics at all (owner's order
+    // 2026-10-22): install + activity counting runs on the owner's
+    // own open-source backend (see AppStats). Crash capture is the
+    // in-app catcher in PulseApp, fully local.
     // YouTube trailer extraction for the Trailers tab (same as ShortsBox).
     implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
     ksp(libs.room.compiler)
