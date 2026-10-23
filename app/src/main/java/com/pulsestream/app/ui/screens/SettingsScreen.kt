@@ -1046,7 +1046,7 @@ private fun SocialIconRow() {
     val context = LocalContext.current
     val palette = LocalPalette.current
     val links = listOf(
-        Triple(R.drawable.ic_discord, "Discord", "https://discord.gg/pbNwJKU3p"),
+        Triple(R.drawable.ic_discord, "Discord", "https://discord.gg/cwzHH3r9pa"),
         Triple(R.drawable.ic_github, "GitHub", "https://github.com/kotlinsyd/Plavio"),
         Triple(R.drawable.ic_gitlab, "GitLab", "https://gitlab.com/KotlinJS5/plavio"),
         Triple(R.drawable.ic_reddit, "Reddit", "https://www.reddit.com/r/Plavio/"),
