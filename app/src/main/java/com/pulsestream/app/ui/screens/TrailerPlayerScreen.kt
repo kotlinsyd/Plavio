@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -389,11 +390,7 @@ private fun TrailerMetaDetails(
                 .padding(vertical = 12.dp),
             contentAlignment = Alignment.Center
         ) {
-            CircularProgressIndicator(
-                color = LocalPalette.current.accent,
-                modifier = Modifier.size(28.dp),
-                strokeWidth = 3.dp
-            )
+            OrbitDots(modifier = Modifier.size(32.dp))
         }
         return
     }
@@ -484,7 +481,7 @@ private fun TrailerControls(
         // Center play/pause (or buffering spinner).
         Box(Modifier.align(Alignment.Center)) {
             if (isBuffering) {
-                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(48.dp))
+                OrbitDots(modifier = Modifier.size(48.dp))
             } else {
                 IconButton(
                     onClick = onPlayPause,

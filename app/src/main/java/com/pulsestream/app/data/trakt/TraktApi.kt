@@ -172,6 +172,186 @@ class TraktApi {
 
     enum class ScrobbleResult { Ok, Unauthorized, Failed }
 
+    // ---- Watchlist (library sync, issue #3) ----
+
+    /** One Trakt watchlist entry, IMDb-keyed. [type] is "movie" or "series". */
+    data class WatchlistEntry(val type: String, val imdbId: String, val title: String)
+
+    private fun authed(accessToken: String): Request.Builder = Request.Builder()
+        .header("User-Agent", userAgent)
+        .header("trakt-api-version", "2")
+        .header("trakt-api-key", CLIENT_ID)
+        .header("Authorization", "Bearer $accessToken")
+
+    /** The user's whole Trakt watchlist (movies + shows). Throws on failure. */
+    suspend fun getWatchlist(accessToken: String): List<WatchlistEntry> = withContext(Dispatchers.IO) {
+        val out = mutableListOf<WatchlistEntry>()
+        val sections = listOf(
+            Triple("movies", "movie", "movie"),
+            Triple("shows", "series", "show")
+        )
+        for ((path, type, nodeName) in sections) {
+            val request = authed(accessToken).url("$API_BASE/users/me/watchlist/$path").get().build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw IllegalStateException("Trakt watchlist failed (HTTP ${response.code})")
+                }
+                val arr = org.json.JSONArray(response.body?.string().orEmpty().ifBlank { "[]" })
+                for (i in 0 until arr.length()) {
+                    val node = arr.optJSONObject(i)?.optJSONObject(nodeName) ?: continue
+                    val imdb = node.optJSONObject("ids")?.optString("imdb")
+                        ?.takeIf { it.startsWith("tt") } ?: continue
+                    out += WatchlistEntry(type, imdb, node.optString("title"))
+                }
+            }
+        }
+        out
+    }
+
+    /** Adds entries to the Trakt watchlist. Best-effort. */
+    suspend fun addToWatchlist(accessToken: String, entries: List<WatchlistEntry>): Boolean =
+        syncWatchlist(accessToken, "watchlist", entries)
+
+    /** Removes entries from the Trakt watchlist. Best-effort. */
+    suspend fun removeFromWatchlist(accessToken: String, entries: List<WatchlistEntry>): Boolean =
+        syncWatchlist(accessToken, "watchlist/remove", entries)
+
+    private suspend fun syncWatchlist(
+        accessToken: String,
+        path: String,
+        entries: List<WatchlistEntry>
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (entries.isEmpty()) return@withContext true
+        val movies = org.json.JSONArray()
+        val shows = org.json.JSONArray()
+        entries.forEach { e ->
+            val obj = JSONObject().put("ids", JSONObject().put("imdb", e.imdbId))
+            if (e.type == "movie") movies.put(obj) else shows.put(obj)
+        }
+        val body = JSONObject()
+        if (movies.length() > 0) body.put("movies", movies)
+        if (shows.length() > 0) body.put("shows", shows)
+        val request = authed(accessToken).url("$API_BASE/sync/$path")
+            .post(body.toString().toRequestBody(JSON)).build()
+        try {
+            client.newCall(request).execute().use { it.isSuccessful }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** One show the user is mid-way through, with the next episode to watch. */
+    data class UpNextEntry(
+        val imdbId: String,
+        val title: String,
+        val lastSeason: Int,
+        val lastEpisode: Int,
+        val nextSeason: Int,
+        val nextEpisode: Int,
+        val nextTitle: String?,
+        val watchedCount: Int,
+        val airedCount: Int,
+        val lastWatchedAtMs: Long
+    )
+
+    private data class NextEp(val season: Int, val episode: Int, val title: String?, val airedTotal: Int)
+
+    /**
+     * "Up next" from Trakt watched progress: shows with at least one
+     * watched episode and a later aired episode still unwatched.
+     * sync/watched/shows gives the watched sets; each candidate show's
+     * episode list is then checked for the first aired unwatched one.
+     * Per-show failures are skipped — one bad show never sinks the list.
+     */
+    suspend fun getUpNext(accessToken: String, limit: Int = 12): List<UpNextEntry> =
+        withContext(Dispatchers.IO) {
+            val request = authed(accessToken).url("$API_BASE/sync/watched/shows").get().build()
+            data class Candidate(
+                val imdb: String, val title: String,
+                val watched: Set<Pair<Int, Int>>, val lastMs: Long
+            )
+            val candidates = mutableListOf<Candidate>()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw IllegalStateException("Trakt watched failed (HTTP ${response.code})")
+                }
+                val arr = org.json.JSONArray(response.body?.string().orEmpty().ifBlank { "[]" })
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    val show = item.optJSONObject("show") ?: continue
+                    val imdb = show.optJSONObject("ids")?.optString("imdb")
+                        ?.takeIf { it.startsWith("tt") } ?: continue
+                    val lastMs = runCatching {
+                        java.time.Instant.parse(item.optString("last_watched_at")).toEpochMilli()
+                    }.getOrDefault(0L)
+                    val watched = mutableSetOf<Pair<Int, Int>>()
+                    val seasons = item.optJSONArray("seasons")
+                    if (seasons != null) for (s in 0 until seasons.length()) {
+                        val season = seasons.optJSONObject(s) ?: continue
+                        val sNum = season.optInt("number")
+                        if (sNum == 0) continue
+                        val eps = season.optJSONArray("episodes")
+                        if (eps != null) for (e in 0 until eps.length()) {
+                            val ep = eps.optJSONObject(e) ?: continue
+                            watched += sNum to ep.optInt("number")
+                        }
+                    }
+                    if (watched.isNotEmpty()) {
+                        candidates += Candidate(imdb, show.optString("title"), watched, lastMs)
+                    }
+                }
+            }
+            val out = mutableListOf<UpNextEntry>()
+            for (c in candidates.sortedByDescending { it.lastMs }.take(limit)) {
+                val next = runCatching { nextAiredEpisode(accessToken, c.imdb, c.watched) }
+                    .getOrNull() ?: continue
+                val last = c.watched.maxWith(compareBy({ it.first }, { it.second }))
+                out += UpNextEntry(
+                    imdbId = c.imdb, title = c.title,
+                    lastSeason = last.first, lastEpisode = last.second,
+                    nextSeason = next.season, nextEpisode = next.episode,
+                    nextTitle = next.title,
+                    watchedCount = c.watched.size, airedCount = next.airedTotal,
+                    lastWatchedAtMs = c.lastMs
+                )
+            }
+            out
+        }
+
+    /** First aired episode (season >= 1) not in [watched], plus the aired total. */
+    private fun nextAiredEpisode(
+        accessToken: String, imdb: String, watched: Set<Pair<Int, Int>>
+    ): NextEp? {
+        val request = authed(accessToken)
+            .url("$API_BASE/shows/$imdb/seasons?extended=episodes").get().build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val arr = org.json.JSONArray(response.body?.string().orEmpty().ifBlank { "[]" })
+            var aired = 0
+            var found: NextEp? = null
+            for (s in 0 until arr.length()) {
+                val season = arr.optJSONObject(s) ?: continue
+                val sNum = season.optInt("number")
+                if (sNum == 0) continue
+                val eps = season.optJSONArray("episodes") ?: continue
+                for (e in 0 until eps.length()) {
+                    val ep = eps.optJSONObject(e) ?: continue
+                    if (ep.optString("first_aired").isBlank()) continue
+                    aired++
+                    val key = sNum to ep.optInt("number")
+                    if (found == null && key !in watched) {
+                        found = NextEp(
+                            key.first, key.second,
+                            ep.optString("title").takeIf { it.isNotBlank() }, 0
+                        )
+                    }
+                }
+            }
+            val f = found ?: return null
+            return NextEp(f.season, f.episode, f.title, aired)
+        }
+    }
+
     private fun base64Url(bytes: ByteArray): String =
         java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
 }

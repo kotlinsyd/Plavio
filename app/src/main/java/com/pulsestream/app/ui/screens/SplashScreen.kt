@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pulsestream.app.ui.components.GlowBackground
+import com.pulsestream.app.ui.components.OrbitDots
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
@@ -77,7 +78,7 @@ private fun phase(t: Float, startMs: Int, durMs: Int): Float =
  * quick to enjoy: wider letter stagger, softer drops, later tagline.)
  */
 @Composable
-fun SplashScreen(onDone: () -> Unit) {
+fun SplashScreen(feedReady: Boolean, onDone: () -> Unit) {
     var started by remember { mutableStateOf(false) }
     var wordWidthPx by remember { mutableStateOf(0f) }
     val density = LocalDensity.current
@@ -86,10 +87,18 @@ fun SplashScreen(onDone: () -> Unit) {
         animationSpec = tween(durationMillis = SPLASH_TOTAL_MS),
         label = "splashClock"
     )
+    var animDone by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         started = true
         delay(SPLASH_TOTAL_MS.toLong() + 120L)
-        onDone()
+        animDone = true
+    }
+    // Owner's order 2026-10-24: the animation is the minimum stay. If
+    // the home feed is still loading, the splash waits here (orbit
+    // spinning under the tagline); if the feed is already loaded it
+    // leaves right as the animation ends.
+    LaunchedEffect(animDone, feedReady) {
+        if (animDone && feedReady) onDone()
     }
 
     GlowBackground {
@@ -156,6 +165,11 @@ fun SplashScreen(onDone: () -> Unit) {
                 fontWeight = FontWeight.Normal,
                 modifier = Modifier.alpha(tagT)
             )
+            Spacer(Modifier.height(18.dp))
+            // The signature orbit (owner's order 2026-10-24): part of
+            // the startup now, spinning under the tagline while the
+            // splash waits for the home feed.
+            OrbitDots(modifier = Modifier.size(40.dp).alpha(tagT))
         }
     }
 }

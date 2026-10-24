@@ -35,6 +35,15 @@ fun liveResourceType(metaType: String, catalogType: String): String =
 /** Only direct HTTP(S) URLs are immediately playable as Live streams. */
 fun isPlayableLiveStreamUrl(url: String): Boolean = url.toHttpUrlOrNull() != null
 
+/**
+ * Google Drive's download host ignores byte-range requests (proven by
+ * probe 2026-10-23), so a player cannot seek in these streams and large
+ * files stall instead of playing. Stream cards badge them so the user
+ * can pick another source first.
+ */
+fun isUnseekableStreamUrl(url: String): Boolean =
+    url.toHttpUrlOrNull()?.host.equals("video-downloads.googleusercontent.com", ignoreCase = true)
+
 /** Keep provider/network exception details (which may contain URLs) out of the UI. */
 fun liveResolutionFailureMessage(channelName: String): String =
     "Couldn't load \"$channelName\". The source may be unavailable; please retry."

@@ -10,6 +10,10 @@ class StremioApi {
 
 
     companion object {
+        /** Host of the locked house addon — the only host that ever gets the gate key. */
+        const val LOCKED_ADDON_HOST = "addon.plavio.site"
+        const val GATE_HEADER = "x-plavio-key"
+
         /**
          * Normalizes user input into an addon base URL:
          * accepts a full manifest URL or a bare host, strips /manifest.json and trailing slashes.
@@ -41,10 +45,20 @@ class StremioApi {
         val started = System.nanoTime()
         val host = url.toHttpUrlOrNull()?.host ?: "unknown"
         SourceDiagnostics.record(host, "loading", 0)
+        val headers = buildMap {
+            put("User-Agent", "Plavio/${BuildConfig.VERSION_NAME}")
+            put("Accept", "application/json")
+            // Locked house addon (owner's order 2026-10-24): addon.plavio.site
+            // serves ONLY this app, so every request to that host carries the
+            // gate key. No other host ever sees it.
+            if (host == LOCKED_ADDON_HOST) {
+                put(GATE_HEADER, BuildConfig.PLAVIO_GATE_KEY)
+            }
+        }
         return try {
             BoundedHttp.get(
                 url = url,
-                headers = mapOf("User-Agent" to "Plavio/${BuildConfig.VERSION_NAME}", "Accept" to "application/json")
+                headers = headers
             ).also {
                 SourceDiagnostics.record(host, "succeeded", (System.nanoTime() - started) / 1_000_000)
             }

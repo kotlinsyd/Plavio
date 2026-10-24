@@ -171,7 +171,13 @@ object StremioParser {
             poster = preview.poster, background = preview.background, logo = preview.logo,
             description = preview.description, releaseInfo = preview.releaseInfo,
             imdbRating = preview.imdbRating, genres = preview.genres, videos = videos,
-            trailerStreams = parseTrailers(meta), cast = parseCast(meta)
+            trailerStreams = parseTrailers(meta), cast = parseCast(meta),
+            runtime = meta.str("runtime"),
+            status = meta.str("status"),
+            certification = meta.str("certification") ?: meta.str("contentRating")
+                ?: meta.str("mpaaRating"),
+            country = meta.str("country") ?: meta.str("originCountry"),
+            network = meta.str("network") ?: meta.strList("networks").firstOrNull()
         )
     }
 

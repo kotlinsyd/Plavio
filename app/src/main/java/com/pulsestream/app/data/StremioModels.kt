@@ -96,7 +96,13 @@ data class MetaDetail(
     /** YouTube trailers (PlavioMeta `trailerStreams`); empty when the addon provides none. */
     val trailerStreams: List<TrailerStream> = emptyList(),
     /** Top-billed cast (PlavioMeta; names only in keyless/Cinemeta mode). */
-    val cast: List<CastMember> = emptyList()
+    val cast: List<CastMember> = emptyList(),
+    /** Extra facts for the Show Details tiles — present only when the meta addon provides them. */
+    val runtime: String? = null,
+    val status: String? = null,
+    val certification: String? = null,
+    val country: String? = null,
+    val network: String? = null
 )
 
 data class StreamItem(

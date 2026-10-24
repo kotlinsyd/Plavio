@@ -61,6 +61,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.PlayArrow
@@ -145,6 +146,7 @@ import com.pulsestream.app.ui.screens.CatalogScreen
 import com.pulsestream.app.ui.screens.DetailScreen
 import com.pulsestream.app.ui.screens.FeedbackScreen
 import com.pulsestream.app.ui.screens.DownloadsScreen
+import com.pulsestream.app.ui.screens.LibraryScreen
 import com.pulsestream.app.ui.screens.HomeCatalogsScreen
 import com.pulsestream.app.ui.screens.PlaybackSettingsScreen
 import com.pulsestream.app.ui.screens.ActorScreen
@@ -576,9 +578,8 @@ private fun DockItem(
 @Composable
 private fun appTabs() = listOf(
     Tab(Routes.HOME, stringResource(R.string.nav_home), Icons.Filled.Home),
-    Tab(Routes.LIVE, stringResource(R.string.nav_live), Icons.Filled.LiveTv),
+    Tab(Routes.LIBRARY, stringResource(R.string.nav_library), Icons.Filled.MenuBook),
     Tab(Routes.SEARCH, stringResource(R.string.nav_search), Icons.Filled.Search),
-    Tab(Routes.DOWNLOADS, stringResource(R.string.nav_downloads), Icons.Filled.Download),
     Tab(Routes.SETTINGS, stringResource(R.string.nav_settings), Icons.Filled.Settings)
 )
 
@@ -920,7 +921,10 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                                 val selected =
                                     currentDestination?.hierarchy?.any { it.route == tab.route } == true
                                 val isHome = tab.route == Routes.HOME
-                                // All five tabs stay, always (v0.12.7):
+                                // All four tabs stay, always (v0.12.7;
+                                // dock cut to four in v0.12.28 — Live moved
+                                // to a Home top-right pill and Downloads
+                                // into Settings, owner's orders 2026-10-24):
                                 // the shrink only eats the names — no tab
                                 // ever melts away or folds into a pill.
                                 DockItem(
@@ -1058,16 +1062,54 @@ private fun PulseNavGraph(
         }
     }
 
+    // Shared downloaded-file playback (Downloads screen + Library
+    // Downloads section): same file check, same local player route.
+    val playDownloadedFile: (String, String) -> Unit = { filePath, title ->
+        val file = java.io.File(filePath)
+        if (!file.exists() || !file.canRead()) {
+            android.widget.Toast.makeText(
+                appContext,
+                "Downloaded file not found \u2014 it may have been deleted.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        } else {
+            playRequest(
+                PlaybackRequest(
+                    streamUrl = "file://$filePath",
+                    title = title,
+                    poster = null,
+                    videoId = "download_${filePath.hashCode()}",
+                    isMovie = true
+                )
+            )
+        }
+    }
     NavHost(navController = navController, startDestination = Routes.SPLASH) {
         composable(Routes.SPLASH) {
             // Warm the home catalog cache while the splash animation
-            // plays — by the time Home appears, content is ready.
-            // Fire-and-forget: never blocks or extends the animation.
+            // plays. The splash leaves once the animation is done AND
+            // the feed is ready — but a cached feed counts as ready
+            // (owner's fix 2026-10-24): Home renders cached rows
+            // instantly and refreshes in the background, so a warm
+            // start never waits on the network. Only a truly empty
+            // cache waits for the refresh; 8s cap so a dead network
+            // can never trap the user on the splash.
+            var feedReady by remember { mutableStateOf(false) }
             LaunchedEffect(Unit) {
-                launch { runCatching { repository.refreshCatalogRows() } }
+                launch {
+                    if (runCatching { repository.hasCachedHomeRows() }
+                            .getOrDefault(false)
+                    ) {
+                        feedReady = true
+                    }
+                    runCatching { repository.refreshCatalogRows() }
+                    feedReady = true
+                }
                 launch { runCatching { repository.pruneOversizedCache() } }
+                launch { delay(8000); feedReady = true }
             }
             SplashScreen(
+                feedReady = feedReady,
                 onDone = {
                     // Welcome/onboarding guide REMOVED (owner's order
                     // 2026-10-22): a fresh install goes straight to
@@ -1113,6 +1155,7 @@ private fun PulseNavGraph(
                     )
                 },
                 onGoToDownloads = { navController.navigate(Routes.DOWNLOADS) },
+                onGoToLive = { navController.navigate(Routes.LIVE) },
             )
         }
         composable(Routes.LIVE) {
@@ -1151,6 +1194,23 @@ private fun PulseNavGraph(
                 onOpenDetail = { addonId, type, metaId ->
                     openResolvedDetail(addonId, type, metaId)
                 }
+            )
+        }
+        composable(Routes.LIBRARY) {
+            LibraryScreen(
+                repository = repository,
+                listsRepository = listsRepository,
+                onOpenDetail = { addonId, type, metaId ->
+                    openResolvedDetail(addonId, type, metaId)
+                },
+                onOpenList = { listId ->
+                    navController.navigate(Routes.listDetail(listId))
+                },
+                onGoToWatchlist = { navController.navigate(Routes.WATCHLIST) },
+                onGoToLists = { navController.navigate(Routes.LISTS) },
+                onGoToDownloads = { navController.navigate(Routes.DOWNLOADS) },
+                onPlayDownload = playDownloadedFile,
+                onConnect = { navController.navigate(Routes.INTEGRATIONS) }
             )
         }
         composable(Routes.LISTS) {
@@ -1208,7 +1268,8 @@ private fun PulseNavGraph(
                 onGoToAbout = { navController.navigate(Routes.ABOUT) },
                 onGoToFeedback = { navController.navigate(Routes.FEEDBACK) },
                 onGoToAccount = { navController.navigate(Routes.ACCOUNT) },
-                onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) }
+                onGoToIntegrations = { navController.navigate(Routes.INTEGRATIONS) },
+                onGoToDownloads = { navController.navigate(Routes.DOWNLOADS) }
             )
         }
         composable(Routes.INTEGRATIONS) {
@@ -1263,26 +1324,7 @@ private fun PulseNavGraph(
         composable(Routes.DOWNLOADS) {
             DownloadsScreen(
                 onBack = { navController.popBackStack() },
-                onPlayFile = { filePath, title ->
-                    val file = java.io.File(filePath)
-                    if (!file.exists() || !file.canRead()) {
-                        android.widget.Toast.makeText(
-                            appContext,
-                            "Downloaded file not found \u2014 it may have been deleted.",
-                            android.widget.Toast.LENGTH_LONG
-                        ).show()
-                    } else {
-                        playRequest(
-                            PlaybackRequest(
-                                streamUrl = "file://$filePath",
-                                title = title,
-                                poster = null,
-                                videoId = "download_${filePath.hashCode()}",
-                                isMovie = true
-                            )
-                        )
-                    }
-                }
+                onPlayFile = playDownloadedFile
             )
         }
         composable(Routes.LICENSES) {

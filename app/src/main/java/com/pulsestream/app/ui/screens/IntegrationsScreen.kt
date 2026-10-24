@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -31,7 +32,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +48,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.StreamRepository
+import kotlinx.coroutines.launch
 import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.theme.LocalPalette
@@ -232,6 +236,10 @@ fun IntegrationsScreen(
 
             item(key = "trakt_simkl") {
                 TraktSimklSection(settings = settings)
+            }
+
+            item(key = "library_sync") {
+                LibrarySyncRow(repository = repository)
             }
 
             item(key = "note") {
@@ -516,5 +524,64 @@ private fun ApiKeyDialog(
                 Text("Cancel", color = TextSecondary)
             }
         }
+    )
+}
+
+/**
+ * Library sync row (issue #3): keeps the in-app library in sync with the
+ * linked Trakt watchlist / Simkl library. Manual "Sync" tap, plus a quiet
+ * auto-sync when this screen opens and the last run is over 15 minutes old.
+ */
+@Composable
+private fun LibrarySyncRow(repository: StreamRepository) {
+    val settings = repository.settings
+    val scope = rememberCoroutineScope()
+    var tick by remember { mutableIntStateOf(0) }
+    var busy by remember { mutableStateOf(false) }
+    val linked = remember(tick) { repository.librarySyncLinked() }
+    val lastResult = remember(tick) { settings.librarySyncLastResult }
+
+    fun runSync() {
+        if (busy || !linked) return
+        busy = true
+        scope.launch {
+            runCatching { repository.syncLibraryWithServices() }
+            busy = false
+            tick++
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (linked && System.currentTimeMillis() - settings.librarySyncLastAt > 15 * 60_000L) {
+            runSync()
+        }
+    }
+
+    SettingsStaticRow(
+        icon = Icons.Filled.Sync,
+        title = "Library sync",
+        subtitle = when {
+            !linked -> "Link Trakt or Simkl above to sync your library"
+            busy -> "Syncing…"
+            lastResult.isNotBlank() -> lastResult
+            else -> "Keep this library in sync with Trakt and Simkl"
+        },
+        trailing = {
+            if (linked) {
+                Text(
+                    if (busy) "…" else "Sync",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = LocalPalette.current.accent
+                )
+            } else {
+                Icon(
+                    Icons.Filled.ChevronRight,
+                    contentDescription = null,
+                    tint = TextSecondary
+                )
+            }
+        },
+        onClick = { runSync() }
     )
 }

@@ -11,6 +11,7 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material3.*
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -93,7 +94,7 @@ fun BackupScreen(repository: StreamRepository, onBack: () -> Unit) {
                     Icon(Icons.Filled.FileDownload, contentDescription = null); Spacer(Modifier.width(10.dp)); Text("Import backup")
                 }
                 Spacer(Modifier.height(20.dp))
-                if (busy) CircularProgressIndicator(color = palette.accent)
+                if (busy) OrbitDots(modifier = Modifier.size(36.dp))
                 status?.let { (ok, msg) ->
                     Spacer(Modifier.height(8.dp)); Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(if (ok) Icons.Filled.CheckCircle else Icons.Filled.Error, contentDescription = null,

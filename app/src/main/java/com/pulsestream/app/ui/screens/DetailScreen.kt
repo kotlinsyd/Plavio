@@ -12,9 +12,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.Card
+import com.pulsestream.app.ui.components.OrbitDots
+import com.pulsestream.app.ui.components.ShimmerPoster
 import androidx.compose.material3.CardDefaults
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -68,6 +71,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
@@ -88,6 +92,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pulsestream.app.ui.components.AddToListSheet
 import com.pulsestream.app.ui.components.PlayButton
+import com.pulsestream.app.ui.components.WatchedPill
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.data.MetaDetail
 import com.pulsestream.app.data.PlaybackRequest
@@ -142,7 +147,7 @@ sealed interface MetaUiState {
 sealed interface StreamsUiState {
     data object Idle : StreamsUiState
     data object Loading : StreamsUiState
-    data class Content(val streams: List<StreamItem>, val subtitles: List<Subtitle>) : StreamsUiState
+    data class Content(val streams: List<StreamItem>, val subtitles: List<Subtitle>, val loadingMore: Boolean = false) : StreamsUiState
     data class Error(val message: String) : StreamsUiState
 }
 
@@ -271,7 +276,7 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
                 repo.streamResultsFlow(type, videoId).collect { result ->
                     if (result.streams.isNotEmpty()) {
                         gotAny = true
-                        streamsState = StreamsUiState.Content(result.streams, result.subtitles)
+                        streamsState = StreamsUiState.Content(result.streams, result.subtitles, loadingMore = true)
                         maybeProbePick(result.streams)
                         if (pendingAutoPlay) {
                             pendingAutoPlay = false
@@ -291,13 +296,21 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
                     repo.streamResultsFlow(type, videoId).collect { result ->
                         if (result.streams.isNotEmpty()) {
                             gotAny = true
-                            streamsState = StreamsUiState.Content(result.streams, result.subtitles)
+                            streamsState = StreamsUiState.Content(result.streams, result.subtitles, loadingMore = true)
                             maybeProbePick(result.streams)
                             if (pendingAutoPlay) {
                                 pendingAutoPlay = false
                                 playBestOrFirst()
                             }
                         }
+                    }
+                }
+                if (gotAny) {
+                    // Collection is over: the Watch Now side-spinner stops,
+                    // whatever is on screen is the final list.
+                    val settled = streamsState as? StreamsUiState.Content
+                    if (settled != null && settled.loadingMore) {
+                        streamsState = settled.copy(loadingMore = false)
                     }
                 }
                 if (!gotAny) {
@@ -332,6 +345,9 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
             pickState = PickState.Probing
             val best = StreamProber.findBest(streams.filter { com.pulsestream.app.data.isPlayableLiveStreamUrl(it.url) }, isTv, cap)
             pickState = if (best != null) PickState.Found(best) else PickState.None
+            // Warm the winner's connection so Play starts without the
+            // DNS + TLS cost (shared pool — see PlaybackHttp).
+            if (best != null) com.pulsestream.app.data.PlaybackHttp.warmUp(best.url)
         }
     }
 
@@ -724,6 +740,7 @@ private fun DetailContent(
                 onLongClick = { fullPageSourceOpen = true },
                 enabled = canPlay,
                 isLoading = vm.streamsState is StreamsUiState.Loading,
+                loadingMore = (vm.streamsState as? StreamsUiState.Content)?.loadingMore == true,
                 text = playText,
                 resumeProgress = if (hasResume) resumeProgress else null,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).focusRequester(playButtonFocus)
@@ -842,11 +859,7 @@ private fun DetailContent(
                                     contentAlignment = Alignment.Center
                                 ) {
                                 if (resolving) {
-                                    CircularProgressIndicator(
-                                        color = Color.White,
-                                        modifier = Modifier.size(24.dp),
-                                        strokeWidth = 2.dp
-                                    )
+                                    OrbitDots(modifier = Modifier.size(26.dp))
                                 } else {
                                     Icon(
                                         Icons.Filled.PlayArrow,
@@ -960,14 +973,15 @@ private fun DetailContent(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
                     if (loadingRecs) {
-                        Box(
-                            Modifier.fillMaxWidth().height(160.dp),
-                            contentAlignment = Alignment.Center
+                        // Sample C (owner's pick 2026-10-24): shimmer
+                        // tiles while recommendations load — no spinner.
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            androidx.compose.material3.CircularProgressIndicator(
-                                color = LocalPalette.current.accent,
-                                modifier = Modifier.size(32.dp)
-                            )
+                            items(4) {
+                                ShimmerPoster(modifier = Modifier.size(94.dp, 140.dp))
+                            }
                         }
                     } else {
                         LazyRow(
@@ -1039,24 +1053,82 @@ private fun DetailContent(
             }
         }
         if (isSeries) {
-            item {
+            item(key = "seasons") {
                 Text("Seasons", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = TextPrimary, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(seasons, key = { it }) { season ->
-                        FilterChip(
-                            selected = vm.selectedSeason == season,
-                            onClick = { vm.selectSeason(season, meta) },
-                            label = { Text(if (season == 0) "Specials" else "S$season") },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = LocalPalette.current.accent.copy(alpha = 0.25f),
-                                selectedLabelColor = TextPrimary,
-                                containerColor = Color.White.copy(alpha = 0.06f),
-                                labelColor = TextSecondary
-                            )
-                        )
+                        val isSel = vm.selectedSeason == season
+                        val palette = LocalPalette.current
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.width(92.dp).clickable { vm.selectSeason(season, meta) }
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(2f / 3f)
+                                    .shadow(
+                                        if (isSel) 12.dp else 0.dp,
+                                        RoundedCornerShape(14.dp),
+                                        spotColor = palette.accent.copy(alpha = 0.55f),
+                                        ambientColor = palette.accent.copy(alpha = 0.55f)
+                                    )
+                                    .then(
+                                        if (isSel) Modifier.border(
+                                            2.dp,
+                                            Brush.linearGradient(listOf(palette.accent, palette.accent2)),
+                                            RoundedCornerShape(14.dp)
+                                        ) else Modifier.border(
+                                            1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(14.dp)
+                                        )
+                                    )
+                                    .clip(RoundedCornerShape(14.dp))
+                            ) {
+                                SafePosterImage(
+                                    model = meta.poster ?: meta.background,
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                Box(
+                                    Modifier.fillMaxSize().background(
+                                        Brush.verticalGradient(
+                                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f))
+                                        )
+                                    )
+                                )
+                                Text(
+                                    if (season == 0) "SPECIALS" else "SEASON $season",
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp,
+                                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 7.dp)
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .then(
+                                        if (isSel) Modifier.background(
+                                            Brush.horizontalGradient(listOf(palette.accent, palette.accent2)),
+                                            RoundedCornerShape(50)
+                                        ) else Modifier.background(
+                                            Color.White.copy(alpha = 0.06f), RoundedCornerShape(50)
+                                        )
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    if (season == 0) "Specials" else "Season $season",
+                                    color = if (isSel) Color(0xFF04140B) else TextSecondary,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1100,81 +1172,85 @@ private fun DetailContent(
                     }
                 }
             }
-            itemsIndexed(episodes, key = { index, video -> "${video.id}_$index" }) { _, video ->
-                val selected = vm.selectedVideo?.id == video.id
-                val episodeRevealed = video.id in revealedEpisodeIds
-                val hideDetails = BrowsingPrivacy.shouldHideEpisodeDetails(hideEpisodeDetails, episodeRevealed)
-                GlassCard(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
-                        .border(
-                            if (selected) 1.dp else 0.dp,
-                            if (selected) LocalPalette.current.accent else Color.Transparent,
-                            RoundedCornerShape(20.dp)
-                        ),
-                    onClick = { vm.selectEpisode(video) }
+            item(key = "episodes_rail") {
+                val watchedKeys by com.pulsestream.app.data.WatchedMarks.keys.collectAsState()
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier.size(72.dp, 48.dp).clip(RoundedCornerShape(8.dp))
-                                .background(Color.White.copy(alpha = 0.06f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (!hideDetails && video.thumbnail != null) {
-                                SafePosterImage(video.thumbnail, null, modifier = Modifier.fillMaxSize())
-                            } else {
-                                Text("S${video.season} · E${video.episode}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-                            }
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            if (hideDetails) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        "Episode details hidden",
-                                        color = TextSecondary,
-                                        style = MaterialTheme.typography.bodySmall,
+                    itemsIndexed(episodes, key = { index, video -> "${video.id}_$index" }) { _, video ->
+                        val selected = vm.selectedVideo?.id == video.id
+                        val episodeRevealed = video.id in revealedEpisodeIds
+                        val hideDetails = BrowsingPrivacy.shouldHideEpisodeDetails(hideEpisodeDetails, episodeRevealed)
+                        EpisodeCardA(
+                            video = video,
+                            selected = selected,
+                            hideDetails = hideDetails,
+                            isWatched = com.pulsestream.app.data.WatchedMarks.episodeKey(meta.id, video.season, video.episode) in watchedKeys,
+                            spoilerMode = hideEpisodeDetails,
+                            isTv = isTvDetail,
+                            onClick = { vm.selectEpisode(video) },
+                            onReveal = { revealedEpisodeIds = browsingPrivacy.setEpisodeRevealed(episodeShowKey, video.id, true) },
+                            onHide = { revealedEpisodeIds = browsingPrivacy.setEpisodeRevealed(episodeShowKey, video.id, false) }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+        // Show Details — glass fact tiles (owner's Sample A pick, 2026-10-24).
+        // Only facts the meta actually carries are shown.
+        val detailTiles = buildDetailTiles(meta)
+        if (detailTiles.size >= 2) {
+            item(key = "show_details") {
+                Column {
+                    Text(
+                        "Show Details",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    Column(
+                        Modifier.padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        detailTiles.chunked(3).forEach { rowTiles ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                rowTiles.forEach { (label, value) ->
+                                    Column(
                                         modifier = Modifier.weight(1f)
-                                    )
-                                    if (!isTvDetail) {
-                                        TextButton(
-                                            onClick = {
-                                                revealedEpisodeIds = browsingPrivacy.setEpisodeRevealed(episodeShowKey, video.id, true)
-                                            }
-                                        ) {
-                                            Text("Reveal")
-                                        }
-                                    }
-                                }
-                            } else {
-                                Text(
-                                    "${video.episode}. ${video.title}",
-                                    color = TextPrimary,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (!video.overview.isNullOrBlank()) {
-                                    Text(video.overview!!, color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                }
-                                if (!isTvDetail && hideEpisodeDetails) {
-                                    TextButton(
-                                        onClick = {
-                                            revealedEpisodeIds = browsingPrivacy.setEpisodeRevealed(episodeShowKey, video.id, false)
-                                        }
+                                            .liquidGlass(RoundedCornerShape(14.dp))
+                                            .padding(horizontal = 11.dp, vertical = 10.dp)
                                     ) {
-                                        Text("Hide details")
+                                        Text(
+                                            label.uppercase(),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextSecondary,
+                                            fontWeight = FontWeight.Bold,
+                                            letterSpacing = 1.2.sp,
+                                            maxLines = 1
+                                        )
+                                        Spacer(Modifier.height(3.dp))
+                                        Text(
+                                            value,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                 }
+                                repeat(3 - rowTiles.size) { Spacer(Modifier.weight(1f)) }
                             }
-                        }
-                        if (selected) {
-                            Icon(Icons.Filled.PlayArrow, null, tint = LocalPalette.current.accent)
                         }
                     }
+                    Spacer(Modifier.height(8.dp))
                 }
             }
         }
+
         // "More like this" + "More from <actor>" rows from PlavioMeta.
         // Quietly absent when the endpoint has nothing (e.g. keyless mode).
         vm.relatedState.forEach { section ->
@@ -1690,10 +1766,7 @@ private fun PickerCardBody(
                     Modifier.fillMaxWidth().padding(32.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(
-                        color = palette.accent,
-                        modifier = Modifier.size(32.dp)
-                    )
+                    OrbitDots(modifier = Modifier.size(34.dp))
                 }
             }
             errorMessage != null && streams.isEmpty() -> {
@@ -1893,7 +1966,7 @@ internal fun FullPageSourcePicker(
                 when {
                     loading && streams.isEmpty() -> item(key = "loading") {
                         Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = palette.accent, modifier = Modifier.size(32.dp))
+                            OrbitDots(modifier = Modifier.size(34.dp))
                         }
                     }
                     errorMessage != null && streams.isEmpty() -> item(key = "error") {
@@ -2010,5 +2083,172 @@ private suspend fun fetchTmdbRecommendations(
         recommendations
     } catch (e: Exception) {
         emptyList()
+    }
+}
+
+/** Facts for the Show Details tiles — only what the meta actually carries. */
+private fun buildDetailTiles(meta: MetaDetail): List<Pair<String, String>> {
+    val tiles = mutableListOf<Pair<String, String>>()
+    meta.status?.takeIf { it.isNotBlank() }?.let { tiles += "Status" to it }
+    // Series: a year range from episode air dates says more than the bare year.
+    val release = if (meta.type == "series" && meta.videos.isNotEmpty()) {
+        val years = meta.videos.mapNotNull { it.released?.take(4)?.toIntOrNull() }
+        if (years.isNotEmpty()) {
+            val lo = years.min()
+            val hi = years.max()
+            if (lo != hi) "$lo\u2013$hi" else meta.releaseInfo ?: lo.toString()
+        } else meta.releaseInfo
+    } else meta.releaseInfo
+    release?.takeIf { it.isNotBlank() }?.let { tiles += "Release" to it }
+    meta.certification?.takeIf { it.isNotBlank() }?.let { tiles += "Certification" to it }
+    meta.country?.takeIf { it.isNotBlank() }?.let { tiles += "Origin" to it }
+    meta.runtime?.takeIf { it.isNotBlank() }?.let { tiles += "Runtime" to it }
+    meta.network?.takeIf { it.isNotBlank() }?.let { tiles += "Network" to it }
+    meta.imdbRating?.takeIf { it.isNotBlank() }?.let { tiles += "IMDb" to it }
+    if (meta.genres.isNotEmpty()) tiles += "Genres" to meta.genres.take(2).joinToString(", ")
+    return tiles.take(6)
+}
+
+/** "2011-09-22T00:00:00.000Z" -> "Sep 22, 2011"; anything odd passes through short. */
+private fun formatEpisodeDate(released: String?): String {
+    if (released.isNullOrBlank()) return ""
+    val months = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    val parts = released.take(10).split("-")
+    if (parts.size == 3) {
+        val year = parts[0]
+        val month = parts[1].toIntOrNull()
+        val day = parts[2].toIntOrNull()
+        if (month != null && month in 1..12 && day != null) {
+            return "${months[month - 1]} $day, $year"
+        }
+    }
+    return released.take(10)
+}
+
+/**
+ * Sample A episode card (owner's pick, 2026-10-24): still on top with the
+ * S/E chip and the WATCHED pill, words below on glass. Tap selects the
+ * episode (same behavior as the old list rows).
+ */
+@Composable
+private fun EpisodeCardA(
+    video: Video,
+    selected: Boolean,
+    hideDetails: Boolean,
+    isWatched: Boolean,
+    spoilerMode: Boolean,
+    isTv: Boolean,
+    onClick: () -> Unit,
+    onReveal: () -> Unit,
+    onHide: () -> Unit
+) {
+    val palette = LocalPalette.current
+    Column(
+        modifier = Modifier
+            .width(272.dp)
+            .liquidGlass(RoundedCornerShape(18.dp))
+            .border(
+                if (selected) 1.5.dp else 0.5.dp,
+                if (selected) palette.accent else Color.White.copy(alpha = 0.10f),
+                RoundedCornerShape(18.dp)
+            )
+            .clickable(onClick = onClick)
+    ) {
+        Box(Modifier.fillMaxWidth().height(132.dp)) {
+            if (!hideDetails && video.thumbnail != null) {
+                SafePosterImage(video.thumbnail, null, Modifier.fillMaxSize())
+            } else {
+                Box(
+                    Modifier.fillMaxSize().background(
+                        Brush.linearGradient(listOf(Color(0xFF2A3448), Color(0xFF121826)))
+                    ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "S${video.season} \u00b7 E${video.episode}",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            Box(
+                Modifier.padding(9.dp)
+                    .background(Color(0xBF05080E), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    "S${video.season} \u00b7 E${video.episode}",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            if (isWatched && !hideDetails) {
+                WatchedPill(Modifier.align(Alignment.BottomStart).padding(9.dp))
+            }
+            if (selected) {
+                Box(
+                    Modifier.align(Alignment.TopEnd).padding(9.dp)
+                        .background(palette.accent, RoundedCornerShape(50))
+                        .padding(5.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        tint = Color(0xFF04140B),
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
+            }
+        }
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 11.dp)) {
+            if (hideDetails) {
+                Text(
+                    "Episode details hidden",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (!isTv) {
+                    TextButton(onClick = onReveal) { Text("Reveal") }
+                }
+            } else {
+                Text(
+                    "${video.episode}. ${video.title}",
+                    color = TextPrimary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (!video.overview.isNullOrBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        video.overview!!,
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        formatEpisodeDate(video.released),
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                    Spacer(Modifier.weight(1f))
+                    if (spoilerMode && !isTv) {
+                        Text(
+                            "Hide details",
+                            color = palette.accent,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.clickable(onClick = onHide)
+                        )
+                    }
+                }
+            }
+        }
     }
 }

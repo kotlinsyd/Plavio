@@ -16,8 +16,23 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 121
-        versionName = "0.12.20"
+        versionCode = 140
+        versionName = "0.12.31"
+        // Sentry DSN — a client ingest key (public by design, send-only).
+        // Passed at build time via -PSENTRY_DSN=... like the gate key.
+        buildConfigField(
+            "String",
+            "SENTRY_DSN",
+            "\"${providers.gradleProperty("SENTRY_DSN").orNull ?: ""}\""
+        )
+        // Locked-addon gate key — addon.plavio.site refuses every request
+        // without it, so the house addon works only inside this app.
+        // Passed at build time via -PPLAVIO_GATE_KEY=...; never committed.
+        buildConfigField(
+            "String",
+            "PLAVIO_GATE_KEY",
+            "\"${providers.gradleProperty("PLAVIO_GATE_KEY").orNull ?: ""}\""
+        )
     }
 
     // Publishing is explicit and must never silently use an unsigned/debug artifact.
@@ -103,8 +118,10 @@ dependencies {
     implementation(libs.media3.decoder)
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.exoplayer.dash)
-    // TEST: okhttp-datasource removed for offline build
+    implementation(libs.media3.datasource.okhttp)
     implementation(libs.okhttp)
+    // Sentry crash reports (owner's order 2026-10-23; not Google).
+    implementation("io.sentry:sentry-android:8.14.0")
     implementation(libs.coil.compose)
     implementation(libs.zxing.core)
     implementation(libs.nanohttpd)

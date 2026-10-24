@@ -9,6 +9,7 @@ object Routes {
     const val ONBOARDING = "onboarding"
     const val HOME = "home"
     const val LIVE = "live"
+    const val LIBRARY = "library"
     const val SEARCH = "search"
     const val WATCHLIST = "watchlist"
     const val LISTS = "lists"

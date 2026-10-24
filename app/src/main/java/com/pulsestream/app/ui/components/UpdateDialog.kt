@@ -1,6 +1,7 @@
 package com.pulsestream.app.ui.components
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -120,7 +122,7 @@ fun UpdateDialog(
                 }
                 Spacer(Modifier.height(8.dp))
                 if (downloading) {
-                    CircularProgressIndicator(color = LocalPalette.current.accent)
+                    OrbitDots(modifier = Modifier.size(36.dp))
                     Spacer(Modifier.height(8.dp))
                 }
                 if (error != null) {

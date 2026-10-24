@@ -35,10 +35,12 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.AlertDialog
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -275,6 +277,9 @@ fun AddonsScreen(
     val ordered = remember(addons) { addons.sortedBy { it.sortOrder } }
     val enabledCount = remember(addons) { addons.count { it.enabled } }
     val isTv = com.pulsestream.app.ui.tv.rememberIsTv()
+    val visibleAddons = addons
+    val visibleOrdered = ordered
+    val visibleEnabledCount = enabledCount
 
     GlowBackground {
         LazyColumn(
@@ -338,7 +343,7 @@ fun AddonsScreen(
                             IconButton(
                                 onClick = { selectionMode = true },
                                 modifier = Modifier.size(40.dp),
-                                enabled = addons.isNotEmpty()
+                                enabled = visibleAddons.isNotEmpty()
                             ) {
                                 Icon(
                                     Icons.Filled.Share,
@@ -350,9 +355,9 @@ fun AddonsScreen(
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        StatPill("$enabledCount enabled", LocalPalette.current.accent)
-                        StatPill("${addons.size} installed", TextSecondary)
-                        val starred = addons.count { it.starred }
+                        StatPill("$visibleEnabledCount enabled", LocalPalette.current.accent)
+                        StatPill("${visibleAddons.size} installed", TextSecondary)
+                        val starred = visibleAddons.count { it.starred }
                         if (starred > 0) StatPill("$starred starred", Color(0xFFFBBF24))
                     }
                 }
@@ -369,9 +374,9 @@ fun AddonsScreen(
             }
 
             item(key = "stats-card") {
-                val totalCatalogs = remember(addons) {
+                val totalCatalogs = remember(visibleAddons) {
                     // Estimate from addon types; actual catalog count comes from manifests
-                    addons.sumOf { addon ->
+                    visibleAddons.sumOf { addon ->
                         try {
                             val types = org.json.JSONArray(addon.types ?: "[]")
                             types.length() * 3 // rough estimate
@@ -386,7 +391,7 @@ fun AddonsScreen(
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
                         StatColumn(
-                            value = addons.size.toString(),
+                            value = visibleAddons.size.toString(),
                             label = "Addons"
                         )
                         Box(
@@ -396,7 +401,7 @@ fun AddonsScreen(
                                 .background(GlassBorder)
                         )
                         StatColumn(
-                            value = enabledCount.toString(),
+                            value = visibleEnabledCount.toString(),
                             label = "Active"
                         )
                         Box(
@@ -469,10 +474,7 @@ fun AddonsScreen(
                             )
                         ) {
                             if (installing) {
-                                CircularProgressIndicator(
-                                    color = LocalPalette.current.accent,
-                                    modifier = Modifier.size(20.dp)
-                                )
+                                OrbitDots(modifier = Modifier.size(24.dp))
                             } else {
                                 Text(
                                     if (urlInput.isBlank()) "Browse to Install" else "Install Addon",
@@ -492,7 +494,7 @@ fun AddonsScreen(
                 }
             }
 
-            if (ordered.isEmpty()) {
+            if (visibleOrdered.isEmpty()) {
                 item(key = "empty") {
                     EmptyState(
                         title = "No addons installed",
@@ -511,8 +513,8 @@ fun AddonsScreen(
                         modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
                     )
                 }
-                items(ordered, key = { it.id }) { addon ->
-                    val idx = ordered.indexOfFirst { it.id == addon.id }
+                items(visibleOrdered, key = { it.id }) { addon ->
+                    val idx = visibleOrdered.indexOfFirst { it.id == addon.id }
                     AddonCard(
                         addon = addon,
                         selectionMode = selectionMode,
@@ -530,10 +532,10 @@ fun AddonsScreen(
                         onRefresh = { vm.refreshAddon(addon) },
                         refreshing = addon.id in vm.refreshingIds,
                         refreshNote = vm.refreshNotes[addon.id],
-                        onUp = { vm.moveUp(addon, ordered) },
-                        onDown = { vm.moveDown(addon, ordered) },
+                        onUp = { vm.moveUp(addon, visibleOrdered) },
+                        onDown = { vm.moveDown(addon, visibleOrdered) },
                         canUp = idx > 0,
-                        canDown = idx < ordered.size - 1
+                        canDown = idx < visibleOrdered.size - 1
                     )
                 }
             }
@@ -541,7 +543,7 @@ fun AddonsScreen(
             // Bundle-share action bar (selection mode only).
             if (selectionMode) {
                 item(key = "share-bar") {
-                    val chosen = ordered.filter { it.id in selectedIds }
+                    val chosen = visibleOrdered.filter { it.id in selectedIds }
                     Surface(
                         onClick = {
                             if (chosen.isNotEmpty()) {
@@ -598,7 +600,7 @@ fun AddonsScreen(
             }
 
             item(key = "star-hint") {
-                if (addons.any { it.starred }) {
+                if (visibleAddons.any { it.starred }) {
                     Text(
                         "★ Starred addons are tried first for streams and autoplay.",
                         style = MaterialTheme.typography.labelSmall,
@@ -607,6 +609,7 @@ fun AddonsScreen(
                     )
                 }
             }
+
         }
     }
 
@@ -872,10 +875,7 @@ private fun AddonCard(
                     enabled = !refreshing
                 ) {
                     if (refreshing) {
-                        CircularProgressIndicator(
-                            color = palette.accent,
-                            modifier = Modifier.size(20.dp)
-                        )
+                        OrbitDots(modifier = Modifier.size(24.dp))
                     } else {
                         Icon(
                             Icons.Filled.Refresh,
@@ -1158,7 +1158,7 @@ private fun AddAddonDialog(
                 )
                 if (state is AddUiState.Adding) {
                     Spacer(Modifier.height(12.dp))
-                    DotsLoader()
+                    OrbitDots(modifier = Modifier.size(30.dp))
                 }
                 if (state is AddUiState.Error) {
                     Spacer(Modifier.height(8.dp))
@@ -1230,7 +1230,7 @@ private fun ImportBundleDialog(
                     )
                     if (state is AddUiState.Adding) {
                         Spacer(Modifier.height(12.dp))
-                        DotsLoader()
+                        OrbitDots(modifier = Modifier.size(30.dp))
                     }
                     if (state is AddUiState.Error) {
                         Spacer(Modifier.height(8.dp))

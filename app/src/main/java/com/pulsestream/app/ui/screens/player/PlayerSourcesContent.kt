@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -133,7 +134,7 @@ internal fun PlayerSourcesContent(
             item {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (loading) CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    if (loading) OrbitDots(modifier = Modifier.size(26.dp))
                     Text(if (loading) "Finding sources…" else "No sources loaded for this title.", color = TextSecondary)
                 }
             }

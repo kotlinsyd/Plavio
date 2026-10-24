@@ -616,6 +616,14 @@ fun StreamCard(
                 lineHeight = 24.sp,
                 modifier = Modifier.fillMaxWidth()
             )
+            if (!unresolvedTorrent && com.pulsestream.app.data.isUnseekableStreamUrl(stream.url)) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Seeking not supported by this host",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFF59E0B)
+                )
+            }
 
             // Bottom row: download button only (no URLs — user's order).
             if (onDownload != null) {
@@ -674,6 +682,9 @@ private fun CompactStreamCard(
             )
             if (unresolvedTorrent) {
                 Text("Torrent source · cached debrid link required", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+            }
+            if (!unresolvedTorrent && com.pulsestream.app.data.isUnseekableStreamUrl(stream.url)) {
+                Text("Seeking not supported by this host", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B))
             }
             // The "Playing" state stays as PLAIN TEXT only — no chip
             // background/border, no decoration on stream rows.

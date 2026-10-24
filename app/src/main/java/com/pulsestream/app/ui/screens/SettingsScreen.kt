@@ -1,6 +1,7 @@
 package com.pulsestream.app.ui.screens
 
 import androidx.compose.material3.OutlinedButton
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import android.provider.OpenableColumns
@@ -32,12 +33,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrightnessHigh
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Delete
@@ -128,12 +132,16 @@ fun SettingsScreen(
     onGoToAbout: () -> Unit = {},
     onGoToFeedback: () -> Unit = {},
     onGoToAccount: () -> Unit = {},
-    onGoToIntegrations: () -> Unit = {}
+    onGoToIntegrations: () -> Unit = {},
+    onGoToDownloads: () -> Unit = {}
 ) {
     val settings = repository.settings
     val context = LocalContext.current
-    var showDiagnostics by remember { mutableStateOf(false) }
+
     var telemetryEnabled by remember { mutableStateOf(com.pulsestream.app.data.AppStats.enabled(context)) }
+    var sentryEnabled by remember { mutableStateOf(repository.settings.sentryEnabled) }
+    var episodeNotifs by remember { mutableStateOf(settings.episodeNotifications) }
+    val notifPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     // ---- Sample F (v0.12.4): searchable compact root screen ----
     // The account card reads the same sync manager the Account screen
@@ -205,8 +213,18 @@ fun SettingsScreen(
                 compact = true
             )
         },
+        SettingsEntry(sectionContent, "Downloads",
+            "downloads offline files storage downloaded movies shows") {
+            SettingsNavRow(
+                icon = Icons.Filled.Download,
+                title = "Downloads",
+                subtitle = "Your downloaded movies and shows",
+                onClick = onGoToDownloads,
+                compact = true
+            )
+        },
         SettingsEntry(sectionContent, stringResource(R.string.settings_addons_title),
-            "addons manage extensions plugins install sources manifest") {
+            "addons manage extensions install sources manifest") {
             SettingsStaticRow(
                 icon = Icons.Filled.Extension,
                 title = stringResource(R.string.settings_addons_title),
@@ -257,13 +275,27 @@ fun SettingsScreen(
                 compact = true
             )
         },
-        SettingsEntry(sectionHelp, "Source health",
-            "source health diagnostics session status timing report providers") {
-            SettingsNavRow(
-                icon = Icons.Filled.Info,
-                title = "Source health",
-                subtitle = "Redacted status and timing for this session",
-                onClick = { showDiagnostics = true },
+        SettingsEntry(sectionContent, "New episode alerts",
+            "notifications new episode alerts series watchlist releases") {
+            SettingsToggleRow(
+                icon = Icons.Filled.Notifications,
+                title = "New episode alerts",
+                subtitle = "On by default. A few times a day Plavio quietly checks the series in your watchlist and notifies you when a new episode is out.",
+                checked = episodeNotifs,
+                onCheckedChange = { enabled ->
+                    settings.episodeNotifications = enabled
+                    episodeNotifs = enabled
+                    if (enabled) {
+                        com.pulsestream.app.data.notifications.EpisodeNotifications.ensureScheduled(context)
+                        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                            androidx.core.content.ContextCompat.checkSelfPermission(
+                                context, android.Manifest.permission.POST_NOTIFICATIONS
+                            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                        ) {
+                            notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                },
                 compact = true
             )
         },
@@ -277,6 +309,21 @@ fun SettingsScreen(
                 onCheckedChange = {
                     com.pulsestream.app.data.AppStats.setEnabled(context, it)
                     telemetryEnabled = it
+                },
+                compact = true
+            )
+        },
+        SettingsEntry(sectionHelp, "Crash reports",
+            "crash reports sentry bugs errors anonymous fix") {
+            SettingsToggleRow(
+                icon = Icons.Filled.BugReport,
+                title = "Crash reports",
+                subtitle = "On by default. If the app crashes, an anonymous report is sent so the bug can be fixed — no personal data, no Google.",
+                checked = sentryEnabled,
+                onCheckedChange = {
+                    settings.sentryEnabled = it
+                    com.pulsestream.app.data.CrashReports.apply(context, it)
+                    sentryEnabled = it
                 },
                 compact = true
             )
@@ -308,34 +355,6 @@ fun SettingsScreen(
             entry.title.lowercase().contains(normalizedQuery) ||
                 entry.searchText.contains(normalizedQuery)
         }
-
-    if (showDiagnostics) {
-        val entries by com.pulsestream.app.data.SourceDiagnostics.entries.collectAsState()
-        AlertDialog(
-            onDismissRequest = { showDiagnostics = false },
-            title = { Text("Source health") },
-            text = {
-                LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                    item { Text("This session only. Hashed source IDs, status and request time; no URLs, credentials or viewing history.") }
-                    if (entries.isEmpty()) item { Text("No source requests recorded yet.") }
-                    items(entries.reversed()) { entry ->
-                        Text("${entry.provider}: ${entry.outcome.replace('_', ' ')} · ${entry.durationMs} ms",
-                            modifier = Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Plavio source diagnostics",
-                        com.pulsestream.app.data.SourceDiagnostics.export()))
-                }) { Text("Copy safe report") }
-            },
-            dismissButton = {
-                TextButton(onClick = { com.pulsestream.app.data.SourceDiagnostics.clear(); showDiagnostics = false }) { Text("Clear & close") }
-            }
-        )
-    }
 
     GlowBackground {
         LazyColumn(
@@ -561,7 +580,7 @@ fun SimklPinDialog(
                         )
                     }
                     deviceData == null -> {
-                        CircularProgressIndicator(color = LocalPalette.current.accent)
+                        OrbitDots(modifier = Modifier.size(36.dp))
                         Spacer(Modifier.height(12.dp))
                         Text(
                             "Talking to Simkl…",
@@ -1007,11 +1026,7 @@ fun AppUpdaterCard() {
                 )
             ) {
                 if (checking) {
-                    CircularProgressIndicator(
-                        color = LocalPalette.current.accent,
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp
-                    )
+                    OrbitDots(modifier = Modifier.size(24.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Checking…")
                 } else {

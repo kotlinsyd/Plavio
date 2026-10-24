@@ -335,6 +335,11 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_AUTOPLAY, true)
         set(value) = prefs.edit().putBoolean(KEY_AUTOPLAY, value).apply()
 
+    /** Sentry crash reports (owner's order 2026-10-23): ON by default. */
+    var sentryEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SENTRY_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_SENTRY_ENABLED, value).apply()
+
     /** Automatically start the next episode when one finishes (series only). */
     var autoPlayNext: Boolean
         get() = prefs.getBoolean(KEY_AUTOPLAY_NEXT, true)
@@ -492,6 +497,27 @@ class SettingsStore(context: Context) {
             if (value == null) prefs.edit().remove(KEY_TRAKT_USERNAME).apply()
             else prefs.edit().putString(KEY_TRAKT_USERNAME, value).apply()
         }
+
+    // ---- Trakt/Simkl library sync ----
+
+    /**
+     * Keys ("type|imdbId") known to be in sync after the last successful
+     * library sync — the merge base that lets the next sync tell a local
+     * removal from a remote addition.
+     */
+    var librarySyncedKeys: Set<String>
+        get() = prefs.getStringSet(KEY_LIBRARY_SYNCED, emptySet()) ?: emptySet()
+        set(value) = prefs.edit().putStringSet(KEY_LIBRARY_SYNCED, value).apply()
+
+    /** Epoch millis of the last library sync attempt (0 = never). */
+    var librarySyncLastAt: Long
+        get() = prefs.getLong(KEY_LIBRARY_SYNC_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_LIBRARY_SYNC_AT, value).apply()
+
+    /** Short human result of the last library sync ("" = never ran). */
+    var librarySyncLastResult: String
+        get() = prefs.getString(KEY_LIBRARY_SYNC_RESULT, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_LIBRARY_SYNC_RESULT, value).apply()
 
     /**
      * User-chosen display name for the Account area (owner's order
@@ -802,6 +828,7 @@ class SettingsStore(context: Context) {
             "trakt_access_token", "trakt_refresh_token"
         )
         private const val KEY_AUTOPLAY = "autoplay"
+        private const val KEY_SENTRY_ENABLED = "sentry_enabled"
         private const val KEY_AUTOPLAY_NEXT = "autoplay_next_episode"
         private const val KEY_SHUFFLE_EPISODES = "shuffle_episodes"
         private const val KEY_PIP_ENABLED = "pip_enabled"
@@ -829,6 +856,9 @@ class SettingsStore(context: Context) {
         private const val KEY_SUBTITLE_LANGS = "subtitle_languages"
         private const val KEY_ACCENT = "accent_theme"
         private const val KEY_PROFILE_USER_NAME = "profile_user_name"
+        private const val KEY_LIBRARY_SYNCED = "library_synced_keys"
+        private const val KEY_LIBRARY_SYNC_AT = "library_sync_last_at"
+        private const val KEY_LIBRARY_SYNC_RESULT = "library_sync_last_result"
         private const val KEY_AMOLED = "amoled_black"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_PREINSTALL_PREFIX = "preinstall_done_"

@@ -15,6 +15,7 @@ import com.pulsestream.app.data.db.MIGRATION_1_2
 import com.pulsestream.app.data.db.MIGRATION_2_3
 import com.pulsestream.app.data.db.MIGRATION_3_4
 import com.pulsestream.app.data.db.MIGRATION_4_5
+import com.pulsestream.app.data.db.MIGRATION_11_12
 import com.pulsestream.app.data.db.MIGRATION_5_6
 import com.pulsestream.app.data.db.MIGRATION_6_7
 import com.pulsestream.app.data.db.MIGRATION_7_8
@@ -86,8 +87,44 @@ class PulseApp : Application(), ImageLoaderFactory {
         // stats server (open-source backend, no Google — his order
         // 2026-10-22). Fire-and-forget; never blocks startup.
         appScope.launch { com.pulsestream.app.data.AppStats.trackLaunch(this@PulseApp) }
-        // Quietly install the bundled addons (PlavioMeta + PlavioHD + Cinemeta + subtitles) on first launch.
+        // Sentry crash reports (his order 2026-10-23): ON by default with a
+        // Settings opt-out. Initialized on a background thread, off the
+        // launch path, and fully guarded — a Sentry failure can never stop
+        // the app from opening (v0.12.23 lesson: the build where Sentry
+        // first went live crashed on open before it could report anything).
+        appScope.launch { com.pulsestream.app.data.CrashReports.initIfEnabled(this@PulseApp, settings) }
+        // Quietly install the pre-installed addons (PlavioMeta + Cinemeta + subtitles) on first launch.
         appScope.launch { repository.ensurePreinstalledAddons() }
+        // The house addon is the LOCKED PlavioHD (addon.plavio.site):
+        // pre-installed ON; the public one is no longer pre-installed and
+        // its pre-installed row is removed (owner's orders 2026-10-24).
+        // Then the beginner bundle (all OFF by default).
+        appScope.launch { repository.ensureLockedAddon() }
+        appScope.launch { repository.removePreinstalledPublicHd() }
+        appScope.launch { repository.ensureBundledAddons() }
+        // Trakt/Simkl library sync on launch, at most every 6 hours, only
+        // when an account is linked (issue #3). Fire-and-forget.
+        appScope.launch {
+            val sync = com.pulsestream.app.data.LibrarySyncManager(db, settings)
+            if (sync.isLinked() &&
+                System.currentTimeMillis() - settings.librarySyncLastAt > 6 * 3600_000L
+            ) {
+                runCatching { sync.sync() }
+            }
+        }
+        // Keep the library in sync shortly after the user adds/removes a
+        // title (debounced inside the repository hook by the sync's own
+        // throttle: the manager no-ops when a sync ran in the last minute).
+        repository.onWatchlistChanged = {
+            appScope.launch {
+                val sync = com.pulsestream.app.data.LibrarySyncManager(db, settings)
+                if (sync.isLinked() &&
+                    System.currentTimeMillis() - settings.librarySyncLastAt > 60_000L
+                ) {
+                    runCatching { sync.sync() }
+                }
+            }
+        }
         // Fill in addon logos for installs from before logos were stored.
         appScope.launch { repository.backfillAddonLogos() }
         // Give pre-ordering addons distinct positions so rearrange works.
@@ -170,7 +207,7 @@ class PulseApp : Application(), ImageLoaderFactory {
 
     private fun buildDatabase(): AppDatabase =
         Room.databaseBuilder(this, AppDatabase::class.java, DB_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
             .build()
 
     /**

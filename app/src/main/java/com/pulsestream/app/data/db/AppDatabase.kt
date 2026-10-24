@@ -14,9 +14,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SubtitleCache::class,
         DownloadItem::class,
         CustomList::class,
-        CustomListItem::class
+        CustomListItem::class,
+        WatchedRecord::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -27,6 +28,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun subtitleCacheDao(): SubtitleCacheDao
     abstract fun downloadDao(): DownloadDao
     abstract fun customListDao(): CustomListDao
+    abstract fun watchedDao(): WatchedDao
 }
 
 /**
@@ -197,4 +199,11 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
 /** v10 → v11: normalize Room's exact schema and retain user list contents. */
 val MIGRATION_10_11 = object : Migration(10, 11) {
     override fun migrate(db: SupportSQLiteDatabase) = rebuildCustomListTables(db)
+}
+
+/** v11 → v12: watched-history table for the WATCHED pill (v0.12.26). */
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS watched (`key` TEXT NOT NULL, watchedAt INTEGER NOT NULL, PRIMARY KEY(`key`))")
+    }
 }

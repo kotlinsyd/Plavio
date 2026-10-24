@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Source
 import androidx.compose.material3.Button
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -185,10 +186,7 @@ fun OnboardingScreen(
                         when {
                             installing -> {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    CircularProgressIndicator(
-                                        color = LocalPalette.current.accent,
-                                        modifier = Modifier.size(24.dp)
-                                    )
+                                    OrbitDots(modifier = Modifier.size(26.dp))
                                     Spacer(Modifier.width(12.dp))
                                     Text("Installing PlavioMeta…", color = TextSecondary)
                                 }

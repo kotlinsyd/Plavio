@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -491,10 +492,7 @@ fun LiveScreen(
                                 )
                             }
                             if (busy) {
-                                CircularProgressIndicator(
-                                    color = LocalPalette.current.accent,
-                                    modifier = Modifier.padding(8.dp)
-                                )
+                                OrbitDots(modifier = Modifier.padding(8.dp).size(32.dp))
                             }
                         }
                         Spacer(Modifier.height(6.dp))
@@ -622,12 +620,7 @@ fun LiveScreen(
                             }
                         }
                         if (busy) {
-                            CircularProgressIndicator(
-                                color = LocalPalette.current.accent,
-                                modifier = Modifier
-                                    .align(Alignment.Center)
-                                    .padding(8.dp)
-                            )
+                            OrbitDots(modifier = Modifier.align(Alignment.Center).padding(8.dp).size(32.dp))
                         }
                     }
                 }

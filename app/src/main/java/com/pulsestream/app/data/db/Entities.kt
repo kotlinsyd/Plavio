@@ -339,3 +339,25 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads WHERE status IN ('QUEUED', 'DOWNLOADING', 'PAUSED') ORDER BY createdAt ASC")
     suspend fun getActive(): List<DownloadItem>
 }
+
+/** One row per watched movie / episode (drives the WATCHED pill). Added in DB v12. */
+@Entity(tableName = "watched")
+data class WatchedRecord(
+    @PrimaryKey val key: String,
+    val watchedAt: Long
+)
+
+@Dao
+interface WatchedDao {
+    @Query("SELECT `key` FROM watched")
+    fun observeKeys(): Flow<List<String>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(record: WatchedRecord)
+
+    @Query("SELECT * FROM watched ORDER BY watchedAt DESC")
+    suspend fun getAll(): List<WatchedRecord>
+
+    @Query("DELETE FROM watched")
+    suspend fun clearAll()
+}

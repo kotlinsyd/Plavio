@@ -83,6 +83,9 @@ class TraktManager(private val settings: SettingsStore) : ScrobbleProvider {
         }
     }
 
+    /** Valid access token for non-scrobble features (library sync). Null when logged out. */
+    suspend fun validAccessToken(): String? = validToken()
+
     // ---- Scrobble ----
 
     override suspend fun scrobbleStart(req: PlaybackRequest, posMs: Long, durMs: Long) =

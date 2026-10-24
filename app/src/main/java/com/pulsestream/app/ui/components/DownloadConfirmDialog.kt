@@ -63,10 +63,7 @@ fun DownloadConfirmDialog(
                 when {
                     probing -> {
                         Row {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp
-                            )
+                            OrbitDots(modifier = Modifier.size(22.dp))
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 "Checking file size…",

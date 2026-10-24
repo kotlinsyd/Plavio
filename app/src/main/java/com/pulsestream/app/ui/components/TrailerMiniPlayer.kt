@@ -215,11 +215,7 @@ fun MiniTrailerOverlay(
                     .size(44.dp)
             ) {
                 if (isBuffering) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        modifier = Modifier.size(22.dp),
-                        strokeWidth = 2.dp
-                    )
+                    OrbitDots(modifier = Modifier.size(26.dp))
                 } else {
                     Icon(
                         if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,

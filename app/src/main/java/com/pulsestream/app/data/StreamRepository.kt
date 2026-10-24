@@ -3,10 +3,10 @@ package com.pulsestream.app.data
 import com.pulsestream.app.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject
-
 import com.pulsestream.app.data.db.AppDatabase
 import com.pulsestream.app.data.db.CatalogCache
 import com.pulsestream.app.data.db.CustomList
+import com.pulsestream.app.data.db.WatchedRecord
 import com.pulsestream.app.data.db.CustomListItem
 import com.pulsestream.app.data.db.InstalledAddon
 import com.pulsestream.app.data.db.PlaybackState
@@ -56,6 +56,27 @@ class StreamRepository(
     val settings: SettingsStore
 ) {
     val addons: Flow<List<InstalledAddon>> = db.addonDao().observeAll()
+
+    /**
+     * Session cache of merged addon stream results, keyed by title. A
+     * reopen shows the cached list instantly while streamResultsFlow
+     * re-fetches and replaces it as fresh results land — entries live a
+     * few minutes, in memory only, and die with the app (his dead-link
+     * concern, 2026-10-24: the cache never blocks the refresh).
+     */
+    private val streamResultCache =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<Long, StreamResult>>()
+
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+        // Keep the process-wide watched set current for poster/episode pills.
+        repoScope.launch {
+            db.watchedDao().observeKeys().collect { keys ->
+                WatchedMarks.keys.value = keys.toSet()
+            }
+        }
+    }
     val continueWatching: Flow<List<PlaybackState>> = db.playbackDao().observeRecent()
     val watchlist: Flow<List<WatchlistItem>> = db.watchlistDao().observeAll()
 
@@ -433,6 +454,19 @@ class StreamRepository(
             }
         }
 
+    /**
+     * True when the catalog cache already holds Home rows (any age).
+     * The splash gate uses this: a cached feed is a ready feed — Home
+     * shows it instantly and refreshes in the background.
+     */
+    suspend fun hasCachedHomeRows(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            db.catalogCacheDao().getAll().any { it.addonId != "m3u" }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private suspend fun doRefreshCatalogRows(): List<CatalogRow> = withContext(Dispatchers.IO) {
         val installed = enabledAddons().filter { it.showOnHome }
         val successfulManifests = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -462,7 +496,15 @@ class StreamRepository(
                                     addonRequest { api.fetchCatalog(addon.baseUrl, catalog.type, catalog.id) }
                                 } catch (cancel: CancellationException) { throw cancel }
                                 catch (_: Exception) { null }
-                                if (items != null) authoritativeKeys.add(key)
+                                // Only a NON-EMPTY success is authoritative. A
+                                // successful-but-empty response can be a transient
+                                // upstream hiccup (cold start, rate limit answered
+                                // as 200-empty); treating it as truth permanently
+                                // evicted this catalog's titles from storage and
+                                // from search (owner bug, 2026-10-23). An empty
+                                // fetch keeps the last good row until real items
+                                // replace it.
+                                if (!items.isNullOrEmpty()) authoritativeKeys.add(key)
                                 items?.takeIf { it.isNotEmpty() }?.let {
                                     CatalogRow(addon.id, addon.name, addon.baseUrl, catalog.name,
                                         catalog.type, catalog.id, it)
@@ -477,8 +519,9 @@ class StreamRepository(
         val now = System.currentTimeMillis()
         val newRows = rows.associateBy { "${it.addonId}|${it.type}|${it.catalogId}" }
         val existingCache = db.catalogCacheDao().getAll()
-        // Preserve failures/offline cached values. Delete only keys proven obsolete
-        // by a successful manifest or successfully fetched empty catalog response.
+        // Preserve failures/offline cached values. Delete only keys proven
+        // obsolete by a successful manifest, or keys a non-empty fetch just
+        // replaced. An empty fetch never deletes (see above).
         for (old in existingCache) {
             if (old.addonId !in successfulManifests) continue
             val key = old.key
@@ -724,6 +767,41 @@ class StreamRepository(
         searchRemoteProgressive(query, type).last()
 
     /**
+     * Server-side search (Plavio backend /search): one call per type. The
+     * backend fans out to keyless sources with retries, merges them
+     * deterministically and caches only real results — so the same query
+     * returns the same answer for everyone, and no TMDB key is ever
+     * required. Returns null on any transport failure so [searchAll] can
+     * fall back to the per-addon fan-out; an answered response (even with
+     * zero metas) is a real answer, not a failure.
+     */
+    private suspend fun searchServer(query: String, type: String?): List<CachedMeta>? {
+        val types = if (type != null) listOf(type) else listOf("movie", "series")
+        return try {
+            withTimeoutOrNull(SERVER_SEARCH_TIMEOUT_MS) {
+                coroutineScope {
+                    types.map { t ->
+                        async {
+                            val url = "https://plaviohd.edon.workers.dev/search?q=" +
+                                java.net.URLEncoder.encode(query.trim(), "UTF-8") + "&type=" + t
+                            val text = BoundedHttp.get(url)
+                            StremioParser.parseCatalog(text, t).map { meta ->
+                                CachedMeta(
+                                    addonId = SERVER_SEARCH_ADDON_ID,
+                                    addonName = "Plavio Search",
+                                    baseUrl = "",
+                                    meta = meta.copy(type = t)
+                                )
+                            }
+                        }
+                    }.awaitAll().flatten()
+                }
+            }
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { null }
+    }
+
+    /**
      * Combined search: instant local-cache matches plus live addon results,
      * then de-duplicated across addons and RANKED (v0.12.0) — previously the
      * raw cache order surfaced obscure old titles first (e.g. "sultan"
@@ -740,8 +818,12 @@ class StreamRepository(
             }
             val local = search(query, type)
             val seen = local.map { it.addonId + it.meta.id }.toMutableSet()
-            // A remote failure must never wipe out local results.
-            val remote = try { searchRemote(query, type) } catch (cancel: CancellationException) { throw cancel } catch (_: Exception) { emptyList() }
+            // A remote failure must never wipe out local results. Server-side
+            // search first; the per-addon fan-out is the fallback for when
+            // the backend itself is unreachable.
+            val remote = try {
+                searchServer(query, type) ?: searchRemote(query, type)
+            } catch (cancel: CancellationException) { throw cancel } catch (_: Exception) { emptyList() }
             val merged = local + remote.filter { seen.add(it.addonId + it.meta.id) }
             rankSearchResults(merged, query)
         }
@@ -828,7 +910,10 @@ class StreamRepository(
         val cacheKey = normalizeSearchTitle(query)
         val now = System.currentTimeMillis()
         tmdbPopularityCache[cacheKey]?.let { (ts, hits) ->
-            if (now - ts < 10 * 60 * 1000L) return hits
+            // Failures/empties are cached only briefly — a 10-minute negative
+            // cache froze bad ranking after a single TMDB hiccup (2026-10-23).
+            val ttl = if (hits.isEmpty()) 60_000L else 10 * 60 * 1000L
+            if (now - ts < ttl) return hits
         }
         val hits = withTimeoutOrNull(2_500L) {
             TmdbClient.searchWithPopularity(key, query)
@@ -948,12 +1033,15 @@ class StreamRepository(
 
     private suspend fun cachedManifest(baseUrl: String): AddonManifest? {
         val now = System.currentTimeMillis()
+        val stale = manifestCache[baseUrl]?.second
         manifestCache[baseUrl]?.let { (ts, manifest) ->
             if (now - ts < MANIFEST_TTL_MS) return manifest
         }
         val manifest = try { addonRequest { api.fetchManifest(baseUrl) } }
         catch (cancel: CancellationException) { throw cancel }
-        catch (_: Exception) { return null }
+        // A failed refetch falls back to the stale manifest instead of
+        // silently dropping the provider everywhere (2026-10-23).
+        catch (_: Exception) { return stale }
         manifestCache[baseUrl] = now to manifest
         return manifest
     }
@@ -1102,6 +1190,14 @@ class StreamRepository(
         if (addons.isEmpty()) {
             send(StreamResult(emptyList(), emptyList()))
             return@channelFlow
+        }
+        // Session cache: reopening a title shows its last streams instantly
+        // while the fresh fetch below replaces them as it lands.
+        val cacheKey = "$type|$videoId|${preferredAddonId.orEmpty()}|$preserveHeaderVariants"
+        streamResultCache[cacheKey]?.let { (cachedAt, cached) ->
+            if (System.currentTimeMillis() - cachedAt < STREAM_RESULT_CACHE_TTL_MS) {
+                send(cached)
+            }
         }
         // Starred addons go first — in every emission, so their streams show
         // and autoplay before anyone else's.
@@ -1260,7 +1356,13 @@ class StreamRepository(
                 }
             }
         }
-        mutex.withLock { send(StreamResult(prioritize(accStreams.toList()), accSubs.toList())) }
+        val finalResult = mutex.withLock {
+            StreamResult(prioritize(accStreams.toList()), accSubs.toList())
+        }
+        if (finalResult.streams.isNotEmpty()) {
+            streamResultCache[cacheKey] = System.currentTimeMillis() to finalResult
+        }
+        send(finalResult)
     }.flowOn(Dispatchers.IO)
 
     suspend fun getStreams(baseUrl: String, type: String, videoId: String): StreamResult =
@@ -1288,6 +1390,19 @@ class StreamRepository(
         season: Int = 0,
         episode: Int = 0
     ) = withContext(Dispatchers.IO) {
+        // Watched pill: crossing 90% counts as watched (the same spirit as
+        // the scrobblers). Recorded before the early returns below, so
+        // finishing a title always lands here first.
+        if (durationMs > 0 && positionMs >= durationMs * 9 / 10) {
+            val watchedKey = if (season > 0 || episode > 0) {
+                WatchedMarks.episodeKey(imdbId ?: videoId.substringBefore(":"), season, episode)
+            } else {
+                WatchedMarks.movieKey(videoId)
+            }
+            runCatching {
+                db.watchedDao().upsert(WatchedRecord(watchedKey, System.currentTimeMillis()))
+            }
+        }
         // Don't clutter Continue Watching with barely-started items, and drop
         // entries the user effectively finished (less than 30s left).
         if (durationMs > 0 && durationMs - positionMs < 30_000) {
@@ -1313,6 +1428,13 @@ class StreamRepository(
     }
 
     // ---- Watchlist ----
+
+    /**
+     * Fired after any watchlist add/remove. PulseApp hooks this to the
+     * Trakt/Simkl library sync (issue #3); null in tests/previews.
+     */
+    @Volatile
+    var onWatchlistChanged: (() -> Unit)? = null
 
     fun observeWatchlistItem(key: String): Flow<WatchlistItem?> =
         db.watchlistDao().observeByKey(key)
@@ -1344,7 +1466,15 @@ class StreamRepository(
                 )
             }
         }
+        onWatchlistChanged?.invoke()
     }
+
+    /** True when a Trakt or Simkl account is linked (library sync, issue #3). */
+    fun librarySyncLinked(): Boolean = LibrarySyncManager(db, settings).isLinked()
+
+    /** Runs one Trakt/Simkl library sync now; returns the short result line. */
+    suspend fun syncLibraryWithServices(): String =
+        LibrarySyncManager(db, settings).sync().text
 
     // ---- Live TV: M3U playlists, favorites, recents, zap handoff ----
 
@@ -1660,9 +1790,11 @@ class StreamRepository(
      * (e.g. offline first launch) is retried on the next launch.
      */
     suspend fun ensurePreinstalledAddons() = withContext(Dispatchers.IO) {
+        // NOTE: no PlavioHD here — the house addon is the LOCKED
+        // addon.plavio.site (ensureLockedAddon()); the public hd.plavio.site
+        // is not pre-installed anymore (owner's order 2026-10-24).
         val targets = listOf(
             "https://plaviometa.vercel.app/manifest.json",
-            "https://hd.plavio.site/manifest.json",
             "https://v3-cinemeta.strem.io/manifest.json",
             "https://opensubtitles-v3.strem.io/manifest.json",
             "https://subsense.nepiraw.com/manifest.json"
@@ -1693,10 +1825,98 @@ class StreamRepository(
         }
     }
 
+    // ---- Locked house addon (owner's orders 2026-10-24) ----
+
+    /**
+     * The locked PlavioHD (addon.plavio.site) is the app's house addon:
+     * pre-installed and ON by default. Its server refuses every request
+     * that doesn't carry the app's gate key (see StremioApi), so it works
+     * only inside Plavio; configuration lives on its website, never in
+     * the app. Installed once per manifest id — after that the user's own
+     * toggle/delete rules; never force-fed again.
+     */
+    suspend fun ensureLockedAddon() = withContext(Dispatchers.IO) {
+        val url = "https://addon.plavio.site/manifest.json"
+        try {
+            val manifest = addonRequest { api.fetchManifest(StremioApi.normalizeBaseUrl(url)) }
+            val existing = db.addonDao().getAll().firstOrNull { it.id == manifest.id }
+            if (existing != null) {
+                settings.setPreinstallDone(manifest.id)
+                return@withContext
+            }
+            if (settings.isPreinstallDone(manifest.id)) return@withContext
+            addAddonFromUrl(url).onSuccess { addon ->
+                db.addonDao().upsert(addon.copy(preinstalled = true, enabled = true))
+                settings.setPreinstallDone(manifest.id)
+            }
+        } catch (_: Exception) {
+            // Offline or dead URL — try again next launch.
+        }
+    }
+
+    /**
+     * The public PlavioHD (hd.plavio.site) is no longer pre-installed —
+     * the locked addon replaces it, and two copies of the same addon are
+     * not needed (owner's order 2026-10-24). Removes ONLY the row the app
+     * itself pre-installed; a copy the user added by hand stays theirs.
+     * Idempotent.
+     */
+    suspend fun removePreinstalledPublicHd() = withContext(Dispatchers.IO) {
+        try {
+            val row = db.addonDao().getAll().firstOrNull {
+                it.preinstalled &&
+                    (it.id == "community.plaviohd" || it.baseUrl.contains("hd.plavio.site"))
+            } ?: return@withContext
+            removeAddon(row.id)
+        } catch (_: Exception) {
+            // Cleanup must never block startup.
+        }
+    }
+
+    // ---- Bundled addons (beginner-friendly, OFF by default) ----
+
+    /**
+     * Ships a small set of addons with the app for users who don't hunt
+     * manifest URLs (owner's order 2026-10-23). All start OFF — the house addon is the locked PlavioHD (ensureLockedAddon). Once
+     * installed it behaves exactly like a hand-added addon (toggle, edit,
+     * delete). Each is attempted once per manifest id — a user who deletes
+     * one is never force-fed it again. Pipe is bundled through its
+     * HTTPS-only configured link ({"st":"http"}): its torrent sources are
+     * excluded by the addon itself, matching the app's no-torrent policy.
+     */
+    suspend fun ensureBundledAddons() = withContext(Dispatchers.IO) {
+        val targets = listOf(
+            "https://hdhub.thevolecitor.qzz.io/manifest.json",
+            "https://pipe.boringways.workers.dev/eyJzdCI6Imh0dHAifQ/manifest.json",
+            "https://cncverse.dpdns.org/manifest.json",
+            "https://pengu.uk/manifest.json"
+        )
+        for (url in targets) {
+            try {
+                val baseUrl = StremioApi.normalizeBaseUrl(url)
+                val manifest = addonRequest { api.fetchManifest(baseUrl) }
+                val existing = db.addonDao().getAll().firstOrNull { it.id == manifest.id }
+                if (settings.isPreinstallDone(manifest.id)) continue
+                if (existing != null) {
+                    settings.setPreinstallDone(manifest.id)
+                    continue
+                }
+                addAddonFromUrl(url).onSuccess { addon ->
+                    db.addonDao().upsert(addon.copy(preinstalled = true, enabled = false))
+                    settings.setPreinstallDone(manifest.id)
+                }
+            } catch (_: Exception) {
+                // Offline or dead URL — try again next launch.
+            }
+        }
+    }
+
     companion object {
         private const val SUBTITLE_CACHE_TTL_MS = 6L * 3600L * 1000L
         /** Fail-fast budget per addon when resolving streams/subtitles. */
         private const val STREAM_FETCH_TIMEOUT_MS = 20000L
+        /** How long a cached stream list may be shown before it must be refreshed. */
+        private const val STREAM_RESULT_CACHE_TTL_MS = 5L * 60L * 1000L
         /**
          * Max bytes per cached catalog row — well under SQLite's ~2MB
          * CursorWindow limit, so a row can never poison reads again.
@@ -1706,6 +1926,10 @@ class StreamRepository(
         private const val MANIFEST_TTL_MS = 6L * 3600L * 1000L
         /** Hard ceiling for a whole remote-search pass so "Searching…" can't hang. */
         private const val REMOTE_SEARCH_PROVIDER_TIMEOUT_MS = 5_000L
+        /** Budget for the server-side search call (one request per type). */
+        private const val SERVER_SEARCH_TIMEOUT_MS = 12_000L
+        /** Synthetic addon id stamped on server-side search results. */
+        private const val SERVER_SEARCH_ADDON_ID = "plavio-server-search"
         /** Per-addon budget inside the sequential getMetaFromAny walk. */
         private const val META_FETCH_TIMEOUT_MS = 15_000L
         /** Freshness of cached M3U playlists (memory + disk). */

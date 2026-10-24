@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material3.Button
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
@@ -268,10 +269,7 @@ fun AccountScreen(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 if (busy) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp
-                                    )
+                                    OrbitDots(modifier = Modifier.size(24.dp))
                                     Spacer(Modifier.width(8.dp))
                                     Text("Signing in...")
                                 } else {
@@ -332,10 +330,7 @@ fun AccountScreen(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 if (syncing) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp
-                                    )
+                                    OrbitDots(modifier = Modifier.size(24.dp))
                                     Spacer(Modifier.width(8.dp))
                                     Text("Syncing...")
                                 } else {

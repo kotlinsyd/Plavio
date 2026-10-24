@@ -30,12 +30,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -86,6 +85,7 @@ import com.pulsestream.app.data.db.PlaybackState
 import com.pulsestream.app.ui.components.EmptyState
 import com.pulsestream.app.ui.components.ErrorState
 import com.pulsestream.app.ui.components.GlowBackground
+import com.pulsestream.app.ui.components.OrbitDots
 import com.pulsestream.app.data.CustomListsRepository
 import com.pulsestream.app.ui.components.AddToListSheet
 import com.pulsestream.app.ui.components.LoadingState
@@ -193,6 +193,7 @@ fun HomeScreen(
     onGoToLists: () -> Unit,
     onOpenCatalog: (row: CatalogRow) -> Unit,
     onGoToDownloads: () -> Unit = {},
+    onGoToLive: () -> Unit = {},
 ) {
     val vm: HomeViewModel = viewModel(factory = vmFactory { HomeViewModel(repository) })
     val watching by repository.continueWatching.collectAsState(initial = emptyList())
@@ -274,14 +275,16 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxSize(),
                         state = pullRefreshState,
                         indicator = {
-                            // The signature pulse line replaces the default refresh circle.
+                            // Refresh keeps the classic pulse dots
+                            // (owner's order 2026-10-24); the orbit
+                            // stays on every other loading surface.
                             if (state.refreshing || pullRefreshState.distanceFraction > 0f) {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.TopCenter)
                                         .padding(top = 18.dp)
                                 ) {
-                                    DotsLoader()
+                                    DotsLoader(modifier = Modifier.size(34.dp))
                                 }
                             }
                         }
@@ -447,55 +450,48 @@ fun HomeScreen(
                 }
             }
 
-            // Saved button, floating over the top end of the screen (it
-            // was the header row's only functional control): one button
-            // for Watchlist + My Lists (both serve the same purpose —
-            // saved titles). The glass circle keeps it readable over the
-            // hero poster it now floats on.
-            var savedMenuOpen by remember { mutableStateOf(false) }
-            Box(
+            // Top-right of Home: the Live pill alone now (the old
+            // floating Saved/bookmark button was removed 2026-10-24 —
+            // Watchlist + My Lists live in the Library tab).
+            Row(
                 Modifier
                     .align(Alignment.TopEnd)
-                    .padding(12.dp)
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                // Live pill (owner's order 2026-10-24): Live left the
+                // dock for the Library tab — it lives here now, at
+                // Home's top-right.
                 Box(
                     Modifier
-                        .size(42.dp)
-                        .liquidGlass(CircleShape),
+                        .height(42.dp)
+                        .liquidGlass(RoundedCornerShape(50))
+                        .clickable { onGoToLive() }
+                        .padding(horizontal = 14.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    IconButton(onClick = { savedMenuOpen = true }) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(7.dp)
+                                .background(Color(0xFFFF4D5E), CircleShape)
+                        )
+                        Spacer(Modifier.width(6.dp))
                         Icon(
-                            Icons.Filled.Bookmark,
-                            contentDescription = "Saved",
-                            tint = TextPrimary
+                            Icons.Filled.LiveTv,
+                            contentDescription = null,
+                            tint = TextPrimary,
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Live",
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold
                         )
                     }
-                }
-                DropdownMenu(
-                    expanded = savedMenuOpen,
-                    onDismissRequest = { savedMenuOpen = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Watchlist") },
-                        leadingIcon = {
-                            Icon(Icons.Filled.Bookmark, contentDescription = null)
-                        },
-                        onClick = {
-                            savedMenuOpen = false
-                            onGoToWatchlist()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("My Lists") },
-                        leadingIcon = {
-                            Icon(Icons.Filled.FormatListBulleted, contentDescription = null)
-                        },
-                        onClick = {
-                            savedMenuOpen = false
-                            onGoToLists()
-                        }
-                    )
                 }
             }
         }

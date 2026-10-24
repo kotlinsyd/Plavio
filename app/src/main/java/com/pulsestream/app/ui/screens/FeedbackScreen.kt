@@ -6,6 +6,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.*
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -162,11 +163,7 @@ fun FeedbackScreen(
                 shape = RoundedCornerShape(26.dp)
             ) {
                 if (sending) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    OrbitDots(modifier = Modifier.size(24.dp))
                 } else {
                     Text("Send", fontWeight = FontWeight.Bold)
                 }

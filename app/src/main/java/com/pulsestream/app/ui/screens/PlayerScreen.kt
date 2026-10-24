@@ -63,6 +63,7 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
+import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -1498,6 +1499,61 @@ fun PlayerScreen(
         }
     }
 
+    // VOD stall watchdog (owner's player round, 2026-10-23): a movie/episode
+    // source that never starts, or freezes mid-play with no position
+    // progress — hosts that ignore byte-range requests behave exactly like
+    // this — fails over to the next source instead of spinning forever.
+    // Bounded by the same generic failover cap as playback errors (3).
+    LaunchedEffect(player, currentRequest, isTv) {
+        if (currentRequest.isLive) return@LaunchedEffect
+        val watchedPlayer = player
+        val replacementAtStart = replaceGen.get()
+        var hasPlayed = watchedPlayer.isPlaying
+        var stallSinceMs: Long? = null
+        var lastPositionMs = -1L
+        var lastProgressAtMs = 0L
+        while (true) {
+            if (disposed.get() || watchedPlayer !== latestPlayer.value ||
+                currentRequest != latestRequest.value || replaceGen.get() != replacementAtStart
+            ) {
+                return@LaunchedEffect
+            }
+            hasPlayed = hasPlayed || watchedPlayer.isPlaying
+            val nowMs = System.nanoTime() / 1_000_000L
+            val posMs = runCatching { watchedPlayer.currentPosition }.getOrDefault(0L)
+            if (lastPositionMs < 0L || posMs > lastPositionMs + 1_000L) {
+                lastPositionMs = posMs
+                lastProgressAtMs = nowMs
+            }
+            val buffering = watchedPlayer.playbackState == Player.STATE_BUFFERING ||
+                watchedPlayer.playbackState == Player.STATE_IDLE
+            val progressed = nowMs - lastProgressAtMs < 3_000L
+            stallSinceMs = if (watchedPlayer.playWhenReady && buffering && !progressed) {
+                stallSinceMs ?: nowMs
+            } else null
+            val elapsedMs = stallSinceMs?.let { nowMs - it } ?: 0L
+            if (com.pulsestream.app.ui.screens.player.shouldFailoverStalledVod(
+                    isLive = false,
+                    playWhenReady = watchedPlayer.playWhenReady,
+                    hasEverPlayed = hasPlayed,
+                    isBuffering = buffering,
+                    positionProgressed = progressed,
+                    elapsedMs = elapsedMs
+                )) {
+                if (autoFailoverCount < 3) {
+                    autoFailoverCount++
+                    com.pulsestream.app.data.SourceDiagnostics.record("VOD playback", "stall_timeout", elapsedMs)
+                    failoverToNextSource?.invoke(autoFailoverCount)
+                } else {
+                    com.pulsestream.app.data.SourceDiagnostics.record("VOD playback", "fallback_exhausted", elapsedMs)
+                    playerError = "Stream stalled. Try Retry or choose another source."
+                }
+                return@LaunchedEffect
+            }
+            delay(500)
+        }
+    }
+
     fun playEpisode(video: Video) {
         // #9: never start episode work on disposed state (ghost audio).
         if (disposed.get()) return
@@ -2922,10 +2978,7 @@ fun PlayerScreen(
                     when {
                         subSearchLoading -> item {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(
-                                    color = LocalPalette.current.accent,
-                                    modifier = Modifier.size(28.dp)
-                                )
+                                OrbitDots(modifier = Modifier.size(30.dp))
                                 Spacer(Modifier.width(12.dp))
                                 Text("Searching subtitle addons…", color = TextSecondary)
                             }

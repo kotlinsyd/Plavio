@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -48,6 +49,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
@@ -57,6 +62,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.pulsestream.app.data.MetaPreview
 import androidx.compose.material3.Icon
@@ -203,6 +209,15 @@ fun PosterCard(
                 contentDescription = meta.name,
                 modifier = Modifier.fillMaxSize()
             )
+            // WATCHED pill for watched movies (owner's Sample B pick,
+            // 2026-10-24). Series posters stay clean \u2014 episodes carry
+            // their own pills on the detail page.
+            val watchedKeys by com.pulsestream.app.data.WatchedMarks.keys.collectAsState()
+            if (meta.type == "movie" &&
+                com.pulsestream.app.data.WatchedMarks.movieKey(meta.id) in watchedKeys
+            ) {
+                WatchedPill(Modifier.align(Alignment.BottomStart).padding(6.dp))
+            }
             // Poster only — no corner tag on channel cards.
         }
         Spacer(Modifier.height(6.dp))
@@ -403,6 +418,65 @@ fun SafePosterImage(
 
 
 /**
+ * Sample C (owner's pick 2026-10-24): the You May Like loading tile — a
+ * soft light sweep over a dark tile with two faint title bars, no
+ * spinner. Shown while TMDB recommendations load.
+ */
+@Composable
+fun ShimmerPoster(modifier: Modifier = Modifier) {
+    var widthPx by remember { mutableStateOf(0f) }
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val sweep by transition.animateFloat(
+        initialValue = -1f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1600, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "shimmerSweep"
+    )
+    Box(
+        modifier = modifier
+            .onSizeChanged { widthPx = it.width.toFloat() }
+            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(12.dp))
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .offset { IntOffset((sweep * widthPx).roundToInt(), 0) }
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            Color.Transparent,
+                            Color.White.copy(alpha = 0.10f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+        Column(
+            Modifier
+                .align(Alignment.BottomStart)
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                Modifier
+                    .width(52.dp)
+                    .height(9.dp)
+                    .background(Color.White.copy(alpha = 0.13f), RoundedCornerShape(99.dp))
+            )
+            Box(
+                Modifier
+                    .width(36.dp)
+                    .height(9.dp)
+                    .background(Color.White.copy(alpha = 0.13f), RoundedCornerShape(99.dp))
+            )
+        }
+    }
+}
+
+/**
  * Connecting-dots loading animation in the app's accent gradient: a wave of
  * light travels through dots linked by glowing segments. Used everywhere
  * loading happens: app launch, pull-to-refresh, search, and the player.
@@ -463,13 +537,101 @@ fun DotsLoader(
 @Composable
 fun DotsLoadingIndicator(message: String = "Loading…") {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        DotsLoader()
+        OrbitDots(modifier = Modifier.size(38.dp))
         Spacer(Modifier.height(14.dp))
         Text(
             message,
             color = TextSecondary,
             style = MaterialTheme.typography.bodyMedium
         )
+    }
+}
+
+/** Small glass "\u2713 WATCHED" pill (owner's Sample B pick, 2026-10-24). */
+@Composable
+fun WatchedPill(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .background(Color(0xC7050A12), RoundedCornerShape(50))
+            .border(1.dp, Color(0xFF3DDC97).copy(alpha = 0.55f), RoundedCornerShape(50))
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Filled.Check,
+            contentDescription = null,
+            tint = Color(0xFF3DDC97),
+            modifier = Modifier.size(10.dp)
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            "WATCHED",
+            color = Color(0xFF3DDC97),
+            fontSize = 9.sp,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 0.8.sp
+        )
+    }
+}
+
+/**
+ * The signature dots, circling (owner's B1 Orbit pick, 2026-10-24): a
+ * glowing head dot orbits an exact ring with four fading tail dots
+ * behind it, over a faint dotted ring \u2014 the refresh DotsLoader's
+ * family, in circle form. Geometry is computed on one true circle
+ * (design space 40 units, ring radius 13.5) so nothing wobbles.
+ */
+@Composable
+fun OrbitDots(modifier: Modifier = Modifier) {
+    val palette = LocalPalette.current
+    val reduced = com.pulsestream.app.data.rememberReducedMotion()
+    val rotation = if (reduced) 0f else {
+        val transition = rememberInfiniteTransition(label = "orbit")
+        val animated by transition.animateFloat(
+            initialValue = 0f, targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1350, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "orbitRotation"
+        )
+        animated
+    }
+    Canvas(modifier) {
+        val unit = size.minDimension / 40f
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val ringR = 13.5f * unit
+        fun pos(angleDeg: Float): Offset {
+            val rad = Math.toRadians(angleDeg.toDouble())
+            return Offset(
+                cx + ringR * Math.cos(rad).toFloat(),
+                cy + ringR * Math.sin(rad).toFloat()
+            )
+        }
+        // Faint dotted ring underneath (12 dots, every 30 degrees).
+        for (i in 0 until 12) {
+            drawCircle(
+                color = lerp(palette.accent, palette.accent2, i / 11f).copy(alpha = 0.22f),
+                radius = 1.4f * unit,
+                center = pos(i * 30f)
+            )
+        }
+        // Tail behind the head: evenly spaced on the same circle,
+        // shrinking and fading (B1's exact sample values).
+        val tailR = listOf(2.5f, 2.05f, 1.65f, 1.3f)
+        val tailA = listOf(0.75f, 0.55f, 0.38f, 0.24f)
+        for (i in 4 downTo 1) {
+            drawCircle(
+                color = lerp(palette.accent, palette.accent2, i / 4f).copy(alpha = tailA[i - 1]),
+                radius = tailR[i - 1] * unit,
+                center = pos(rotation - 35f * i)
+            )
+        }
+        // Head with its soft glow.
+        val head = pos(rotation)
+        drawCircle(color = palette.accent.copy(alpha = 0.28f), radius = 6f * unit, center = head)
+        drawCircle(color = palette.accent, radius = 3.1f * unit, center = head)
     }
 }
 
@@ -482,6 +644,7 @@ fun PlayButton(
     enabled: Boolean = true,
     text: String = "Play",
     isLoading: Boolean = false,
+    loadingMore: Boolean = false,
     onLongClick: (() -> Unit)? = null,
     resumeProgress: Float? = null
 ) {
@@ -511,11 +674,7 @@ fun PlayButton(
             contentAlignment = Alignment.Center
         ) {
             if (isLoading) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    modifier = Modifier.size(24.dp),
-                    color = Color.White,
-                    strokeWidth = 3.dp
-                )
+                OrbitDots(modifier = Modifier.size(28.dp))
             } else {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -560,6 +719,18 @@ fun PlayButton(
                     }
                 }
             }
+        }
+        if (loadingMore && !isLoading) {
+            // Streams are still arriving: the button is already playable,
+            // and our signature dots circle at its side while more come
+            // (owner's B1 Orbit pick, 2026-10-24 \u2014 replaces the plain
+            // little circle, same place at the button's right side).
+            OrbitDots(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 16.dp)
+                    .size(26.dp)
+            )
         }
     }
 }

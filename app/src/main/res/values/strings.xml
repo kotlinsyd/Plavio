@@ -6,6 +6,7 @@
     <!-- Bottom navigation -->
     <string name="nav_home">Home</string>
     <string name="nav_live">Live</string>
+    <string name="nav_library">Library</string>
     <string name="nav_search">Search</string>
     <string name="nav_downloads">Downloads</string>
     <string name="nav_settings">Settings</string>
