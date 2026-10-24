@@ -2,7 +2,7 @@
 
 🌐 **Website:** https://plavio.site
 
-A beautiful open-source streaming app for Android with a built-in player. Install addons to browse movies, series, and live TV. An account is optional; the app also offers optional cloud sync and opt-in telemetry.
+A free, open-source streaming app for Android with a built-in player. Install addons to browse movies, series, and live TV. An account is optional; the app also offers optional cloud sync and opt-in telemetry.
 
 > This source package targets Android mobile only; Android TV flavor builds are excluded.
 
