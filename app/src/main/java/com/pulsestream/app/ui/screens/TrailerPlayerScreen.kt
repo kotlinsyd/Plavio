@@ -427,7 +427,7 @@ private fun TrailerMetaDetails(
                 ).joinToString(" · ")
                 if (info.isNotBlank()) {
                     Text(
-                        text = info,
+                        text = com.pulsestream.app.ui.components.accentStarText(info, LocalPalette.current.accent),
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )

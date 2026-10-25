@@ -2,6 +2,7 @@ package com.pulsestream.app.ui.screens
 
 import androidx.compose.material3.OutlinedButton
 import com.pulsestream.app.ui.components.OrbitDots
+import com.pulsestream.app.ui.components.ProfileAvatarImage
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import android.provider.OpenableColumns
@@ -74,6 +75,9 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.material3.SwitchColors
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -102,6 +106,7 @@ import com.pulsestream.app.BuildConfig
 import com.pulsestream.app.R
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.cloud.GoogleDriveSyncManager
+import com.pulsestream.app.data.cloud.PlavioAccountManager
 import com.pulsestream.app.data.simkl.SimklApi
 import com.pulsestream.app.data.update.UpdateChecker
 import com.pulsestream.app.data.update.UpdateInfo
@@ -109,6 +114,7 @@ import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.components.UpdatePrompt
 import com.pulsestream.app.ui.components.GlowBackground
+import com.pulsestream.app.ui.theme.AppTheme
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.AccentTheme
 import com.pulsestream.app.ui.theme.GlassBorder
@@ -152,12 +158,28 @@ fun SettingsScreen(
     val signedIn = remember { syncManager.isSignedIn() }
     val accountEmail = remember { syncManager.getAccountEmail() }
     val lastBackup = remember { syncManager.getLastBackupTime() }
+    // Plavio account (v0.14.0): the card must reflect THIS sign-in too —
+    // it previously read only the Google state and showed "Not signed
+    // in" for Plavio-account users (owner's report 2026-10-25).
+    val plavioManager = remember { PlavioAccountManager(context, repository) }
+    val plavioEmail = remember {
+        if (PlavioAccountManager.isConfigured() && plavioManager.isSignedIn()) {
+            plavioManager.accountEmail()
+        } else {
+            null
+        }
+    }
+    val plavioLastSync = remember(plavioEmail) {
+        if (plavioEmail != null) plavioManager.lastSyncTime() else null
+    }
+    val anySignedIn = signedIn || plavioEmail != null
     // The user's own chosen username (set in Account) wins over the
     // email-derived name (owner's order 2026-10-22).
     val profileUserName = remember { settings.profileUserName }
     val accountName = remember(accountEmail, profileUserName) {
         profileUserName.takeIf { it.isNotBlank() } ?: accountEmail?.let { deriveDisplayName(it) }
     }
+    val displayName = accountName ?: plavioEmail?.let { deriveDisplayName(it) }
     val installedAddons by repository.addons.collectAsState(initial = emptyList())
     val enabledAddons = remember(installedAddons) { installedAddons.count { it.enabled } }
     val reducedMotion by com.pulsestream.app.data.MotionPreferences.reduced.collectAsState()
@@ -434,32 +456,18 @@ fun SettingsScreen(
                         Modifier.fillMaxWidth().padding(14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(LocalPalette.current.accent.copy(alpha = 0.20f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (signedIn) {
-                                Text(
-                                    (accountName?.firstOrNull()?.uppercase() ?: "P"),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = LocalPalette.current.accent
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Filled.Person,
-                                    contentDescription = null,
-                                    tint = LocalPalette.current.accent
-                                )
-                            }
-                        }
+                        ProfileAvatarImage(
+                            avatarSetting = remember { settings.profileAvatar },
+                            photoFile = remember { settings.profilePhotoFile() },
+                            modifier = Modifier.size(44.dp),
+                            placeholderLetter = if (anySignedIn) {
+                                displayName?.firstOrNull()?.uppercase() ?: "P"
+                            } else null
+                        )
                         Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
-                                if (signedIn) (accountName ?: "Signed in") else "Not signed in",
+                                if (anySignedIn) (displayName ?: "Signed in") else "Not signed in",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
                                 color = TextPrimary,
@@ -468,6 +476,7 @@ fun SettingsScreen(
                             )
                             Text(
                                 when {
+                                    plavioEmail != null -> plavioEmail
                                     signedIn && accountEmail != null -> accountEmail
                                     signedIn -> "Google account"
                                     else -> "Tap to sign in and enable backup & sync"
@@ -478,10 +487,13 @@ fun SettingsScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                if (signedIn) {
-                                    lastBackup?.let { "Last backup: $it" }
+                                when {
+                                    plavioEmail != null -> plavioLastSync?.let { "Synced · $it" }
+                                        ?: "Plavio account · backup & sync on"
+                                    signedIn -> lastBackup?.let { "Last backup: $it" }
                                         ?: "Signed in · backup & sync on"
-                                } else "Backup & sync off",
+                                    else -> "Backup & sync off"
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary,
                                 maxLines = 1,
@@ -505,8 +517,13 @@ fun SettingsScreen(
                     stickyHeader(key = "section_$section") {
                         SettingsSectionHeader(section)
                     }
-                    items(sectionEntries, key = { "entry_${it.title}" }) { entry ->
-                        entry.content()
+                    item(key = "group_$section") {
+                        SettingsGroup(
+                            *sectionEntries.map { entry ->
+                                val rowContent: @Composable () -> Unit = { entry.content() }
+                                rowContent
+                            }.toTypedArray()
+                        )
                     }
                 }
             } else {
@@ -535,14 +552,31 @@ fun SettingsScreen(
                         .padding(top = 20.dp, bottom = 8.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(
-                        text = "Made with 💚 by Kotlinsyd",
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            fontWeight = FontWeight.SemiBold
-                        ),
-                        color = TextPrimary,
-                        textAlign = TextAlign.Center
-                    )
+                    // The heart follows the picked accent (owner's
+                    // order 2026-10-25) — a real icon, not the old
+                    // fixed-green emoji, so it can be tinted.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Made with ",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                            color = TextPrimary
+                        )
+                        Icon(
+                            Icons.Filled.Favorite,
+                            contentDescription = null,
+                            tint = LocalPalette.current.accent,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = " by Kotlinsyd",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                            color = TextPrimary
+                        )
+                    }
                     Spacer(Modifier.height(12.dp))
                     SocialIconRow()
                     Spacer(Modifier.height(24.dp))
@@ -651,6 +685,67 @@ private fun deriveDisplayName(email: String): String =
         .joinToString(" ") { part -> part.replaceFirstChar { c -> c.uppercase() } }
         .ifBlank { email }
 
+/**
+ * True while rendering inside a [SettingsGroup]: the shared settings
+ * rows drop their own card and sit flush in the group card — the Onyx
+ * settings structure (one card per section, hairline dividers between
+ * rows), matching the owner's reference screenshots (2026-10-25).
+ */
+val LocalSettingsGrouped = compositionLocalOf { false }
+
+/**
+ * One grouped settings card: rows stacked in a single flat-ish glass
+ * card with hairline dividers between them (inset to the text column).
+ */
+@Composable
+fun SettingsGroup(vararg rows: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 5.dp)
+            .liquidGlass(RoundedCornerShape(24.dp))
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            CompositionLocalProvider(LocalSettingsGrouped provides true) {
+                rows.forEachIndexed { index, row ->
+                    if (index > 0) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = 74.dp, end = 16.dp)
+                                .height(1.dp)
+                                .background(TextSecondary.copy(alpha = 0.16f))
+                        )
+                    }
+                    row()
+                }
+            }
+        }
+    }
+}
+
+/** Switch colours: Onyx gets the reference look (white track, black thumb). */
+@Composable
+fun settingsSwitchColors(): SwitchColors =
+    if (LocalPalette.current.appTheme == AppTheme.ONYX) {
+        // The accent drives the small things (owner's order 2026-10-25):
+        // the ON switch wears the chosen accent, thumb contrasts it.
+        val onyxAccent = LocalPalette.current.accent
+        SwitchDefaults.colors(
+            checkedThumbColor = if (onyxAccent == Color.White) Color.Black else Color.White,
+            checkedTrackColor = onyxAccent,
+            uncheckedThumbColor = Color(0xFF8E8E93),
+            uncheckedTrackColor = Color(0xFF2E2E30),
+            checkedBorderColor = Color.Transparent,
+            uncheckedBorderColor = Color.Transparent
+        )
+    } else {
+        SwitchDefaults.colors(
+            checkedThumbColor = LocalPalette.current.accent,
+            checkedTrackColor = LocalPalette.current.accent.copy(alpha = 0.35f)
+        )
+    }
+
 /** Small-caps section header, Pulse style. */
 @Composable
 fun SettingsSectionHeader(title: String) {
@@ -668,13 +763,25 @@ fun SettingsSectionHeader(title: String) {
 /** Leading icon in a rounded glass tile. */
 @Composable
 fun SettingsIconTile(icon: ImageVector, contentDescription: String?) {
-    Box(
-        modifier = Modifier
-            .size(44.dp)
-            .liquidGlass(RoundedCornerShape(14.dp)),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(icon, contentDescription, tint = LocalPalette.current.accent, modifier = Modifier.size(24.dp))
+    if (LocalPalette.current.appTheme == AppTheme.ONYX) {
+        // Onyx: flat charcoal tile, white glyph (owner's reference).
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .background(Color(0xFF2E2E30), RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription, tint = Color.White, modifier = Modifier.size(24.dp))
+        }
+    } else {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .liquidGlass(RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription, tint = LocalPalette.current.accent, modifier = Modifier.size(24.dp))
+        }
     }
 }
 
@@ -687,6 +794,10 @@ fun SettingsToggleRow(
     onCheckedChange: (Boolean) -> Unit,
     compact: Boolean = false
 ) {
+    if (LocalSettingsGrouped.current) {
+        SettingsToggleRowGrouped(icon, title, subtitle, checked, onCheckedChange, compact)
+        return
+    }
     GlassCard(
         modifier = Modifier.fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = if (compact) 3.dp else 5.dp),
@@ -727,10 +838,7 @@ fun SettingsToggleRow(
             Switch(
                 checked = checked,
                 onCheckedChange = onCheckedChange,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = LocalPalette.current.accent,
-                    checkedTrackColor = LocalPalette.current.accent.copy(alpha = 0.35f)
-                )
+                colors = settingsSwitchColors()
             )
         }
     }
@@ -745,6 +853,10 @@ fun SettingsNavRow(
     onClick: () -> Unit,
     compact: Boolean = false
 ) {
+    if (LocalSettingsGrouped.current) {
+        SettingsNavRowGrouped(icon, title, subtitle, onClick, compact)
+        return
+    }
     GlassCard(
         modifier = Modifier.fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = if (compact) 3.dp else 5.dp),
@@ -802,6 +914,10 @@ fun SettingsStaticRow(
     onClick: (() -> Unit)? = null,
     compact: Boolean = false
 ) {
+    if (LocalSettingsGrouped.current) {
+        SettingsStaticRowGrouped(icon, title, subtitle, trailing, dimmed, onClick, compact)
+        return
+    }
     GlassCard(
         modifier = Modifier
             .fillMaxWidth()
@@ -839,6 +955,107 @@ fun SettingsStaticRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
+            }
+            Spacer(Modifier.width(12.dp))
+            trailing()
+        }
+    }
+}
+
+@Composable
+private fun SettingsToggleRowGrouped(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    compact: Boolean
+) {
+    Box(Modifier.fillMaxWidth().clickable { onCheckedChange(!checked) }) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (compact) {
+                Icon(icon, contentDescription = title, tint = LocalPalette.current.accent, modifier = Modifier.size(21.dp))
+                Spacer(Modifier.width(12.dp))
+            } else {
+                SettingsIconTile(icon, title)
+                Spacer(Modifier.width(14.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                Spacer(Modifier.height(2.dp))
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(checked = checked, onCheckedChange = onCheckedChange, colors = settingsSwitchColors())
+        }
+    }
+}
+
+@Composable
+private fun SettingsNavRowGrouped(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    compact: Boolean
+) {
+    Box(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (compact) {
+                Icon(icon, contentDescription = title, tint = LocalPalette.current.accent, modifier = Modifier.size(21.dp))
+                Spacer(Modifier.width(12.dp))
+            } else {
+                SettingsIconTile(icon, title)
+                Spacer(Modifier.width(14.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                Spacer(Modifier.height(2.dp))
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+            }
+            Spacer(Modifier.width(12.dp))
+            Icon(Icons.Filled.ChevronRight, contentDescription = null, tint = TextSecondary)
+        }
+    }
+}
+
+@Composable
+private fun SettingsStaticRowGrouped(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    trailing: @Composable () -> Unit,
+    dimmed: Boolean,
+    onClick: (() -> Unit)?,
+    compact: Boolean
+) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .alpha(if (dimmed) 0.6f else 1f)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (compact) {
+                Icon(icon, contentDescription = title, tint = LocalPalette.current.accent, modifier = Modifier.size(21.dp))
+                Spacer(Modifier.width(12.dp))
+            } else {
+                SettingsIconTile(icon, title)
+                Spacer(Modifier.width(14.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                Spacer(Modifier.height(2.dp))
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
             }
             Spacer(Modifier.width(12.dp))
             trailing()

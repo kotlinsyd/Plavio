@@ -4,6 +4,7 @@ import android.app.PictureInPictureParams
 import android.app.PendingIntent
 import android.app.RemoteAction
 import android.content.BroadcastReceiver
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -168,6 +169,9 @@ import com.pulsestream.app.ui.screens.ListDetailScreen
 import com.pulsestream.app.ui.screens.BackupScreen
 import com.pulsestream.app.ui.screens.IntegrationsScreen
 import com.pulsestream.app.ui.theme.AccentTheme
+import com.pulsestream.app.ui.theme.AppTheme
+import com.pulsestream.app.ui.theme.paletteForTheme
+import com.pulsestream.app.ui.theme.asDark
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.PulseStreamTheme
@@ -204,6 +208,14 @@ class MainActivity : ComponentActivity() {
          */
         val pipMode = MutableStateFlow(false)
 
+        /**
+         * Incremented when the user dismisses the PiP window with its X:
+         * the activity then stops without being destroyed, so nothing else
+         * releases playback. PlayerScreen compares against the value it saw
+         * at composition and exits (running its dispose teardown) on a bump.
+         */
+        val pipDismissedCount = MutableStateFlow(0L)
+
         /** Broadcast action for the PiP window's play/pause RemoteAction. */
         const val ACTION_PIP_TOGGLE = "com.pulsestream.app.ACTION_PIP_TOGGLE"
 
@@ -232,6 +244,13 @@ class MainActivity : ComponentActivity() {
          */
         @Volatile
         var pipIsPlaying: Boolean = true
+
+        /**
+         * True from PiP entry until the activity next resumes in
+         * fullscreen; lets onStop tell a PiP dismissal (X) apart from a
+         * normal backgrounding.
+         */
+        var wasInPip: Boolean = false
 
         /**
          * Fired by the PiP play/pause RemoteAction's broadcast receiver.
@@ -355,12 +374,17 @@ class MainActivity : ComponentActivity() {
             // whole app re-skins without restarting the activity.
             var themeTick by remember { mutableIntStateOf(0) }
             val palette = remember(themeTick) {
-                paletteFor(
+                // Six frosted themes (2026-10-25); weak devices get the
+                // solid version of the chosen theme automatically.
+                val am = app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                val lowEnd = am.isLowRamDevice || am.memoryClass <= 64
+                paletteForTheme(
+                    AppTheme.byName(app.settings.appTheme),
                     AccentTheme.byName(app.settings.accentName),
-                    app.settings.amoledBlack
+                    frosted = !lowEnd
                 )
             }
-            val isLight = remember(themeTick) { app.settings.themeMode == "light" }
+            val isLight = palette.light
             PulseStreamTheme(palette = palette, isLight = isLight) {
                 PulseNav(onThemeChanged = { themeTick++ })
             }
@@ -424,7 +448,27 @@ class MainActivity : ComponentActivity() {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         pipMode.value = isInPictureInPictureMode
         if (isInPictureInPictureMode) {
+            wasInPip = true
             setPictureInPictureParams(buildPipParams(this, pipIsPlaying))
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Back in fullscreen (e.g. PiP expanded): the next onStop is a
+        // normal backgrounding, not a PiP dismissal.
+        if (!isInPictureInPictureMode) wasInPip = false
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // PiP dismissed with X: activity stops but is NOT destroyed and the
+        // player screen never leaves composition — without this signal its
+        // audio keeps playing until the app is killed from recents
+        // (owner's device report, 2026-10-25).
+        if (wasInPip && !isInPictureInPictureMode) {
+            wasInPip = false
+            pipDismissedCount.value += 1
         }
     }
 
@@ -539,7 +583,9 @@ private fun DockItem(
         Icon(
             tab.icon,
             contentDescription = tab.label,
-            tint = if (selected) palette.accent else Color.White.copy(alpha = 0.9f),
+            tint = if (selected) palette.accentText
+                else if (palette.light) palette.textPrimary.copy(alpha = 0.72f)
+                else Color.White.copy(alpha = 0.9f),
             modifier = Modifier.size(22.dp)
         )
         // The name slot: eaten as the tray shrinks — height collapses
@@ -565,13 +611,21 @@ private fun DockItem(
                 style = MaterialTheme.typography.labelSmall.copy(
                     fontSize = with(LocalDensity.current) { labelSizeDp.dp.toSp() }
                 ),
-                color = if (selected) palette.accent else Color.White.copy(alpha = 0.9f),
+                color = if (selected) palette.accentText
+                    else if (palette.light) palette.textPrimary.copy(alpha = 0.72f)
+                    else Color.White.copy(alpha = 0.9f),
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis
             )
         }
     }
+}
+
+/** Video surfaces (player, trailer players) stay on the dark cinematic palette in both theme modes. */
+@Composable
+private fun DarkVideoSurface(content: @Composable () -> Unit) {
+    PulseStreamTheme(palette = LocalPalette.current.asDark(), isLight = false, content = content)
 }
 
 /** Bottom-dock tabs; labels come from string resources so they follow the app language. */
@@ -892,7 +946,10 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                             // Dark tint over the blur keeps white icons/labels
                             // readable on bright posters; heavier when no blur.
                             .background(
-                                Color.Black.copy(alpha = if (blurSupported) 0.38f else 0.66f),
+                                // Normal mode (Sample A): the backing flips
+                                // to white glass and the dock icons go dark.
+                                if (LocalPalette.current.light) Color.White.copy(alpha = 0.82f)
+                                else Color.Black.copy(alpha = if (blurSupported) 0.20f else 0.48f),
                                 RoundedCornerShape(50)
                             )
                     )
@@ -969,13 +1026,15 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
             val req = trailerMini.request
             val player = trailerMini.player
             if (req != null && player != null) {
-                TrailerPlayerScreen(
-                    repository = repository,
-                    request = req,
-                    externalPlayer = player,
-                    onBack = { trailerMini.minimize() },
-                    onSwipeDown = { trailerMini.minimize() }
-                )
+                DarkVideoSurface {
+                    TrailerPlayerScreen(
+                        repository = repository,
+                        request = req,
+                        externalPlayer = player,
+                        onBack = { trailerMini.minimize() },
+                        onSwipeDown = { trailerMini.minimize() }
+                    )
+                }
             }
         }
         // Mini floating trailer player, above content and dock.
@@ -990,10 +1049,12 @@ private fun PulseNav(onThemeChanged: () -> Unit) {
                 animationSpec = tween(200, easing = FastOutSlowInEasing)
             ) else androidx.compose.animation.ExitTransition.None
         ) {
-            MiniTrailerOverlay(
-                controller = trailerMini,
-                onExpand = { trailerMini.expand() }
-            )
+            DarkVideoSurface {
+                MiniTrailerOverlay(
+                    controller = trailerMini,
+                    onExpand = { trailerMini.expand() }
+                )
+            }
         }
         } // end Box wrapping mobile Scaffold
     } // end else (mobile bottom dock)
@@ -1170,15 +1231,17 @@ private fun PulseNavGraph(
             )
         }
         composable(Routes.TRAILER_PLAYER) {
-            TrailerPlayerScreen(
-                repository = repository,
-                externalPlayer = trailerMini?.player,
-                onBack = {
-                    // YouTube behavior: back minimizes to the floating player.
-                    trailerMini?.minimize()
-                    navController.popBackStack()
-                }
-            )
+            DarkVideoSurface {
+                TrailerPlayerScreen(
+                    repository = repository,
+                    externalPlayer = trailerMini?.player,
+                    onBack = {
+                        // YouTube behavior: back minimizes to the floating player.
+                        trailerMini?.minimize()
+                        navController.popBackStack()
+                    }
+                )
+            }
         }
         composable(Routes.SEARCH) {
         SearchScreen(
@@ -1393,10 +1456,12 @@ private fun PulseNavGraph(
             )
         }
         composable(Routes.PLAYER) {
-            PlayerScreen(
-                repository = repository,
-                onBack = { navController.popBackStack() }
-            )
+            DarkVideoSurface {
+                PlayerScreen(
+                    repository = repository,
+                    onBack = { navController.popBackStack() }
+                )
+            }
         }
         composable(
             Routes.CATALOG,

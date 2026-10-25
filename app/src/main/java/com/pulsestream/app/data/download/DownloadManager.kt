@@ -27,10 +27,24 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
@@ -39,13 +53,23 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/** Progressive-file downloader. Adaptive HLS/DASH manifests are explicitly unsupported. */
+/**
+ * Downloader: progressive files (single-stream with Range resume, or
+ * multi-connection segmented when the server honours Range), plus HLS
+ * (segments fetched, then remuxed to one MP4). DASH is not supported.
+ */
 class DownloadManager private constructor(private val appContext: Context) {
     companion object {
         private const val TAG = "DownloadManager"
         const val LARGE_FILE_WARNING_BYTES = 500L * 1024 * 1024
         private const val STORAGE_RESERVE_BYTES = 32L * 1024 * 1024
-        private const val MAX_CONCURRENT_DOWNLOADS = 2
+        private const val MIN_SEGMENTED_BYTES = 16L * 1024 * 1024
+        private const val SEGMENT_TARGET_BYTES = 8L * 1024 * 1024
+        private const val SEGMENT_SPLIT_MIN_BYTES = 8L * 1024 * 1024
+        private const val INITIAL_SEGMENT_WORKERS = 4
+        private const val MAX_SEGMENT_WORKERS = 8
+        private const val MAX_SEGMENT_FAILURES = 12
+        private const val MAX_CONCURRENT_DOWNLOADS = 3
         private const val PREFS = "download_policy"
         private const val KEY_WIFI_ONLY = "wifi_only"
 
@@ -130,9 +154,13 @@ class DownloadManager private constructor(private val appContext: Context) {
     /** Used by confirmation UI; response Content-Type is also checked before saving. */
     fun isAdaptiveDownloadUrl(url: String): Boolean = DownloadProtocol.isAdaptive(decodeUrlForDetection(url))
 
+    fun isHlsDownloadUrl(url: String): Boolean = DownloadProtocol.isHls(decodeUrlForDetection(url))
+
+    fun isDashDownloadUrl(url: String): Boolean = DownloadProtocol.isDash(decodeUrlForDetection(url))
+
     suspend fun startDownload(url: String, title: String, headers: Map<String, String> = emptyMap()): String {
-        require(!isAdaptiveDownloadUrl(url)) {
-            "Offline downloads currently support progressive media files only. HLS/DASH adaptive streams cannot be saved as complete offline downloads."
+        require(!isDashDownloadUrl(url)) {
+            "DASH streams can't be saved as offline downloads yet."
         }
         // Drop stale CANCELLED rows for this URL (left by older versions
         // whose cancel kept the row) so re-downloading starts clean.
@@ -152,7 +180,7 @@ class DownloadManager private constructor(private val appContext: Context) {
             return existing.id
         }
         val id = UUID.randomUUID().toString()
-        val fileName = sanitizeFileName(title) + guessExtension(url)
+        val fileName = sanitizeFileName(title) + if (isHlsDownloadUrl(url)) ".mp4" else guessExtension(url)
         val file = File(downloadsDir(), "${id}_$fileName")
         val normalizedHeaders = normalizeRequestHeaders(headers)
         val item = DownloadItem(
@@ -314,14 +342,37 @@ class DownloadManager private constructor(private val appContext: Context) {
     }
 
     private suspend fun downloadFile(item: DownloadItem) {
-        if (isAdaptiveDownloadUrl(item.url)) throw IOException("Unsupported offline format: HLS/DASH adaptive streams are not downloaded as complete offline media.")
         val file = File(item.filePath)
         file.parentFile?.mkdirs()
         val headers = runCatching {
             JSONObject(item.headersJson).let { json -> buildMap { json.keys().forEach { k -> put(k, json.getString(k)) } } }
         }.getOrDefault(emptyMap())
         val normalizedHeaders = normalizeRequestHeaders(headers)
+        if (DownloadProtocol.isHls(decodeUrlForDetection(item.url))) {
+            downloadHls(item, file, normalizedHeaders)
+            return
+        }
+        if (DownloadProtocol.isDash(decodeUrlForDetection(item.url))) {
+            throw IOException("Unsupported offline format: DASH streams can't be saved offline yet.")
+        }
         val old = readMetadata(item)
+        val segSidecar = segmentsFile(item)
+        val hasSingleStreamPartial = file.exists() && file.length() > 0L && !segSidecar.exists() &&
+            DownloadProtocol.ifRange(old.etag, old.lastModified) != null
+        if (!hasSingleStreamPartial) {
+            val probe = probeRangeSupport(item, normalizedHeaders)
+            if (probe != null && (probe.total >= MIN_SEGMENTED_BYTES || segSidecar.exists())) {
+                downloadSegmented(item, file, normalizedHeaders, probe)
+                return
+            }
+            if (segSidecar.exists()) {
+                // Segmented state exists but ranges are no longer honoured:
+                // the pre-allocated file can't be trusted — start clean.
+                segSidecar.delete()
+                file.delete()
+                metadataFile(item).delete()
+            }
+        }
         // Without a strong validator we cannot prove the resource is unchanged.
         val offset = if (file.exists() && DownloadProtocol.ifRange(old.etag, old.lastModified) != null) file.length() else 0L
         performDownload(item, file, normalizedHeaders, offset, old, allowCleanRestart = true)
@@ -440,6 +491,556 @@ class DownloadManager private constructor(private val appContext: Context) {
             }
         } finally {
             cancellationWatcher.cancel()
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Segmented (multi-connection) downloads
+    //
+    // When the server honours Range requests and the file is large enough,
+    // the file is pre-allocated and fetched in parallel ranges: 4 workers
+    // at first, ramping to 8 by splitting the largest unfinished range.
+    // Per-range progress lives in a sidecar JSON so a paused or killed
+    // download resumes each range where it stopped (validators checked).
+    // ---------------------------------------------------------------------
+
+    private data class RangeProbe(val total: Long, val etag: String?, val lastModified: String?)
+
+    private class Segment(val start: Long, var end: Long, var done: Long = 0L) {
+        var active: Boolean = false
+        val remaining: Long get() = end - (start + done) + 1
+        val complete: Boolean get() = remaining <= 0
+    }
+
+    private fun segmentsFile(item: DownloadItem) = File(item.filePath + ".segments.json")
+
+    private suspend fun probeRangeSupport(item: DownloadItem, headers: Map<String, String>): RangeProbe? {
+        val request = Request.Builder().url(item.url).apply {
+            headers.forEach { (k, v) -> header(k, v) }
+            header("Range", "bytes=0-0")
+        }.build()
+        val call = client.newCall(request)
+        return try {
+            val resp = withContext(Dispatchers.IO) { call.execute() }
+            resp.use {
+                if (it.code != 206) null
+                else {
+                    val range = DownloadProtocol.parseContentRange(it.header("Content-Range"), 0)
+                    val total = range?.total
+                    if (range == null || total == null) null
+                    else RangeProbe(total, it.header("ETag"), it.header("Last-Modified"))
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Range probe failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun loadSegments(sidecar: File, probe: RangeProbe, target: File): List<Segment>? = runCatching {
+        if (!sidecar.exists() || !target.exists() || target.length() != probe.total) return null
+        val json = JSONObject(sidecar.readText())
+        if (json.getLong("total") != probe.total) return null
+        val oldEtag = json.optString("etag").takeIf { it.isNotBlank() }
+        val oldModified = json.optString("lastModified").takeIf { it.isNotBlank() }
+        if (DownloadProtocol.changedValidator(oldEtag, oldModified, probe.etag, probe.lastModified)) return null
+        val arr = json.getJSONArray("segments")
+        val list = List(arr.length()) { i ->
+            val o = arr.getJSONObject(i)
+            Segment(o.getLong("start"), o.getLong("end"), o.getLong("done"))
+        }
+        if (list.isEmpty() || list.first().start != 0L || list.last().end != probe.total - 1) null else list
+    }.getOrNull()
+
+    private fun saveSegments(sidecar: File, probe: RangeProbe, segments: List<Segment>, lock: Any) {
+        runCatching {
+            val snapshot = synchronized(lock) { segments.map { Triple(it.start, it.end, it.done) } }
+            val arr = JSONArray()
+            snapshot.forEach { (st, en, dn) ->
+                arr.put(JSONObject().put("start", st).put("end", en).put("done", dn))
+            }
+            val json = JSONObject()
+                .put("total", probe.total)
+                .put("etag", probe.etag)
+                .put("lastModified", probe.lastModified)
+                .put("segments", arr)
+            sidecar.writeText(json.toString())
+        }
+    }
+
+    private suspend fun downloadSegmented(
+        item: DownloadItem,
+        file: File,
+        headers: Map<String, String>,
+        probe: RangeProbe
+    ): Unit = coroutineScope {
+        val sidecar = segmentsFile(item)
+        val lock = Any()
+        val segments = mutableListOf<Segment>()
+        val resumed = loadSegments(sidecar, probe, file)
+        if (resumed != null) {
+            segments.addAll(resumed)
+        } else {
+            sidecar.delete()
+            val count = (probe.total / SEGMENT_TARGET_BYTES).toInt().coerceIn(1, MAX_SEGMENT_WORKERS)
+            val size = (probe.total + count - 1) / count
+            var start = 0L
+            while (start < probe.total) {
+                val end = minOf(probe.total - 1, start + size - 1)
+                segments.add(Segment(start, end))
+                start = end + 1
+            }
+            withContext(Dispatchers.IO) {
+                RandomAccessFile(file, "rw").use { it.setLength(probe.total) }
+            }
+        }
+        writeMetadata(item, ResumeMetadata(probe.etag, probe.lastModified))
+        saveSegments(sidecar, probe, segments, lock)
+        fun downloadedNow(): Long = synchronized(lock) { segments.sumOf { it.done } }
+        withContext(Dispatchers.IO) {
+            dao.upsert(item.copy(totalBytes = probe.total, downloadedBytes = downloadedNow(), status = "DOWNLOADING", error = null))
+        }
+        _activeDownloads.value = _activeDownloads.value.toMutableMap().apply {
+            put(item.id, DownloadProgress(item.id, downloadedNow(), probe.total, "DOWNLOADING"))
+        }
+
+        val failures = AtomicBoolean(false)
+        var failureCount = 0
+        val wifiStop = AtomicBoolean(false)
+        val workers = mutableListOf<Job>()
+
+        suspend fun runWorker() {
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                if (wifiStop.get()) return
+                val seg = synchronized(lock) {
+                    segments.firstOrNull { !it.active && !it.complete }?.apply { active = true }
+                } ?: return
+                try {
+                    downloadSegmentRange(item, file, headers, seg, lock)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    val n = synchronized(lock) { ++failureCount }
+                    Log.w(TAG, "Segment at ${seg.start} failed: ${e.message}")
+                    if (n > MAX_SEGMENT_FAILURES) {
+                        failures.set(true)
+                        throw IOException("Too many failed connections — download stopped")
+                    }
+                    delay(500)
+                } finally {
+                    synchronized(lock) { seg.active = false }
+                }
+            }
+        }
+
+        synchronized(lock) {
+            repeat(INITIAL_SEGMENT_WORKERS) { workers += launch { runWorker() } }
+        }
+        val supervisor = launch {
+            while (true) {
+                delay(1000)
+                if (isWifiOnlyDownloads() && !isOnWifi()) {
+                    wifiStop.set(true)
+                    break
+                }
+                saveSegments(sidecar, probe, segments, lock)
+                val downloaded = downloadedNow()
+                withContext(Dispatchers.IO) { dao.updateProgress(item.id, downloaded, "DOWNLOADING") }
+                _activeDownloads.value = _activeDownloads.value.toMutableMap().apply {
+                    put(item.id, DownloadProgress(item.id, downloaded, probe.total, "DOWNLOADING"))
+                }
+                // Ramp: split the largest unfinished range and add a worker.
+                val activeWorkers = synchronized(lock) { workers.count { it.isActive } }
+                if (activeWorkers in 1 until MAX_SEGMENT_WORKERS) {
+                    val split = synchronized(lock) {
+                        val biggest = segments.filter { !it.complete }.maxByOrNull { it.remaining }
+                        if (biggest != null && biggest.remaining > SEGMENT_SPLIT_MIN_BYTES) {
+                            val mid = biggest.start + biggest.done + biggest.remaining / 2
+                            val tail = Segment(mid, biggest.end)
+                            biggest.end = mid - 1
+                            segments.add(tail)
+                            true
+                        } else false
+                    }
+                    if (split) synchronized(lock) { workers += launch { runWorker() } }
+                }
+            }
+        }
+        try {
+            while (true) {
+                if (synchronized(lock) { segments.all { it.complete } }) break
+                if (wifiStop.get()) {
+                    saveSegments(sidecar, probe, segments, lock)
+                    withContext(Dispatchers.IO) {
+                        dao.updateStatus(item.id, "PAUSED", "Wi-Fi disconnected; resume when Wi-Fi is available")
+                    }
+                    _activeDownloads.value = _activeDownloads.value - item.id
+                    return@coroutineScope
+                }
+                val anyWorkerAlive = synchronized(lock) { workers.any { it.isActive } }
+                if (!anyWorkerAlive) throw IOException("Download stalled")
+                delay(400)
+            }
+        } finally {
+            supervisor.cancel()
+            synchronized(lock) { workers.forEach { it.cancel() } }
+        }
+        if (failures.get()) throw IOException("Too many failed connections — download stopped")
+        val downloaded = downloadedNow()
+        if (downloaded != probe.total) throw IOException("Incomplete segmented download: $downloaded / ${probe.total} bytes")
+        runCatching { withContext(Dispatchers.IO) { RandomAccessFile(file, "rw").use { it.fd.sync() } } }
+        sidecar.delete()
+        withContext(Dispatchers.IO) {
+            dao.upsert(item.copy(totalBytes = probe.total, downloadedBytes = probe.total, status = "DOWNLOADING", error = null))
+            dao.markCompleted(item.id, System.currentTimeMillis())
+        }
+        _activeDownloads.value = _activeDownloads.value - item.id
+        Log.i(TAG, "Download completed (segmented): ${item.id} (${probe.total} bytes)")
+    }
+
+    private suspend fun downloadSegmentRange(
+        item: DownloadItem,
+        file: File,
+        headers: Map<String, String>,
+        seg: Segment,
+        lock: Any
+    ) {
+        val from = synchronized(lock) { seg.start + seg.done }
+        val to = synchronized(lock) { seg.end }
+        if (from > to) return
+        val request = Request.Builder().url(item.url).apply {
+            headers.forEach { (k, v) -> header(k, v) }
+            header("Range", "bytes=$from-$to")
+        }.build()
+        val call = client.newCall(request)
+        coroutineScope {
+            val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+                try { awaitCancellation() } finally { call.cancel() }
+            }
+            try {
+            val resp = withContext(Dispatchers.IO) { call.execute() }
+            resp.use {
+                if (it.code != 206) throw IOException("Range refused (HTTP ${it.code})")
+                DownloadProtocol.parseContentRange(it.header("Content-Range"), from)
+                    ?: throw IOException("Invalid Content-Range for segment")
+                val body = it.body ?: throw IOException("Empty segment body")
+                var written = synchronized(lock) { seg.done }
+                var hitSplitEnd = false
+                RandomAccessFile(file, "rw").use { raf ->
+                    raf.seek(from)
+                    val buffer = ByteArray(256 * 1024)
+                    body.byteStream().use { input ->
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val allowed = synchronized(lock) { seg.end - (seg.start + written) + 1 }
+                            if (allowed <= 0) {
+                                hitSplitEnd = true
+                                break
+                            }
+                            val count = input.read(buffer, 0, minOf(buffer.size.toLong(), allowed).toInt())
+                            if (count == -1) break
+                            raf.write(buffer, 0, count)
+                            written += count
+                            synchronized(lock) { seg.done = written }
+                        }
+                    }
+                }
+                val remaining = synchronized(lock) { seg.remaining }
+                if (!hitSplitEnd && remaining > 0) throw IOException("Segment ended early ($remaining bytes left)")
+            }
+            } finally {
+                watcher.cancel()
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // HLS downloads
+    //
+    // Fetch the playlist (highest-bandwidth variant of a master), download
+    // every segment (3 at a time, AES-128 decrypted when keyed), join the
+    // segments and remux to a single MP4 via MediaExtractor/MediaMuxer.
+    // If the remux fails the joined stream is kept as-is — the player
+    // sniffs the real format. VOD only: live playlists are refused.
+    // ---------------------------------------------------------------------
+
+    private data class HlsMedia(
+        val segmentUrls: List<String>,
+        val initUrl: String?,
+        val keyUrl: String?,
+        val keyIv: ByteArray?,
+        val mediaSequence: Long,
+        val sampleAes: Boolean
+    )
+
+    private fun resolveHttpUrl(base: String, ref: String): String =
+        runCatching { base.toHttpUrl().resolve(ref)?.toString() }.getOrNull() ?: ref
+
+    private fun parseMasterPlaylist(text: String, base: String): String? {
+        var bestBandwidth = -1L
+        var best: String? = null
+        var pendingBandwidth: Long? = null
+        for (raw in text.lines()) {
+            val line = raw.trim()
+            when {
+                line.startsWith("#EXT-X-STREAM-INF") ->
+                    pendingBandwidth = Regex("BANDWIDTH=(\\d+)").find(line)?.groupValues?.get(1)?.toLongOrNull()
+                line.isNotEmpty() && !line.startsWith("#") -> {
+                    val bw = pendingBandwidth ?: 0L
+                    if (bw > bestBandwidth) {
+                        bestBandwidth = bw
+                        best = resolveHttpUrl(base, line)
+                    }
+                    pendingBandwidth = null
+                }
+            }
+        }
+        return best
+    }
+
+    private fun parseMediaPlaylist(text: String, base: String): HlsMedia {
+        var keyUrl: String? = null
+        var keyIv: ByteArray? = null
+        var sampleAes = false
+        var mediaSequence = 0L
+        var initUrl: String? = null
+        val segs = mutableListOf<String>()
+        for (raw in text.lines()) {
+            val line = raw.trim()
+            when {
+                line.startsWith("#EXT-X-MEDIA-SEQUENCE:") ->
+                    mediaSequence = line.substringAfter(':').trim().toLongOrNull() ?: 0L
+                line.startsWith("#EXT-X-KEY:") -> {
+                    when (Regex("METHOD=([A-Z0-9-]+)").find(line)?.groupValues?.get(1)) {
+                        "SAMPLE-AES" -> sampleAes = true
+                        "AES-128" -> {
+                            Regex("URI=\"([^\"]+)\"").find(line)?.groupValues?.get(1)
+                                ?.let { keyUrl = resolveHttpUrl(base, it) }
+                            Regex("IV=0x([0-9A-Fa-f]+)").find(line)?.groupValues?.get(1)?.let { hex ->
+                                keyIv = hex.padStart(32, '0').takeLast(32).chunked(2)
+                                    .map { it.toInt(16).toByte() }.toByteArray()
+                            }
+                        }
+                    }
+                }
+                line.startsWith("#EXT-X-MAP:") ->
+                    Regex("URI=\"([^\"]+)\"").find(line)?.groupValues?.get(1)
+                        ?.let { initUrl = resolveHttpUrl(base, it) }
+                line.isNotEmpty() && !line.startsWith("#") -> segs.add(resolveHttpUrl(base, line))
+            }
+        }
+        return HlsMedia(segs, initUrl, keyUrl, keyIv, mediaSequence, sampleAes)
+    }
+
+    private suspend fun fetchBytes(url: String, headers: Map<String, String>): ByteArray? = coroutineScope {
+        val request = Request.Builder().url(url).apply {
+            headers.forEach { (k, v) -> header(k, v) }
+        }.build()
+        val call = client.newCall(request)
+        val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { call.cancel() }
+        }
+        try {
+            withContext(Dispatchers.IO) { call.execute() }.use { resp ->
+                if (!resp.isSuccessful) null else resp.body?.bytes()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    private suspend fun fetchText(url: String, headers: Map<String, String>): String? =
+        fetchBytes(url, headers)?.toString(Charsets.UTF_8)
+
+    private fun decryptAes128(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        return cipher.doFinal(data)
+    }
+
+    private fun sequenceIv(sequence: Long): ByteArray {
+        val iv = ByteArray(16)
+        var v = sequence
+        for (i in 15 downTo 8) {
+            iv[i] = (v and 0xFF).toByte()
+            v = v shr 8
+        }
+        return iv
+    }
+
+    private suspend fun downloadHls(item: DownloadItem, target: File, headers: Map<String, String>) {
+        val workDir = File(item.filePath + ".hls").apply { mkdirs() }
+        var playlistUrl = item.url
+        var text = fetchText(playlistUrl, headers)
+            ?: throw IOException("Could not fetch the HLS playlist")
+        if (text.contains("#EXT-X-STREAM-INF")) {
+            playlistUrl = parseMasterPlaylist(text, playlistUrl)
+                ?: throw IOException("No playable variant in the HLS playlist")
+            text = fetchText(playlistUrl, headers)
+                ?: throw IOException("Could not fetch the HLS variant playlist")
+        }
+        if (!text.contains("#EXT-X-ENDLIST")) {
+            throw IOException("Live HLS streams can't be saved offline — only finished streams can.")
+        }
+        val media = parseMediaPlaylist(text, playlistUrl)
+        if (media.segmentUrls.isEmpty()) throw IOException("The HLS playlist has no segments")
+        if (media.sampleAes) throw IOException("This HLS stream uses SAMPLE-AES encryption, which can't be downloaded yet.")
+        val keyBytes = media.keyUrl?.let {
+            fetchBytes(it, headers) ?: throw IOException("Could not fetch the HLS encryption key")
+        }
+
+        // Resume state: segment index -> saved byte size.
+        val sizesFile = File(workDir, "sizes.json")
+        val sizes = mutableMapOf<Int, Long>()
+        runCatching {
+            val json = JSONObject(sizesFile.readText())
+            json.keys().forEach { k -> sizes[k.toInt()] = json.getLong(k) }
+        }
+        val sizesLock = Any()
+        fun saveSizes() {
+            runCatching {
+                val snapshot = synchronized(sizesLock) { sizes.toMap() }
+                val json = JSONObject()
+                snapshot.forEach { (k, v) -> json.put(k.toString(), v) }
+                sizesFile.writeText(json.toString())
+            }
+        }
+        fun segmentFile(index: Int) = File(workDir, "seg-%05d".format(index))
+        fun downloadedNow(): Long = synchronized(sizesLock) { sizes.values.sum() }
+
+        withContext(Dispatchers.IO) {
+            dao.upsert(item.copy(totalBytes = -1, downloadedBytes = downloadedNow(), status = "DOWNLOADING", error = null))
+        }
+
+        // Init segment (fMP4) first when present.
+        if (media.initUrl != null) {
+            val initFile = File(workDir, "seg-init")
+            val known = synchronized(sizesLock) { sizes[-1] }
+            if (known == null || !initFile.exists() || initFile.length() != known) {
+                val bytes = fetchBytes(media.initUrl, headers)
+                    ?: throw IOException("Could not fetch the HLS init segment")
+                withContext(Dispatchers.IO) { initFile.writeBytes(bytes) }
+                synchronized(sizesLock) { sizes[-1] = bytes.size.toLong() }
+                saveSizes()
+            }
+        }
+
+        val semaphore = Semaphore(3)
+        coroutineScope {
+            val jobs = media.segmentUrls.mapIndexed { index, segUrl ->
+                async {
+                    val out = segmentFile(index)
+                    val known = synchronized(sizesLock) { sizes[index] }
+                    if (known != null && out.exists() && out.length() == known) return@async
+                    semaphore.withPermit {
+                        if (availableBytes() < STORAGE_RESERVE_BYTES) {
+                            throw IOException("Not enough free storage to continue this download.")
+                        }
+                        val raw = fetchBytes(segUrl, headers)
+                            ?: throw IOException("Segment ${index + 1} of ${media.segmentUrls.size} failed to download")
+                        val plain = if (keyBytes != null) {
+                            decryptAes128(raw, keyBytes, media.keyIv ?: sequenceIv(media.mediaSequence + index))
+                        } else raw
+                        withContext(Dispatchers.IO) { out.writeBytes(plain) }
+                        synchronized(sizesLock) { sizes[index] = plain.size.toLong() }
+                        saveSizes()
+                        val total = downloadedNow()
+                        withContext(Dispatchers.IO) { dao.updateProgress(item.id, total, "DOWNLOADING") }
+                        _activeDownloads.value = _activeDownloads.value.toMutableMap().apply {
+                            put(item.id, DownloadProgress(item.id, total, -1, "DOWNLOADING"))
+                        }
+                    }
+                }
+            }
+            jobs.forEach { it.await() }
+        }
+
+        // Join segments (init first) and remux to MP4.
+        val joined = File(item.filePath + ".joined")
+        withContext(Dispatchers.IO) {
+            FileOutputStream(joined).use { out ->
+                if (media.initUrl != null) {
+                    File(workDir, "seg-init").inputStream().use { it.copyTo(out) }
+                }
+                media.segmentUrls.indices.forEach { i ->
+                    segmentFile(i).inputStream().use { it.copyTo(out) }
+                }
+            }
+        }
+        val remuxed = runCatching { remuxToMp4(joined, target) }.getOrDefault(false)
+        if (!remuxed) {
+            withContext(Dispatchers.IO) { joined.copyTo(target, overwrite = true) }
+        }
+        joined.delete()
+        workDir.deleteRecursively()
+        val size = target.length()
+        if (size <= 0L) throw IOException("The HLS download produced an empty file")
+        withContext(Dispatchers.IO) {
+            dao.upsert(item.copy(totalBytes = size, downloadedBytes = size, status = "DOWNLOADING", error = null))
+            dao.markCompleted(item.id, System.currentTimeMillis())
+        }
+        _activeDownloads.value = _activeDownloads.value - item.id
+        Log.i(TAG, "Download completed (HLS): ${item.id} ($size bytes)")
+    }
+
+    /** Stream-copy remux (no re-encode). Returns false when the container or codecs refuse. */
+    private fun remuxToMp4(source: File, target: File): Boolean {
+        val extractor = MediaExtractor()
+        var muxer: MediaMuxer? = null
+        return try {
+            extractor.setDataSource(source.absolutePath)
+            if (extractor.trackCount == 0) return false
+            val mx = MediaMuxer(target.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = mx
+            val trackMap = HashMap<Int, Int>()
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("video/") || mime.startsWith("audio/")) {
+                    trackMap[i] = mx.addTrack(format)
+                    extractor.selectTrack(i)
+                }
+            }
+            if (trackMap.isEmpty()) return false
+            mx.start()
+            val buffer = ByteBuffer.allocate(1024 * 1024)
+            val info = MediaCodec.BufferInfo()
+            var firstPts = -1L
+            while (true) {
+                val sampleSize = extractor.readSampleData(buffer, 0)
+                if (sampleSize < 0) break
+                val track = trackMap[extractor.sampleTrackIndex]
+                if (track == null) {
+                    extractor.advance()
+                    continue
+                }
+                val pts = extractor.sampleTime
+                if (firstPts < 0) firstPts = pts
+                info.offset = 0
+                info.size = sampleSize
+                info.presentationTimeUs = (pts - firstPts).coerceAtLeast(0)
+                info.flags = if (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) {
+                    MediaCodec.BUFFER_FLAG_KEY_FRAME
+                } else 0
+                buffer.position(0)
+                mx.writeSampleData(track, buffer, info)
+                extractor.advance()
+            }
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Remux failed, keeping joined stream: ${e.message}")
+            false
+        } finally {
+            runCatching { muxer?.stop() }
+            runCatching { muxer?.release() }
+            extractor.release()
         }
     }
 

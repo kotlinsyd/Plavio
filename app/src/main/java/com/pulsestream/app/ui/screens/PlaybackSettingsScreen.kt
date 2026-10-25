@@ -129,105 +129,107 @@ fun PlaybackSettingsScreen(
                     )
                 }
             }
-            item(key = "autoplay") {
-                SettingsToggleRow(
-                    icon = Icons.Filled.PlayArrow,
-                    title = "Autoplay",
-                    subtitle = "Play the first source automatically",
-                    checked = autoplay,
-                    onCheckedChange = {
-                        autoplay = it
-                        settings.autoplay = it
-                    }
-                )
-            }
-            item(key = "autoPlayNext") {
-                SettingsToggleRow(
-                    icon = Icons.Filled.SkipNext,
-                    title = "Auto-play next episode",
-                    subtitle = "Start the next episode when one finishes",
-                    checked = autoPlayNext,
-                    onCheckedChange = {
-                        autoPlayNext = it
-                        settings.autoPlayNext = it
-                    }
-                )
-            }
-            item(key = "keepScreenOn") {
-                SettingsToggleRow(
-                    icon = Icons.Filled.BrightnessHigh,
-                    title = "Keep screen on",
-                    subtitle = "Prevent the screen from sleeping while playing",
-                    checked = keepScreenOn,
-                    onCheckedChange = {
-                        keepScreenOn = it
-                        settings.keepScreenOn = it
-                    }
-                )
-            }
-            item(key = "showSkip") {
-                SettingsToggleRow(
-                    icon = Icons.Filled.FastForward,
-                    title = "Skip intro button",
-                    subtitle = "Show a skip button for intros, recaps and outros",
-                    checked = showSkip,
-                    onCheckedChange = {
-                        showSkip = it
-                        settings.showSkipButton = it
-                    }
-                )
-            }
-            item(key = "pip") {
-                SettingsToggleRow(
-                    icon = Icons.Filled.PictureInPicture,
-                    title = "Picture-in-Picture",
-                    subtitle = "Float the video when you leave the player",
-                    checked = pipEnabled,
-                    onCheckedChange = {
-                        pipEnabled = it
-                        settings.pipEnabled = it
-                    }
-                )
-            }
-            item(key = "preferredPlayer") {
+            item(key = "player_group") {
                 // Read inside the item so recomposition picks up dialog changes.
                 playerUiTick
-                SettingsNavRow(
-                    icon = Icons.Filled.OpenInNew,
-                    title = "Preferred player",
-                    subtitle = "Currently: ${PlayerChoice.fromName(settings.preferredPlayer).label}",
-                    onClick = { playerPickerOpen = true }
-                )
-            }
-            item(key = "audioLang") {
-                SettingsNavRow(
-                    icon = Icons.Filled.Audiotrack,
-                    title = "Preferred audio language",
-                    subtitle = if (audioLang.isNullOrBlank()) {
-                        "Not set — title's default audio is used"
-                    } else {
-                        "Auto-plays ${audioLanguageName(audioLang!!)} when available"
+                bufferUiTick
+                SettingsGroup(
+                    {
+                        SettingsToggleRow(
+                            icon = Icons.Filled.PlayArrow,
+                            title = "Autoplay",
+                            subtitle = "Play the first source automatically",
+                            checked = autoplay,
+                            onCheckedChange = {
+                                autoplay = it
+                                settings.autoplay = it
+                            }
+                        )
                     },
-                    onClick = { audioLangPickerOpen = true }
-                )
-            }
-            item(key = "bufferPreset") {
-                // Read inside the item so recomposition picks up dialog changes.
-                bufferUiTick
-                SettingsNavRow(
-                    icon = Icons.Filled.Speed,
-                    title = "Buffer preset",
-                    subtitle = "Currently: ${bufferPresetName(settings.bufferMinMs, settings.bufferMaxMs, settings.bufferForPlaybackMs)}",
-                    onClick = { bufferPresetOpen = true }
-                )
-            }
-            item(key = "diskCache") {
-                bufferUiTick
-                SettingsNavRow(
-                    icon = Icons.Filled.Storage,
-                    title = "Disk cache",
-                    subtitle = "Cache played media on device: ${diskCacheName(settings.diskCacheMb)}",
-                    onClick = { diskCacheOpen = true }
+                    {
+                        SettingsToggleRow(
+                            icon = Icons.Filled.SkipNext,
+                            title = "Auto-play next episode",
+                            subtitle = "Start the next episode when one finishes",
+                            checked = autoPlayNext,
+                            onCheckedChange = {
+                                autoPlayNext = it
+                                settings.autoPlayNext = it
+                            }
+                        )
+                    },
+                    {
+                        SettingsToggleRow(
+                            icon = Icons.Filled.BrightnessHigh,
+                            title = "Keep screen on",
+                            subtitle = "Prevent the screen from sleeping while playing",
+                            checked = keepScreenOn,
+                            onCheckedChange = {
+                                keepScreenOn = it
+                                settings.keepScreenOn = it
+                            }
+                        )
+                    },
+                    {
+                        SettingsToggleRow(
+                            icon = Icons.Filled.FastForward,
+                            title = "Skip intro button",
+                            subtitle = "Show a skip button for intros, recaps and outros",
+                            checked = showSkip,
+                            onCheckedChange = {
+                                showSkip = it
+                                settings.showSkipButton = it
+                            }
+                        )
+                    },
+                    {
+                        SettingsToggleRow(
+                            icon = Icons.Filled.PictureInPicture,
+                            title = "Picture-in-Picture",
+                            subtitle = "Float the video when you leave the player",
+                            checked = pipEnabled,
+                            onCheckedChange = {
+                                pipEnabled = it
+                                settings.pipEnabled = it
+                            }
+                        )
+                    },
+                    {
+                        SettingsNavRow(
+                            icon = Icons.Filled.OpenInNew,
+                            title = "Preferred player",
+                            subtitle = "Currently: ${PlayerChoice.fromName(settings.preferredPlayer).label}",
+                            onClick = { playerPickerOpen = true }
+                        )
+                    },
+                    {
+                        SettingsNavRow(
+                            icon = Icons.Filled.Audiotrack,
+                            title = "Preferred audio language",
+                            subtitle = if (audioLang.isNullOrBlank()) {
+                                "Not set \u2014 title's default audio is used"
+                            } else {
+                                "Auto-plays ${audioLanguageName(audioLang!!)} when available"
+                            },
+                            onClick = { audioLangPickerOpen = true }
+                        )
+                    },
+                    {
+                        SettingsNavRow(
+                            icon = Icons.Filled.Speed,
+                            title = "Buffer preset",
+                            subtitle = "Currently: ${bufferPresetName(settings.bufferMinMs, settings.bufferMaxMs, settings.bufferForPlaybackMs)}",
+                            onClick = { bufferPresetOpen = true }
+                        )
+                    },
+                    {
+                        SettingsNavRow(
+                            icon = Icons.Filled.Storage,
+                            title = "Disk cache",
+                            subtitle = "Cache played media on device: ${diskCacheName(settings.diskCacheMb)}",
+                            onClick = { diskCacheOpen = true }
+                        )
+                    }
                 )
             }
         }

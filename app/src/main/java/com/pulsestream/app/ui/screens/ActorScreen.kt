@@ -61,16 +61,10 @@ fun ActorScreen(
 ) {
     var person by remember(personId) { mutableStateOf<PersonDetail?>(null) }
     var loading by remember(personId) { mutableStateOf(true) }
-    val tmdbKey = remember { repository.settings.tmdbApiKey.takeIf { it.isNotBlank() } }
-
     LaunchedEffect(personId) {
         loading = true
-        // Try TMDB directly first (user's key), fall back to PlavioMeta
-        person = if (!tmdbKey.isNullOrBlank()) {
-            runCatching { com.pulsestream.app.data.TmdbClient.getPerson(tmdbKey, personId) }.getOrNull()
-        } else {
-            runCatching { repository.getPerson(personId) }.getOrNull()
-        }
+        // Person data is served by PlavioMeta (server-side key) for everyone.
+        person = runCatching { repository.getPerson(personId) }.getOrNull()
         loading = false
     }
 
@@ -194,7 +188,8 @@ private fun FilmographyGrid(
 ) {
     // Fixed-height grid inside the outer LazyColumn.
     val columns = adaptiveColumnCount(LocalConfiguration.current.screenWidthDp - 48)
-    val rows = (metas.size + columns - 1) / columns
+    val uniqueMetas = metas.distinctBy { it.type + "|" + it.id }
+    val rows = (uniqueMetas.size + columns - 1) / columns
     val gridHeight = (rows * 244).dp
     LazyVerticalGrid(
         columns = GridCells.Adaptive(140.dp),
@@ -206,7 +201,7 @@ private fun FilmographyGrid(
         verticalArrangement = Arrangement.spacedBy(12.dp),
         userScrollEnabled = false
     ) {
-        items(metas, key = { it.type + "|" + it.id }) { meta ->
+        items(uniqueMetas, key = { it.type + "|" + it.id }) { meta ->
             PosterCard(
                 meta = meta,
                 onClick = { onOpenDetail(meta.type, meta.id) }

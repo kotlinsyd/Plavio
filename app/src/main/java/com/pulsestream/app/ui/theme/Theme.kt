@@ -19,20 +19,21 @@ fun PulseStreamTheme(
     content: @Composable () -> Unit
 ) {
     val scheme = if (isLight) {
+        // Normal mode — Sample A "Warm Ivory" (owner's pick 2026-10-24).
         lightColorScheme(
             primary = palette.accent,
-            onPrimary = Color.White,
+            onPrimary = Color(0xFF04120B),
             secondary = palette.accent2,
-            onSecondary = Color.White,
+            onSecondary = Color(0xFF04120B),
             tertiary = palette.accent2,
-            background = Color(0xFFF5F5F5),
-            onBackground = Color(0xFF1A1A1A),
-            surface = Color.White,
-            onSurface = Color(0xFF1A1A1A),
-            surfaceVariant = Color(0xFFE8E8E8),
-            onSurfaceVariant = Color(0xFF666666),
-            outline = Color(0xFFE0E0E0),
-            error = Color(0xFFD32F2F)
+            background = Color(0xFFF4EFE6),
+            onBackground = Color(0xFF171A20),
+            surface = Color(0xFFFFFBF2),
+            onSurface = Color(0xFF171A20),
+            surfaceVariant = Color(0xFFEAE3D3),
+            onSurfaceVariant = Color(0xFF6F6A5E),
+            outline = Color(0xFFD8D0BE),
+            error = Color(0xFFB3261E)
         )
     } else {
         darkColorScheme(
@@ -42,12 +43,12 @@ fun PulseStreamTheme(
             onSecondary = Color(0xFF2A0A22),
             tertiary = palette.accent2,
             background = palette.background,
-            onBackground = TextPrimary,
+            onBackground = palette.textPrimary,
             surface = palette.panel,
-            onSurface = TextPrimary,
+            onSurface = palette.textPrimary,
             surfaceVariant = if (palette.amoled) Color(0xFF111111) else Color(0xFF39434F),
-            onSurfaceVariant = TextSecondary,
-            outline = GlassBorder,
+            onSurfaceVariant = palette.textSecondary,
+            outline = palette.glassBorder,
             error = Color(0xFFFF6B6B)
         )
     }

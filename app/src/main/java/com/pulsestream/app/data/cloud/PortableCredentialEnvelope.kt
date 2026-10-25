@@ -25,7 +25,7 @@ internal object PortableCredentialEnvelope {
     private const val MAX_ADDONS = 1_000
     private const val MAX_ADDON_ID_CHARS = 300
     private const val MAX_ADDON_URL_CHARS = 8_192
-    private val allowedCredentialKeys = setOf("tmdb_api_key", "simkl_token", "torbox_api_key", "realdebrid_api_key", "trakt_access_token", "trakt_refresh_token")
+    private val allowedCredentialKeys = setOf("simkl_token", "torbox_api_key", "realdebrid_api_key", "trakt_access_token", "trakt_refresh_token")
 
     internal data class Payload(
         val credentials: Map<String, String>,

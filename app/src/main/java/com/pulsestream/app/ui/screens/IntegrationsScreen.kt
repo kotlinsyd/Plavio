@@ -102,31 +102,62 @@ fun IntegrationsScreen(
                 }
             }
 
-            item(key = "torbox") {
+            item(key = "debrid_group") {
                 var showTorboxDialog by remember { mutableStateOf(false) }
                 var torboxTick by remember { mutableIntStateOf(0) }
                 val torboxConfigured = remember(torboxTick) { !settings.torboxApiKey.isNullOrBlank() }
-                SettingsStaticRow(
-                    icon = Icons.Filled.Bolt,
-                    title = "TorBox",
-                    subtitle = if (torboxConfigured) "API key saved" else "Add your API key for cached streams",
-                    trailing = {
-                        if (torboxConfigured) {
-                            Text(
-                                "Saved",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = LocalPalette.current.accent
-                            )
-                        } else {
-                            Icon(
-                                Icons.Filled.ChevronRight,
-                                contentDescription = "Configure TorBox",
-                                tint = TextSecondary
-                            )
-                        }
+                var showRdDialog by remember { mutableStateOf(false) }
+                var rdTick by remember { mutableIntStateOf(0) }
+                val rdConfigured = remember(rdTick) { !settings.realDebridApiKey.isNullOrBlank() }
+                SettingsGroup(
+                    {
+                        SettingsStaticRow(
+                            icon = Icons.Filled.Bolt,
+                            title = "TorBox",
+                            subtitle = if (torboxConfigured) "API key saved" else "Add your API key for cached streams",
+                            trailing = {
+                                if (torboxConfigured) {
+                                    Text(
+                                        "Saved",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = LocalPalette.current.accent
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Filled.ChevronRight,
+                                        contentDescription = "Configure TorBox",
+                                        tint = TextSecondary
+                                    )
+                                }
+                            },
+                            onClick = { showTorboxDialog = true }
+                        )
                     },
-                    onClick = { showTorboxDialog = true }
+                    {
+                        SettingsStaticRow(
+                            icon = Icons.Filled.Bolt,
+                            title = "Real-Debrid",
+                            subtitle = if (rdConfigured) "Connected" else "Under testing \u2014 coming soon",
+                            trailing = {
+                                if (rdConfigured) {
+                                    Text(
+                                        "Connected",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = LocalPalette.current.accent
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Filled.ChevronRight,
+                                        contentDescription = "Configure Real-Debrid",
+                                        tint = TextSecondary
+                                    )
+                                }
+                            },
+                            onClick = { showRdDialog = true }
+                        )
+                    }
                 )
                 if (showTorboxDialog) {
                     ApiKeyDialog(
@@ -140,34 +171,6 @@ fun IntegrationsScreen(
                         onDismiss = { showTorboxDialog = false }
                     )
                 }
-            }
-
-            item(key = "realdebrid") {
-                var showRdDialog by remember { mutableStateOf(false) }
-                var rdTick by remember { mutableIntStateOf(0) }
-                val rdConfigured = remember(rdTick) { !settings.realDebridApiKey.isNullOrBlank() }
-                SettingsStaticRow(
-                    icon = Icons.Filled.Bolt,
-                    title = "Real-Debrid",
-                    subtitle = if (rdConfigured) "Connected" else "Under testing — coming soon",
-                    trailing = {
-                        if (rdConfigured) {
-                            Text(
-                                "Connected",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = LocalPalette.current.accent
-                            )
-                        } else {
-                            Icon(
-                                Icons.Filled.ChevronRight,
-                                contentDescription = "Configure Real-Debrid",
-                                tint = TextSecondary
-                            )
-                        }
-                    },
-                    onClick = { showRdDialog = true }
-                )
                 if (showRdDialog) {
                     ApiKeyDialog(
                         title = "Real-Debrid API Key",
@@ -177,49 +180,6 @@ fun IntegrationsScreen(
                         enabled = false,
                         onSave = { settings.realDebridApiKey = it; rdTick++ },
                         onDismiss = { showRdDialog = false }
-                    )
-                }
-            }
-
-            item(key = "tmdb_key") {
-                var showTmdbDialog by remember { mutableStateOf(false) }
-                var tmdbTick by remember { mutableIntStateOf(0) }
-                val tmdbConfigured = remember(tmdbTick) { settings.tmdbApiKey.isNotBlank() }
-                val maskedKey = remember(tmdbTick) {
-                    val k = settings.tmdbApiKey
-                    if (k.isBlank()) "" else if (k.length <= 4) "••••" else k.take(4) + "••••••••"
-                }
-                SettingsStaticRow(
-                    icon = Icons.Filled.VpnKey,
-                    title = "TMDB API Key",
-                    subtitle = if (tmdbConfigured) "Key saved: $maskedKey" else "Enables clickable actors and recommendations",
-                    trailing = {
-                        if (tmdbConfigured) {
-                            Text(
-                                "Set",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = LocalPalette.current.accent
-                            )
-                        } else {
-                            Icon(
-                                Icons.Filled.ChevronRight,
-                                contentDescription = "Set TMDB API key",
-                                tint = TextSecondary
-                            )
-                        }
-                    },
-                    onClick = { showTmdbDialog = true }
-                )
-                if (showTmdbDialog) {
-                    ApiKeyDialog(
-                        title = "TMDB API Key",
-                        keyLinkText = "Get your free key",
-                        keyLinkUrl = "https://www.themoviedb.org/settings/api",
-                        currentKey = settings.tmdbApiKey,
-                        enabled = true,
-                        onSave = { settings.tmdbApiKey = it; tmdbTick++ },
-                        onDismiss = { showTmdbDialog = false }
                     )
                 }
             }

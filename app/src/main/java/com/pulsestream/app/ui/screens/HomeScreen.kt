@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Close
@@ -69,10 +70,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -82,7 +86,6 @@ import com.pulsestream.app.data.MetaPreview
 import com.pulsestream.app.data.PlaybackRequest
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.db.PlaybackState
-import com.pulsestream.app.ui.components.EmptyState
 import com.pulsestream.app.ui.components.ErrorState
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.components.OrbitDots
@@ -96,6 +99,8 @@ import com.pulsestream.app.ui.components.SectionTitle
 import com.pulsestream.app.ui.components.liquidGlass
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
+import com.pulsestream.app.ui.theme.GlassWhite
+import com.pulsestream.app.ui.components.tmdbSizedImage
 import com.pulsestream.app.ui.theme.TextPrimary
 import com.pulsestream.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
@@ -235,11 +240,10 @@ fun HomeScreen(
             when (val state = vm.uiState) {
                 is HomeUiState.Loading -> LoadingState("Loading your catalogs…")
                 is HomeUiState.Error -> ErrorState(state.message, onRetry = { vm.load() })
-                is HomeUiState.Empty -> EmptyState(
-                    title = "No addons yet",
-                    message = "Add an addon to start browsing movies and shows.",
-                    actionLabel = "Add an addon",
-                    onAction = onGoToAddons
+                is HomeUiState.Empty -> NoAddonsEmptyState(
+                    repository = repository,
+                    onGoToAddons = onGoToAddons,
+                    onReload = { vm.load() }
                 )
                 is HomeUiState.Content -> {
                     // Hero carousel data: computed once per row-set, outside the
@@ -275,16 +279,17 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxSize(),
                         state = pullRefreshState,
                         indicator = {
-                            // Refresh keeps the classic pulse dots
-                            // (owner's order 2026-10-24); the orbit
-                            // stays on every other loading surface.
+                            // Refresh indicator: the Wave dots (owner's
+                            // pick 2026-10-25, Sample B — pulse out from the
+                            // center dot, wide spacing). The orbit stays on
+                            // every other loading surface.
                             if (state.refreshing || pullRefreshState.distanceFraction > 0f) {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.TopCenter)
                                         .padding(top = 18.dp)
                                 ) {
-                                    DotsLoader(modifier = Modifier.size(34.dp))
+                                    DotsLoader(modifier = Modifier.width(124.dp).height(30.dp))
                                 }
                             }
                         }
@@ -433,9 +438,10 @@ fun HomeScreen(
                                     itemsIndexed(
                                         row.items,
                                         key = { index, meta -> "${row.addonId}_${meta.id}_$index" }
-                                    ) { _, meta ->
+                                    ) { index, meta ->
                                         PosterCard(
                                             meta = meta,
+                                            showRatingChip = true,
                                             onClick = { onOpenDetail(row.addonId, meta.type, meta.id) },
                                             onLongClick = { contextMenuTarget = row.addonId to meta }
                                         )
@@ -606,6 +612,14 @@ private fun HeroCarousel(
 ) {
     val pagerState = rememberPagerState(pageCount = { featured.size })
     val isTv = rememberIsTv()
+    // Hero height: TV keeps the 380.dp backdrop hero. On mobile the hero
+    // takes 45% of the screen height with the poster filling it
+    // edge-to-edge (owner's device verdict 2026-10-24 — 45% chosen after
+    // the same-day 40% fix, itself superseding the 60% full-poster
+    // version, which stood narrow with blurred side bars and was
+    // rejected on sight).
+    val heroHeight = if (isTv) 380.dp
+        else (LocalConfiguration.current.screenHeightDp * 0.45f).dp
 
     val reducedMotion = com.pulsestream.app.data.rememberReducedMotion()
     LaunchedEffect(pagerState, featured.size, reducedMotion) {
@@ -627,7 +641,7 @@ private fun HeroCarousel(
             state = pagerState,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(380.dp),
+                .height(heroHeight),
             key = { index -> "hero_${featured[index].meta.id}_$index" }
         ) { index ->
             val item = featured[index]
@@ -640,12 +654,25 @@ private fun HeroCarousel(
                     .then(if (heroFocus != null && index == 0) Modifier.focusRequester(heroFocus) else Modifier)
                     .focusable()
             ) {
-                SafePosterImage(
-                    model = meta.background?.takeIf { it.isNotBlank() } ?: meta.poster,
-                    contentDescription = meta.name,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
+                if (isTv || meta.poster.isNullOrBlank()) {
+                    SafePosterImage(
+                        model = meta.background?.takeIf { it.isNotBlank() } ?: meta.poster,
+                        contentDescription = meta.name,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    // Mobile hero: the poster fills the hero edge-to-edge
+                    // — full width, ContentScale.Crop, the same treatment
+                    // as the detail-page hero (the top/bottom crop of the
+                    // 2:3 poster is intended).
+                    SafePosterImage(
+                        model = meta.poster,
+                        contentDescription = meta.name,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
                 Box(
                     Modifier.fillMaxSize().background(
                         Brush.verticalGradient(
@@ -679,7 +706,7 @@ private fun HeroCarousel(
                     if (info.isNotBlank()) {
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            text = info,
+                            text = com.pulsestream.app.ui.components.accentStarText(info, LocalPalette.current.accent),
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary,
                             maxLines = 1,
@@ -743,7 +770,7 @@ private fun ContinueWatchingCard(
                 .liquidGlass(RoundedCornerShape(14.dp))
         ) {
             SafePosterImage(
-                model = item.poster,
+                model = tmdbSizedImage(item.poster, "w780"),
                 contentDescription = item.title,
                 modifier = Modifier.fillMaxSize()
             )
@@ -785,19 +812,29 @@ private fun ContinueWatchingCard(
             overflow = TextOverflow.Ellipsis
         )
         val remainingMs = item.durationMs - item.positionMs
+        // H-A (owner's pick 2026-10-24): the slot under a Continue
+        // Watching title carries the time left as a quiet micro label —
+        // the same slot catalog cards use for the popularity meter, and
+        // no meter here. (PlaybackState has no rating, so no rating
+        // chip on these cards.)
+        val slotStyle = MaterialTheme.typography.labelSmall.copy(
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.8.sp
+        )
         if (remainingMs > 60_000) {
             Text(
-                text = "${formatRemaining(remainingMs)} left",
-                style = MaterialTheme.typography.labelSmall.copy(
-                    brush = LocalPalette.current.gradient
-                )
+                text = "${formatRemaining(remainingMs)} LEFT".uppercase(),
+                style = slotStyle,
+                color = TextSecondary,
+                maxLines = 1
             )
         } else {
             Text(
-                text = "Resume",
-                style = MaterialTheme.typography.labelSmall.copy(
-                    brush = LocalPalette.current.gradient
-                )
+                text = "RESUME",
+                style = slotStyle,
+                color = TextSecondary,
+                maxLines = 1
             )
         }
     }
@@ -810,3 +847,173 @@ private fun formatRemaining(ms: Long): String {
     val m = totalMin % 60
     return if (h > 0) "${h}h ${m}m" else "${m}m"
 }
+
+/** Starter addons for the guided empty-state steps (Sample C). */
+private const val META_ADDON_URL = "https://plaviometa.vercel.app/manifest.json"
+private const val STREAMS_ADDON_URL = "https://hd.plavio.site/manifest.json"
+
+private enum class SetupStepState { Idle, Adding, Added, Failed }
+
+/**
+ * "No addons yet" — Sample C (owner's pick 2026-10-24): two guided
+ * steps instead of one vague button. Metadata first, streams second,
+ * each with its own one-tap Add (the same install path as onboarding);
+ * the ghost button below opens the full Addons screen for any URL.
+ */
+@Composable
+private fun NoAddonsEmptyState(
+    repository: StreamRepository,
+    onGoToAddons: () -> Unit,
+    onReload: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var metaStep by remember { mutableStateOf(SetupStepState.Idle) }
+    var streamsStep by remember { mutableStateOf(SetupStepState.Idle) }
+
+    fun add(url: String, set: (SetupStepState) -> Unit) {
+        set(SetupStepState.Adding)
+        scope.launch {
+            val result = repository.addAddonFromUrl(url)
+            if (result.isSuccess) {
+                set(SetupStepState.Added)
+                onReload()
+            } else {
+                set(SetupStepState.Failed)
+            }
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp)
+            .padding(top = 58.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text(
+            "Set up your home",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
+        )
+        Text(
+            "Two kinds of addons fill this screen. Add one of each, or any addon by URL.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary
+        )
+        Spacer(Modifier.height(2.dp))
+        SetupStepRow(
+            number = 1,
+            title = "Metadata",
+            subtitle = "Posters, cast and episode guides \u2014 e.g. PlavioMeta",
+            state = metaStep,
+            onAdd = { add(META_ADDON_URL) { metaStep = it } }
+        )
+        SetupStepRow(
+            number = 2,
+            title = "Streams",
+            subtitle = "Movies and shows to actually play \u2014 e.g. PlavioHD",
+            state = streamsStep,
+            onAdd = { add(STREAMS_ADDON_URL) { streamsStep = it } }
+        )
+        Text(
+            "Or tap \u201CAdd an addon\u201D below to paste any addon URL.",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .background(GlassWhite, RoundedCornerShape(50))
+                .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                .clickable { onGoToAddons() }
+                .padding(vertical = 13.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "Add an addon",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+        }
+    }
+}
+
+@Composable
+private fun SetupStepRow(
+    number: Int,
+    title: String,
+    subtitle: String,
+    state: SetupStepState,
+    onAdd: () -> Unit
+) {
+    val palette = LocalPalette.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .liquidGlass(RoundedCornerShape(18.dp))
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            Modifier
+                .size(26.dp)
+                .background(palette.accent.copy(alpha = 0.15f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "$number",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = palette.accentText
+            )
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary
+            )
+            if (state == SetupStepState.Failed) {
+                Text(
+                    "Couldn't add it \u2014 check your connection and try again.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+        when (state) {
+            SetupStepState.Adding -> OrbitDots(modifier = Modifier.size(22.dp))
+            SetupStepState.Added -> Icon(
+                Icons.Filled.Check,
+                contentDescription = "Added",
+                tint = palette.accent,
+                modifier = Modifier.size(22.dp)
+            )
+            else -> Box(
+                Modifier
+                    .background(palette.accent, RoundedCornerShape(50))
+                    .clickable { onAdd() }
+                    .padding(horizontal = 13.dp, vertical = 7.dp)
+            ) {
+                Text(
+                    if (state == SetupStepState.Failed) "Retry" else "Add",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF04120B)
+                )
+            }
+        }
+    }
+}
+

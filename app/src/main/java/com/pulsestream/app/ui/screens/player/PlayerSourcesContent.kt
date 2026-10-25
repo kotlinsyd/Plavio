@@ -134,8 +134,11 @@ internal fun PlayerSourcesContent(
             item {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (loading) OrbitDots(modifier = Modifier.size(26.dp))
-                    Text(if (loading) "Finding sources…" else "No sources loaded for this title.", color = TextSecondary)
+                    if (loading) {
+                        OrbitDots(modifier = Modifier.size(26.dp))
+                    } else {
+                        Text("No sources loaded for this title.", color = TextSecondary)
+                    }
                 }
             }
             if (!loading) item { TextButton(onClick = onRetry, modifier = Modifier.padding(horizontal = 8.dp)) { Text("Load sources") } }

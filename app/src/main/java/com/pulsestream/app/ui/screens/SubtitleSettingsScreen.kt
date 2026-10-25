@@ -94,19 +94,7 @@ fun SubtitleSettingsScreen(
                     )
                 }
             }
-            item(key = "subLangs") {
-                SettingsNavRow(
-                    icon = Icons.Filled.Translate,
-                    title = "Preferred subtitle languages",
-                    subtitle = if (subLangs.isEmpty()) {
-                        "Not set — first available subtitle is used"
-                    } else {
-                        subLangs.joinToString(", ") { subtitleLanguageName(it) }
-                    },
-                    onClick = { subLangPickerOpen = true }
-                )
-            }
-            item(key = "subStyle") {
+            item(key = "sub_group") {
                 val styleSummary = remember(subStyleVersion) {
                     if (settings.useSystemCaptions) {
                         "System default (Android caption settings)"
@@ -116,11 +104,27 @@ fun SubtitleSettingsScreen(
                             subtitleEdgeName(settings.subtitleEdgeType)
                     }
                 }
-                SettingsNavRow(
-                    icon = Icons.Filled.ClosedCaption,
-                    title = "Subtitle appearance",
-                    subtitle = styleSummary,
-                    onClick = { subStyleOpen = true }
+                SettingsGroup(
+                    {
+                        SettingsNavRow(
+                            icon = Icons.Filled.Translate,
+                            title = "Preferred subtitle languages",
+                            subtitle = if (subLangs.isEmpty()) {
+                                "Not set — first available subtitle is used"
+                            } else {
+                                subLangs.joinToString(", ") { subtitleLanguageName(it) }
+                            },
+                            onClick = { subLangPickerOpen = true }
+                        )
+                    },
+                    {
+                        SettingsNavRow(
+                            icon = Icons.Filled.ClosedCaption,
+                            title = "Subtitle appearance",
+                            subtitle = styleSummary,
+                            onClick = { subStyleOpen = true }
+                        )
+                    }
                 )
             }
             // Global subtitle timing offset (v0.9.0+). Positive = subtitles

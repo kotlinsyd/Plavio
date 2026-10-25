@@ -33,11 +33,12 @@ fun DownloadConfirmDialog(
     var probing by remember { mutableStateOf(true) }
     var alreadyDownloaded by remember { mutableStateOf(false) }
     var requestError by remember { mutableStateOf<String?>(null) }
-    val adaptiveUnsupported = manager.isAdaptiveDownloadUrl(stream.url)
+    val dashUnsupported = manager.isDashDownloadUrl(stream.url)
+    val isHls = manager.isHlsDownloadUrl(stream.url)
 
     LaunchedEffect(stream.url) {
         alreadyDownloaded = manager.getByUrl(stream.url)?.status == "COMPLETED"
-        if (!adaptiveUnsupported) sizeBytes = manager.probeSize(stream.url, stream.headers)
+        if (!dashUnsupported && !isHls) sizeBytes = manager.probeSize(stream.url, stream.headers)
         probing = false
     }
 
@@ -72,11 +73,18 @@ fun DownloadConfirmDialog(
                             )
                         }
                     }
-                    adaptiveUnsupported -> {
+                    dashUnsupported -> {
                         Text(
-                            "Offline downloads currently support progressive media files only. HLS/DASH adaptive streams require downloading multiple segments and are not supported as complete offline downloads.",
+                            "DASH streams can't be saved as offline downloads yet.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    isHls -> {
+                        Text(
+                            "This is an HLS stream. It will be downloaded in segments and saved as a single MP4 file, so the size can't be checked beforehand.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
                         )
                     }
                     alreadyDownloaded -> {
@@ -132,7 +140,7 @@ fun DownloadConfirmDialog(
                         }
                     } else onDismiss()
                 },
-                enabled = !probing && !alreadyDownloaded && !adaptiveUnsupported && enoughStorage
+                enabled = !probing && !alreadyDownloaded && !dashUnsupported && (isHls || enoughStorage)
             ) {
                 Text("Download", color = MaterialTheme.colorScheme.primary)
             }

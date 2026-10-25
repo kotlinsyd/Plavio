@@ -34,6 +34,10 @@ internal object DownloadProtocol {
             )
     }
 
+    fun isHls(url: String): Boolean = url.lowercase().contains(".m3u8")
+
+    fun isDash(url: String): Boolean = url.lowercase().contains(".mpd")
+
     fun isUnsupportedPayload(prefix: ByteArray): Boolean {
         val text = prefix.toString(Charsets.UTF_8).trimStart('\uFEFF', ' ', '\t', '\r', '\n').lowercase()
         return text.startsWith("#extm3u") || text.startsWith("<mpd") ||

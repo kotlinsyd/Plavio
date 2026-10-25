@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 140
-        versionName = "0.12.31"
+        versionCode = 148
+        versionName = "0.14.3"
         // Sentry DSN — a client ingest key (public by design, send-only).
         // Passed at build time via -PSENTRY_DSN=... like the gate key.
         buildConfigField(
@@ -32,6 +32,19 @@ android {
             "String",
             "PLAVIO_GATE_KEY",
             "\"${providers.gradleProperty("PLAVIO_GATE_KEY").orNull ?: ""}\""
+        )
+        // Plavio account backend (Supabase). The anon key is a public
+        // client key by design; row-level security guards the data.
+        // Passed at build time via -PPLAVIO_SUPABASE_URL=... like the DSN.
+        buildConfigField(
+            "String",
+            "PLAVIO_SUPABASE_URL",
+            "\"${providers.gradleProperty("PLAVIO_SUPABASE_URL").orNull ?: ""}\""
+        )
+        buildConfigField(
+            "String",
+            "PLAVIO_SUPABASE_ANON_KEY",
+            "\"${providers.gradleProperty("PLAVIO_SUPABASE_ANON_KEY").orNull ?: ""}\""
         )
     }
 

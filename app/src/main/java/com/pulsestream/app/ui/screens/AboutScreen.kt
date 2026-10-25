@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.PrivacyTip
@@ -32,6 +33,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.pulsestream.app.data.DebugLog
 import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.theme.AppPalette
@@ -74,7 +76,30 @@ fun AboutScreen(
             }
             item(key = "aboutCard") { AboutCard() }
             item(key = "updater") { AppUpdaterCard() }
+            item(key = "support") { SupportRows() }
             item(key = "legal") { LegalRows(onGoToLicenses = onGoToLicenses) }
+        }
+    }
+}
+
+/**
+ * Support rows: share a debug log (app/device facts, source diagnostics,
+ * redacted logcat) so a user can send it when reporting a problem.
+ */
+@Composable
+private fun SupportRows() {
+    val context = LocalContext.current
+    val palette = LocalPalette.current
+    GlassCard(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp)
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            LegalRow(
+                icon = Icons.Filled.BugReport,
+                title = "Share debug log",
+                onClick = { DebugLog.share(context) },
+                palette = palette
+            )
         }
     }
 }

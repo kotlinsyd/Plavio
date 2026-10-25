@@ -839,20 +839,6 @@ class StreamRepository(
      */
     suspend fun loadPopularTitles(limit: Int = 10): List<CachedMeta> =
         withContext(Dispatchers.IO) {
-            val key = settings.tmdbApiKey.takeIf { it.isNotBlank() }
-            if (key != null) {
-                val trending = TmdbClient.trending(key, limit)
-                if (trending.isNotEmpty()) {
-                    return@withContext trending.map { meta ->
-                        CachedMeta(
-                            addonId = "tmdb",
-                            addonName = "TMDB",
-                            baseUrl = "https://api.themoviedb.org/3",
-                            meta = meta
-                        )
-                    }
-                }
-            }
             val rows = runCatching { loadCatalogRowsCached() }.getOrDefault(emptyList())
             if (rows.isEmpty()) return@withContext emptyList()
             fun chartScore(row: CatalogRow): Int {
@@ -892,36 +878,6 @@ class StreamRepository(
     /** Lowercase, punctuation-stripped title form for match/dedupe comparisons. */
     private fun normalizeSearchTitle(raw: String): String =
         raw.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim().replace(Regex("\\s+"), " ")
-
-    // TMDB popularity enrichment cache (v0.12.1): one entry per normalized
-    // query, 10-minute TTL — repeat searches and progressive re-ranks never
-    // refetch, and a TMDB outage costs at most one bounded wait per query.
-    private val tmdbPopularityCache =
-        java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<TmdbClient.TmdbSearchHit>>>()
-
-    /**
-     * TMDB popularity hits for [query], or an empty list when no TMDB key
-     * is configured or the lookup fails/times out. Bounded at 2.5s so
-     * enrichment can never make search feel slower than the addon fetches
-     * it already waits for; failures are silently ignored by design.
-     */
-    private suspend fun tmdbPopularityFor(query: String): List<TmdbClient.TmdbSearchHit> {
-        val key = settings.tmdbApiKey.takeIf { it.isNotBlank() } ?: return emptyList()
-        val cacheKey = normalizeSearchTitle(query)
-        val now = System.currentTimeMillis()
-        tmdbPopularityCache[cacheKey]?.let { (ts, hits) ->
-            // Failures/empties are cached only briefly — a 10-minute negative
-            // cache froze bad ranking after a single TMDB hiccup (2026-10-23).
-            val ttl = if (hits.isEmpty()) 60_000L else 10 * 60 * 1000L
-            if (now - ts < ttl) return hits
-        }
-        val hits = withTimeoutOrNull(2_500L) {
-            TmdbClient.searchWithPopularity(key, query)
-        } ?: emptyList()
-        if (tmdbPopularityCache.size > 32) tmdbPopularityCache.clear()
-        tmdbPopularityCache[cacheKey] = now to hits
-        return hits
-    }
 
     /**
      * Search ordering: exact title match first, then prefix match, then
@@ -987,41 +943,11 @@ class StreamRepository(
             }
         }
 
-        // TMDB popularity enrichment (v0.12.1, owner's "best fit" call):
-        // when a TMDB key is configured, rank by TMDB popularity + vote
-        // average — the signals that actually separate Salman Khan's
-        // Sultan (2016) from the 1930s namesakes. Matching is by
-        // normalized title + type, preferring a year-equal hit when the
-        // result's year is known. No key / no hits → the v0.12.0
-        // IMDb-rating order below applies unchanged.
-        val tmdbHits = tmdbPopularityFor(query)
-        if (tmdbHits.isEmpty()) {
-            return deduped.sortedWith(
-                compareBy<CachedMeta> { matchTier(it.meta.name) }
-                    .thenByDescending { searchRatingOf(it.meta.imdbRating) ?: -1.0 }
-                    .thenByDescending { searchYearOf(it.meta.releaseInfo) ?: 0 }
-                    .thenBy { addonRank(it) }
-            )
-        }
-        val popularityOf = java.util.IdentityHashMap<CachedMeta, Double>()
-        val voteOf = java.util.IdentityHashMap<CachedMeta, Double>()
-        for (cm in deduped) {
-            val title = normalizeSearchTitle(cm.meta.name)
-            val year = searchYearOf(cm.meta.releaseInfo)
-            val candidates = tmdbHits.filter {
-                normalizeSearchTitle(it.title) == title && it.type == cm.meta.type
-            }
-            val hit = candidates.firstOrNull { year != null && it.year == year }
-                ?: candidates.maxByOrNull { it.popularity }
-            if (hit != null) {
-                popularityOf[cm] = hit.popularity
-                voteOf[cm] = hit.voteAverage
-            }
-        }
+        // Search ordering (keyless since v0.14.0 — the app-side TMDB key
+        // feature was removed; PlavioMeta's server key covers enrichment):
+        // match tier first, then IMDb rating, then year, then addon rank.
         return deduped.sortedWith(
             compareBy<CachedMeta> { matchTier(it.meta.name) }
-                .thenByDescending { popularityOf[it] ?: -1.0 }
-                .thenByDescending { voteOf[it] ?: -1.0 }
                 .thenByDescending { searchRatingOf(it.meta.imdbRating) ?: -1.0 }
                 .thenByDescending { searchYearOf(it.meta.releaseInfo) ?: 0 }
                 .thenBy { addonRank(it) }
@@ -1989,7 +1915,9 @@ class StreamRepository(
         val playback: List<PlaybackState>?,
         val lists: List<CustomList>?,
         val listItems: List<CustomListItem>?,
-        val apiKeys: Map<String, String>?
+        val apiKeys: Map<String, String>?,
+        /** Base64 JPEG of the user's own profile photo, when the backup carries one. */
+        val profilePhotoBase64: String? = null
     )
 
     suspend fun exportBackupJson(enabledCategories: Set<String>? = null): Result<String> = try {
@@ -2022,6 +1950,14 @@ class StreamRepository(
                         val apiKeysJson = JSONObject()
                         settings.exportApiKeysForBackup().forEach { (k, v) -> apiKeysJson.put(k, v) }
                         put("api_keys", apiKeysJson)
+                    }
+                    // Profile photo (owner's order 2026-10-24): the choice
+                    // itself is a normal preference above; the cropped JPEG
+                    // bytes ride the backup as their own field.
+                    if (settings.profileAvatar == "photo") {
+                        settings.readProfilePhotoBytes()?.let { bytes ->
+                            put("profilePhoto", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+                        }
                     }
                 }
                 if (includeAddons) {
@@ -2107,6 +2043,13 @@ class StreamRepository(
             } catch (e: Exception) {
                 settings.importAllPrefs(previousPrefs)
                 throw e
+            }
+            // Restore the profile photo bytes, if the backup carried them
+            // (the choice itself arrived with the settings import above).
+            parsed.profilePhotoBase64?.let { encoded ->
+                runCatching {
+                    settings.writeProfilePhoto(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT))
+                }
             }
             // All provider-owned cached responses are invalid after replacing settings/addons.
             manifestCache.clear(); catalogCache = emptyList(); trailersCache = null; tvRowsMemoryCache = null
@@ -2236,12 +2179,18 @@ class StreamRepository(
                 }
             }
         } else null
-        return ParsedBackup(version, prefs, addons, watch, play, lists, listItems, apiKeys)
+        val profilePhoto = if (root.has("profilePhoto")) {
+            val v = root.get("profilePhoto") as? String
+                ?: throw IllegalArgumentException("Invalid 'profilePhoto'.")
+            require(v.length <= 4_000_000) { "Profile photo in backup is too large." }
+            v
+        } else null
+        return ParsedBackup(version, prefs, addons, watch, play, lists, listItems, apiKeys, profilePhoto)
     }
 
     private fun isSecretPreference(key: String): Boolean {
         val k = key.lowercase()
-        return k in setOf("tmdb_api_key", "simkl_token", "torbox_api_key", "realdebrid_api_key", "trakt_access_token", "trakt_refresh_token") ||
+        return k in setOf("simkl_token", "torbox_api_key", "realdebrid_api_key", "trakt_access_token", "trakt_refresh_token") ||
             listOf("token", "api_key", "apikey", "password", "secret", "auth").any { it in k } ||
             k.startsWith("plavio_privacy")
     }

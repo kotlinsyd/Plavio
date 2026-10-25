@@ -3,6 +3,7 @@
 package com.pulsestream.app.data
 
 import android.content.Context
+import java.io.File
 import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -328,6 +329,21 @@ class SettingsStore(context: Context) {
     private val secretPrefs: SharedPreferences =
         appContext.getSharedPreferences("pulse_secret_settings", Context.MODE_PRIVATE)
 
+    // Type-tolerant numeric reads. A backup restore (org.json turns 1.0 into
+    // an Int) or an older version can store a number under a key in the wrong
+    // numeric type, and the strict SharedPreferences getters then throw
+    // ClassCastException (Sentry PLAVIO-1). These coerce any stored Number;
+    // a missing or non-numeric value falls back to the default, exactly like
+    // the typed getters did for absent keys.
+    private fun prefFloat(key: String, default: Float): Float =
+        (prefs.all[key] as? Number)?.toFloat() ?: default
+
+    private fun prefInt(key: String, default: Int): Int =
+        (prefs.all[key] as? Number)?.toInt() ?: default
+
+    private fun prefLong(key: String, default: Long): Long =
+        (prefs.all[key] as? Number)?.toLong() ?: default
+
     init { migrateLegacySecrets() }
 
     /** Play the first source automatically (v0.2.0 behavior) vs. manual play. */
@@ -374,32 +390,23 @@ class SettingsStore(context: Context) {
             ?: PlayerChoice.BUILT_IN.name
         set(value) = prefs.edit().putString(KEY_PREFERRED_PLAYER, value).apply()
 
-    /**
-     * TMDB API key (user-supplied): enables clickable actors and in-app
-     * recommendations ("You May Like"). Get a free key at
-     * themoviedb.org/settings/api.
-     */
-    var tmdbApiKey: String
-        get() = getSecret(KEY_TMDB_API_KEY).orEmpty()
-        set(value) = putSecret(KEY_TMDB_API_KEY, value.takeIf { it.isNotBlank() })
-
     // ------------------------------------------------------------------
     // Buffer & cache (v0.9.0+): player buffering + on-disk playback cache.
     // ------------------------------------------------------------------
 
     /** Minimum media buffered before playback can proceed (ms). */
     var bufferMinMs: Int
-        get() = prefs.getInt(KEY_BUFFER_MIN_MS, 15_000).coerceIn(5_000, 120_000)
+        get() = prefInt(KEY_BUFFER_MIN_MS, 15_000).coerceIn(5_000, 120_000)
         set(value) = prefs.edit().putInt(KEY_BUFFER_MIN_MS, value.coerceIn(5_000, 120_000)).apply()
 
     /** Maximum media buffered ahead during playback (ms). */
     var bufferMaxMs: Int
-        get() = prefs.getInt(KEY_BUFFER_MAX_MS, 50_000).coerceIn(10_000, 300_000)
+        get() = prefInt(KEY_BUFFER_MAX_MS, 50_000).coerceIn(10_000, 300_000)
         set(value) = prefs.edit().putInt(KEY_BUFFER_MAX_MS, value.coerceIn(10_000, 300_000)).apply()
 
     /** How much must be buffered before playback starts/resumes (ms). */
     var bufferForPlaybackMs: Int
-        get() = prefs.getInt(KEY_BUFFER_FOR_PLAYBACK_MS, 2_500).coerceIn(1_000, 30_000)
+        get() = prefInt(KEY_BUFFER_FOR_PLAYBACK_MS, 2_500).coerceIn(1_000, 30_000)
         set(value) = prefs.edit().putInt(KEY_BUFFER_FOR_PLAYBACK_MS, value.coerceIn(1_000, 30_000)).apply()
 
     /**
@@ -408,7 +415,7 @@ class SettingsStore(context: Context) {
      * too; live streams are unaffected (they're never re-watched).
      */
     var diskCacheMb: Int
-        get() = prefs.getInt(KEY_DISK_CACHE_MB, 0).coerceAtLeast(0)
+        get() = prefInt(KEY_DISK_CACHE_MB, 0).coerceAtLeast(0)
         set(value) = prefs.edit().putInt(KEY_DISK_CACHE_MB, value.coerceAtLeast(0)).apply()
 
     /** Keep the screen awake while the player is open. */
@@ -487,7 +494,7 @@ class SettingsStore(context: Context) {
 
     /** Epoch millis when the Trakt access token should be refreshed. */
     var traktTokenExpiry: Long
-        get() = prefs.getLong(KEY_TRAKT_EXPIRY, 0L)
+        get() = prefLong(KEY_TRAKT_EXPIRY, 0L)
         set(value) = prefs.edit().putLong(KEY_TRAKT_EXPIRY, value).apply()
 
     /** Trakt display name for the linked account. */
@@ -511,7 +518,7 @@ class SettingsStore(context: Context) {
 
     /** Epoch millis of the last library sync attempt (0 = never). */
     var librarySyncLastAt: Long
-        get() = prefs.getLong(KEY_LIBRARY_SYNC_AT, 0L)
+        get() = prefLong(KEY_LIBRARY_SYNC_AT, 0L)
         set(value) = prefs.edit().putLong(KEY_LIBRARY_SYNC_AT, value).apply()
 
     /** Short human result of the last library sync ("" = never ran). */
@@ -528,9 +535,35 @@ class SettingsStore(context: Context) {
         get() = prefs.getString(KEY_PROFILE_USER_NAME, "") ?: ""
         set(value) = prefs.edit().putString(KEY_PROFILE_USER_NAME, value.trim()).apply()
 
+    /**
+     * Account picture choice (owner's order 2026-10-24): "" = none,
+     * "photo" = the user's own photo (see [profilePhotoFile]),
+     * "preset:<id>" = a built-in avatar. A plain preference, so it
+     * rides the Drive backup with the other settings; the photo bytes
+     * ride the backup as their own field (StreamRepository).
+     */
+    var profileAvatar: String
+        get() = prefs.getString(KEY_PROFILE_AVATAR, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_PROFILE_AVATAR, value).apply()
+
+    /** The user's own cropped profile photo (JPEG, app-private storage). */
+    fun profilePhotoFile(): File = File(appContext.filesDir, "profile_photo.jpg")
+
+    fun readProfilePhotoBytes(): ByteArray? = runCatching {
+        profilePhotoFile().takeIf { it.exists() }?.readBytes()
+    }.getOrNull()
+
+    fun writeProfilePhoto(bytes: ByteArray) {
+        profilePhotoFile().writeBytes(bytes)
+    }
+
+    fun deleteProfilePhoto() {
+        runCatching { profilePhotoFile().delete() }
+    }
+
     /** Accent color theme name (see AccentTheme). */
     var accentName: String
-        get() = prefs.getString(KEY_ACCENT, AccentTheme.PULSE.name) ?: AccentTheme.PULSE.name
+        get() = prefs.getString(KEY_ACCENT, AccentTheme.WHITE.name) ?: AccentTheme.WHITE.name
         set(value) = prefs.edit().putString(KEY_ACCENT, value).apply()
 
     /** Pure-black backgrounds (AMOLED-friendly). */
@@ -542,6 +575,25 @@ class SettingsStore(context: Context) {
     var themeMode: String
         get() = prefs.getString(KEY_THEME_MODE, "dark") ?: "dark"
         set(value) = prefs.edit().putString(KEY_THEME_MODE, value).apply()
+
+    /**
+     * The six-theme appearance choice (AppTheme name). When never set,
+     * it migrates from the old settings so existing users keep their
+     * current look: Normal -> Warm Ivory, AMOLED -> True Black, else
+     * Onyx (the default). Writing it also keeps the legacy
+     * themeMode/amoledBlack fields in sync for older readers.
+     */
+    var appTheme: String
+        get() = prefs.getString(KEY_APP_THEME, null) ?: when {
+            themeMode == "light" -> "WARM_IVORY"
+            amoledBlack -> "TRUE_BLACK"
+            else -> "ONYX"
+        }
+        set(value) {
+            prefs.edit().putString(KEY_APP_THEME, value).apply()
+            themeMode = if (value == "WARM_IVORY" || value == "PEARL") "light" else "dark"
+            amoledBlack = value == "TRUE_BLACK"
+        }
 
     /**
      * Preferred subtitle languages (ISO 639-1 codes, up to 2).
@@ -585,17 +637,17 @@ class SettingsStore(context: Context) {
 
     /** Subtitle text color (ARGB int). Default: white. */
     var subtitleTextColor: Int
-        get() = prefs.getInt(KEY_SUB_COLOR, 0xFFFFFFFF.toInt())
+        get() = prefInt(KEY_SUB_COLOR, 0xFFFFFFFF.toInt())
         set(value) = prefs.edit().putInt(KEY_SUB_COLOR, value).apply()
 
     /** Subtitle text size scale (1.0 = default). Range 0.6 – 2.0. */
     var subtitleTextSizeScale: Float
-        get() = prefs.getFloat(KEY_SUB_SIZE, 1.0f)
+        get() = prefFloat(KEY_SUB_SIZE, 1.0f)
         set(value) = prefs.edit().putFloat(KEY_SUB_SIZE, value.coerceIn(0.6f, 2.0f)).apply()
 
     /** Subtitle background color (ARGB int). Default: semi-transparent black. */
     var subtitleBackgroundColor: Int
-        get() = prefs.getInt(KEY_SUB_BG, 0xCC000000.toInt())
+        get() = prefInt(KEY_SUB_BG, 0xCC000000.toInt())
         set(value) = prefs.edit().putInt(KEY_SUB_BG, value).apply()
 
     /**
@@ -603,8 +655,27 @@ class SettingsStore(context: Context) {
      * 3 = raised, 4 = depressed. Default: 2 (drop shadow).
      */
     var subtitleEdgeType: Int
-        get() = prefs.getInt(KEY_SUB_EDGE, 2)
+        get() = prefInt(KEY_SUB_EDGE, 2)
         set(value) = prefs.edit().putInt(KEY_SUB_EDGE, value.coerceIn(0, 4)).apply()
+
+    /** Bold subtitle text (player Style panel). Default: off. */
+    var subtitleBold: Boolean
+        get() = prefs.getBoolean(KEY_SUB_BOLD, false)
+        set(value) = prefs.edit().putBoolean(KEY_SUB_BOLD, value).apply()
+
+    /** Subtitle outline/edge color (ARGB int). Default: black. */
+    var subtitleEdgeColor: Int
+        get() = prefInt(KEY_SUB_EDGE_COLOR, 0xFF000000.toInt())
+        set(value) = prefs.edit().putInt(KEY_SUB_EDGE_COLOR, value).apply()
+
+    /**
+     * Subtitle bottom offset, 0-100 in player Style-panel steps; the
+     * player maps it to a SubtitleView bottom-padding fraction so
+     * captions can be lifted off the bottom edge. Default: 0.
+     */
+    var subtitleBottomOffset: Int
+        get() = prefInt(KEY_SUB_BOTTOM, 0)
+        set(value) = prefs.edit().putInt(KEY_SUB_BOTTOM, value.coerceIn(0, 100)).apply()
 
     /**
      * Global subtitle timing offset in milliseconds (v0.9.0+). Positive =
@@ -614,7 +685,7 @@ class SettingsStore(context: Context) {
      * side-loaded subtitles).
      */
     var subtitleOffsetMs: Long
-        get() = prefs.getLong(KEY_SUBTITLE_OFFSET_MS, 0L).coerceIn(-10_000L, 10_000L)
+        get() = prefLong(KEY_SUBTITLE_OFFSET_MS, 0L).coerceIn(-10_000L, 10_000L)
         set(value) = prefs.edit().putLong(KEY_SUBTITLE_OFFSET_MS, value.coerceIn(-10_000L, 10_000L)).apply()
 
     /** Pinned Live TV channels, keys "addonId|metaId" ("m3u|url" for M3U). */
@@ -645,7 +716,7 @@ class SettingsStore(context: Context) {
      * otherwise a Live visit would suppress Home's background refresh.
      */
     var homeCatalogsRefreshedAt: Long
-        get() = prefs.getLong(KEY_HOME_REFRESHED_AT, 0L)
+        get() = prefLong(KEY_HOME_REFRESHED_AT, 0L)
         set(value) = prefs.edit().putLong(KEY_HOME_REFRESHED_AT, value).apply()
 
     // ------------------------------------------------------------------
@@ -654,7 +725,7 @@ class SettingsStore(context: Context) {
 
     /** Max streams shown per source addon in the stream picker (1–10). */
     var streamsPerSource: Int
-        get() = prefs.getInt(KEY_STREAMS_PER_SOURCE, 5).coerceIn(1, 10)
+        get() = prefInt(KEY_STREAMS_PER_SOURCE, 5).coerceIn(1, 10)
         set(value) = prefs.edit().putInt(KEY_STREAMS_PER_SOURCE, value.coerceIn(1, 10)).apply()
 
     /**
@@ -691,7 +762,7 @@ class SettingsStore(context: Context) {
 
     /** Autoplay max file size in GB (0 = no limit). */
     var autoplayMaxSizeGb: Int
-        get() = prefs.getInt(KEY_AUTOPLAY_MAX_SIZE, 0).coerceAtLeast(0)
+        get() = prefInt(KEY_AUTOPLAY_MAX_SIZE, 0).coerceAtLeast(0)
         set(value) = prefs.edit().putInt(KEY_AUTOPLAY_MAX_SIZE, value.coerceAtLeast(0)).apply()
 
     private fun migrateLegacySecrets() {
@@ -764,7 +835,6 @@ class SettingsStore(context: Context) {
      */
     fun exportApiKeysForBackup(): Map<String, String> {
         val keys = mutableMapOf<String, String>()
-        tmdbApiKey.takeIf { it.isNotBlank() }?.let { keys["tmdb_api_key"] = it }
         torboxApiKey?.takeIf { it.isNotBlank() }?.let { keys["torbox_api_key"] = it }
         realDebridApiKey?.takeIf { it.isNotBlank() }?.let { keys["realdebrid_api_key"] = it }
         traktAccessToken?.takeIf { it.isNotBlank() }?.let { keys["trakt_access_token"] = it }
@@ -778,7 +848,6 @@ class SettingsStore(context: Context) {
      * Only fills in blank local keys to avoid clobbering newer local values.
      */
     fun importApiKeysFromBackup(keys: Map<String, String>) {
-        keys["tmdb_api_key"]?.takeIf { it.isNotBlank() && tmdbApiKey.isBlank() }?.let { tmdbApiKey = it }
         keys["torbox_api_key"]?.takeIf { it.isNotBlank() && torboxApiKey.isNullOrBlank() }?.let { torboxApiKey = it }
         keys["realdebrid_api_key"]?.takeIf { it.isNotBlank() && realDebridApiKey.isNullOrBlank() }?.let { realDebridApiKey = it }
         keys["trakt_access_token"]?.takeIf { it.isNotBlank() && traktAccessToken.isNullOrBlank() }?.let { traktAccessToken = it }
@@ -824,7 +893,7 @@ class SettingsStore(context: Context) {
     companion object {
         private const val SECRET_KEY_ALIAS = "plavio.settings.secrets.v1"
         private val SECRET_KEYS = setOf(
-            "tmdb_api_key", "simkl_token", "torbox_api_key", "realdebrid_api_key",
+            "simkl_token", "torbox_api_key", "realdebrid_api_key",
             "trakt_access_token", "trakt_refresh_token"
         )
         private const val KEY_AUTOPLAY = "autoplay"
@@ -839,12 +908,15 @@ class SettingsStore(context: Context) {
         private const val KEY_BUFFER_FOR_PLAYBACK_MS = "buffer_for_playback_ms"
         private const val KEY_DISK_CACHE_MB = "disk_cache_mb"
         private const val KEY_ONBOARDING_DONE = "onboarding_done"
-        private const val KEY_TMDB_API_KEY = "tmdb_api_key"
+        
         private const val KEY_AUDIO_LANG = "preferred_audio_language"
         private const val KEY_SUB_COLOR = "subtitle_text_color"
         private const val KEY_SUB_SIZE = "subtitle_text_size_scale"
         private const val KEY_SUB_BG = "subtitle_background_color"
         private const val KEY_SUB_EDGE = "subtitle_edge_type"
+        private const val KEY_SUB_BOLD = "subtitle_bold"
+        private const val KEY_SUB_EDGE_COLOR = "subtitle_edge_color"
+        private const val KEY_SUB_BOTTOM = "subtitle_bottom_offset"
         private const val KEY_SUBTITLE_OFFSET_MS = "subtitle_offset_ms"
         private const val KEY_SYSTEM_CAPTIONS = "use_system_captions"
         private const val KEY_LIVE_FAVS = "live_favorites"
@@ -856,11 +928,13 @@ class SettingsStore(context: Context) {
         private const val KEY_SUBTITLE_LANGS = "subtitle_languages"
         private const val KEY_ACCENT = "accent_theme"
         private const val KEY_PROFILE_USER_NAME = "profile_user_name"
+        private const val KEY_PROFILE_AVATAR = "profile_avatar"
         private const val KEY_LIBRARY_SYNCED = "library_synced_keys"
         private const val KEY_LIBRARY_SYNC_AT = "library_sync_last_at"
         private const val KEY_LIBRARY_SYNC_RESULT = "library_sync_last_result"
         private const val KEY_AMOLED = "amoled_black"
         private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_APP_THEME = "app_theme"
         private const val KEY_PREINSTALL_PREFIX = "preinstall_done_"
         private const val KEY_SIMKL_TOKEN = "simkl_token"
         private const val KEY_SIMKL_USERNAME = "simkl_username"

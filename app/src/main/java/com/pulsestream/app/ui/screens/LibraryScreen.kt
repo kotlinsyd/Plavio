@@ -677,12 +677,15 @@ private fun FeedRow(
                 letterSpacing = 1.sp
             )
         }
+        // A feed can repeat a title; LazyRow keys must stay unique or
+        // Compose throws the duplicate-key crash (same class as ActorScreen).
+        val uniqueMetas = metas.distinctBy { it.type + "|" + it.id }
         LazyRow(
             contentPadding = PaddingValues(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.padding(top = 8.dp)
         ) {
-            items(metas, key = { "${it.type}_${it.id}" }) { meta ->
+            items(uniqueMetas, key = { "${it.type}_${it.id}" }) { meta ->
                 PosterCard(
                     meta = meta,
                     onClick = { onOpenDetail("", meta.type, meta.id) }

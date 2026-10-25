@@ -58,7 +58,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,6 +79,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.pulsestream.app.ui.tv.tvFocusRing
 import com.pulsestream.app.ui.tv.rememberIsTv
+import com.pulsestream.app.ui.theme.AppTheme
 import com.pulsestream.app.ui.theme.LocalPalette
 import com.pulsestream.app.ui.theme.GlassBorder
 import com.pulsestream.app.ui.theme.GlassWhite
@@ -91,7 +96,7 @@ fun GlowBackground(content: @Composable BoxScope.() -> Unit) {
     val palette = LocalPalette.current
     val isTv = rememberIsTv()
     Box(modifier = Modifier.fillMaxSize().background(palette.background)) {
-        if (!isTv) {
+        if (!isTv && palette.glowAlpha > 0f) {
             Canvas(modifier = Modifier.fillMaxSize()) {
             val w = size.width
             val h = size.height
@@ -99,7 +104,7 @@ fun GlowBackground(content: @Composable BoxScope.() -> Unit) {
             val glow2 = palette.accent2
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(glow1.copy(alpha = 0.16f), Color.Transparent),
+                    colors = listOf(glow1.copy(alpha = 0.16f * palette.glowAlpha), Color.Transparent),
                     center = Offset(w * 0.12f, h * 0.06f),
                     radius = w * 0.75f
                 ),
@@ -108,7 +113,7 @@ fun GlowBackground(content: @Composable BoxScope.() -> Unit) {
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(glow2.copy(alpha = 0.13f), Color.Transparent),
+                    colors = listOf(glow2.copy(alpha = 0.13f * palette.glowAlpha), Color.Transparent),
                     center = Offset(w * 0.92f, h * 0.55f),
                     radius = w * 0.8f
                 ),
@@ -117,7 +122,7 @@ fun GlowBackground(content: @Composable BoxScope.() -> Unit) {
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(glow1.copy(alpha = 0.07f), Color.Transparent),
+                    colors = listOf(glow1.copy(alpha = 0.07f * palette.glowAlpha), Color.Transparent),
                     center = Offset(w * 0.4f, h * 1.02f),
                     radius = w * 0.9f
                 ),
@@ -184,6 +189,7 @@ fun PosterCard(
     meta: MetaPreview,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
+    showRatingChip: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val gestureModifier = if (onLongClick != null) {
@@ -205,7 +211,7 @@ fun PosterCard(
                 .liquidGlass(RoundedCornerShape(16.dp))
         ) {
             SafePosterImage(
-                model = meta.poster,
+                model = tmdbSizedImage(meta.poster, "w342"),
                 contentDescription = meta.name,
                 modifier = Modifier.fillMaxSize()
             )
@@ -217,6 +223,39 @@ fun PosterCard(
                 com.pulsestream.app.data.WatchedMarks.movieKey(meta.id) in watchedKeys
             ) {
                 WatchedPill(Modifier.align(Alignment.BottomStart).padding(6.dp))
+            }
+            // H-A rating chip (owner's pick 2026-10-24): a small glass
+            // pill on the poster's top-left — mint star, white value.
+            // Opt-in via [showRatingChip] (Home rails only); every other
+            // PosterCard caller keeps the clean poster. Shown only when
+            // the title carries a rating.
+            if (showRatingChip) {
+                meta.imdbRating?.takeIf { it.isNotBlank() }?.let { rating ->
+                    Row(
+                        Modifier
+                            .align(Alignment.TopStart)
+                            .padding(6.dp)
+                            .background(Color(0xFF040A12).copy(alpha = 0.72f), RoundedCornerShape(50))
+                            .padding(horizontal = 7.dp, vertical = 2.5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "★",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontSize = 10.5.sp, fontWeight = FontWeight.Bold
+                            ),
+                            color = LocalPalette.current.accent
+                        )
+                        Spacer(Modifier.width(3.dp))
+                        Text(
+                            rating,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontSize = 10.5.sp, fontWeight = FontWeight.Bold
+                            ),
+                            color = Color.White
+                        )
+                    }
+                }
             }
             // Poster only — no corner tag on channel cards.
         }
@@ -381,6 +420,22 @@ fun EmptyState(title: String, message: String, actionLabel: String? = null, onAc
 }
 
 /**
+ * TMDB serves the same artwork at fixed widths — rails ask for the width
+ * they actually draw instead of decoding a w780/original upload into a
+ * 128dp card. Non-TMDB URLs (and malformed ones) pass through untouched.
+ */
+internal fun tmdbSizedImage(url: String?, segment: String): String? {
+    if (url == null) return null
+    val marker = "image.tmdb.org/t/p/"
+    val start = url.indexOf(marker)
+    if (start < 0) return url
+    val rest = url.substring(start + marker.length)
+    val slash = rest.indexOf('/')
+    if (slash < 0) return url
+    return url.substring(0, start + marker.length) + segment + rest.substring(slash)
+}
+
+/**
  * Crash-safe image: guards null/blank URLs (Coil would attempt-and-fail on
  * blank strings from sloppy addon data) and swaps in a glyph placeholder on
  * load error instead of leaving a broken frame.
@@ -484,11 +539,11 @@ fun ShimmerPoster(modifier: Modifier = Modifier) {
 @Composable
 fun DotsLoader(
     modifier: Modifier = Modifier,
-    dotCount: Int = 5
+    dotCount: Int = 7
 ) {
     val palette = LocalPalette.current
     val reduced = com.pulsestream.app.data.rememberReducedMotion()
-    val wave = if (reduced) 0.5f else {
+    val wave = if (reduced) 0.25f else {
         val transition = rememberInfiniteTransition(label = "dots")
         val animated by transition.animateFloat(initialValue = 0f, targetValue = 1f,
             animationSpec = infiniteRepeatable(animation = tween(1500, easing = LinearEasing), repeatMode = RepeatMode.Restart),
@@ -497,38 +552,33 @@ fun DotsLoader(
     }
     Canvas(
         modifier
-            .width((dotCount * 22).dp)
+            .width((dotCount * 20).dp)
             .height(26.dp)
     ) {
-        val spacing = size.width / (dotCount + 1)
+        // Wave (owner's pick 2026-10-25, Sample B): a pulse of light starts
+        // at the CENTER dot and travels out to both edges and back. The old
+        // left-to-right wave read as a tight blob — and the Home call site
+        // squashed this 5-dot canvas into a 34.dp box, packing the dots.
+        // Dots are now spaced across the full canvas width and sized from
+        // the spacing, so they can never crowd each other.
+        val n = dotCount.coerceAtLeast(1)
+        val center = (n - 1) / 2f
+        val maxD = center.coerceAtLeast(0.5f)
+        val tri = if (wave < 0.5f) wave * 2f else 2f - wave * 2f
+        val r = tri * (maxD + 0.6f)
+        val spacing = size.width / n
         val cy = size.height / 2f
-        val centers = List(dotCount) { i -> Offset(spacing * (i + 1), cy) }
-        // Glow peaks as the wave passes each position (0..1).
-        fun glow(index: Float): Float {
-            val d = (((index / dotCount) - wave) % 1f + 1f) % 1f
-            val c = 0.5f + 0.5f * kotlin.math.cos(d * 2f * kotlin.math.PI.toFloat())
-            return c * c
-        }
-        // Connecting segments light up between lit dots.
-        for (i in 0 until dotCount - 1) {
-            val g = maxOf(glow(i.toFloat()), glow((i + 1).toFloat()))
-            drawLine(
-                color = palette.accent.copy(alpha = 0.10f + 0.55f * g),
-                start = centers[i],
-                end = centers[i + 1],
-                strokeWidth = 3.dp.toPx(),
-                cap = StrokeCap.Round
-            )
-        }
-        // Dots colored across the accent gradient.
-        centers.forEachIndexed { i, c ->
-            val g = glow(i.toFloat())
-            val t = if (dotCount == 1) 0f else i / (dotCount - 1).toFloat()
+        val baseR = minOf(spacing * 0.30f, size.height * 0.30f)
+        for (i in 0 until n) {
+            val d = kotlin.math.abs(i - center)
+            val g0 = (1f - kotlin.math.abs(r - d) / 1.1f).coerceIn(0f, 1f)
+            val g = g0 * g0
             drawCircle(
-                color = lerp(palette.accent, palette.accent2, t)
-                    .copy(alpha = 0.35f + 0.65f * g),
-                radius = (4.5f + 2.5f * g).dp.toPx(),
-                center = c
+                color = (if (palette.appTheme == AppTheme.ONYX) palette.accent
+                    else lerp(palette.accent, palette.accent2, d / maxD))
+                    .copy(alpha = 0.30f + 0.70f * g),
+                radius = baseR * (0.55f + 0.75f * g),
+                center = Offset(spacing * (i + 0.5f), cy)
             )
         }
     }
@@ -544,6 +594,17 @@ fun DotsLoadingIndicator(message: String = "Loading…") {
             color = TextSecondary,
             style = MaterialTheme.typography.bodyMedium
         )
+    }
+}
+
+/** A rating line whose \u2605 wears [starColor] \u2014 the accent colour
+ *  drives the small things everywhere (owner's order 2026-10-25). */
+fun accentStarText(text: String, starColor: Color): AnnotatedString = buildAnnotatedString {
+    text.split("\u2605").forEachIndexed { index, part ->
+        if (index > 0) {
+            withStyle(SpanStyle(color = starColor, fontWeight = FontWeight.Bold)) { append("\u2605") }
+        }
+        append(part)
     }
 }
 
@@ -612,7 +673,8 @@ fun OrbitDots(modifier: Modifier = Modifier) {
         // Faint dotted ring underneath (12 dots, every 30 degrees).
         for (i in 0 until 12) {
             drawCircle(
-                color = lerp(palette.accent, palette.accent2, i / 11f).copy(alpha = 0.22f),
+                color = (if (palette.appTheme == AppTheme.ONYX) palette.accent
+                    else lerp(palette.accent, palette.accent2, i / 11f)).copy(alpha = 0.22f),
                 radius = 1.4f * unit,
                 center = pos(i * 30f)
             )
@@ -623,7 +685,8 @@ fun OrbitDots(modifier: Modifier = Modifier) {
         val tailA = listOf(0.75f, 0.55f, 0.38f, 0.24f)
         for (i in 4 downTo 1) {
             drawCircle(
-                color = lerp(palette.accent, palette.accent2, i / 4f).copy(alpha = tailA[i - 1]),
+                color = (if (palette.appTheme == AppTheme.ONYX) palette.accent
+                    else lerp(palette.accent, palette.accent2, i / 4f)).copy(alpha = tailA[i - 1]),
                 radius = tailR[i - 1] * unit,
                 center = pos(rotation - 35f * i)
             )

@@ -271,7 +271,7 @@ fun DownloadsScreen(
                                         Text(
                                             when {
                                                 fileMissing -> "File missing — it may have been deleted outside the app"
-                                                manager.isAdaptiveDownloadUrl(item.url) -> "Manifest only — not a complete offline download"
+                                                manager.isDashDownloadUrl(item.url) -> "Manifest only — not a complete offline download"
                                                 else -> {
                                                     // Sample E row sub (v0.12.4):
                                                     // "1.4 GB · 1080p · Ready" —
@@ -289,10 +289,10 @@ fun DownloadsScreen(
                                                 }
                                             },
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = if (fileMissing || manager.isAdaptiveDownloadUrl(item.url)) MaterialTheme.colorScheme.error else TextSecondary
+                                            color = if (fileMissing || manager.isDashDownloadUrl(item.url)) MaterialTheme.colorScheme.error else TextSecondary
                                         )
                                     }
-                                    if (!fileMissing && !manager.isAdaptiveDownloadUrl(item.url)) {
+                                    if (!fileMissing && !manager.isDashDownloadUrl(item.url)) {
                                         GlassIconButton(
                                             image = Icons.Filled.PlayArrow,
                                             contentDescription = "Play",

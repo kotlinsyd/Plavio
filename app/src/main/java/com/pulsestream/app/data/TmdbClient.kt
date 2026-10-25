@@ -23,7 +23,7 @@ object TmdbClient {
 
     /**
      * Enrich cast members with TMDB photos and IDs.
-     * Takes a Stremio/IMDb ID string and resolves it to TMDB ID first.
+     * Takes a Stremio/IMDb ID (resolved via /find) or a TMDB-native "tmdb:" id (used directly).
      * Only enriches members that lack photo or have id=0.
      */
     suspend fun enrichCast(
@@ -37,16 +37,23 @@ object TmdbClient {
         if (isFullyEnrichedCast(cast)) return@withContext cast
         
         try {
-            // Resolve Stremio/IMDb ID to TMDB ID via find API
             val tmdbType = if (mediaType == "series") "tv" else "movie"
-            val findUrl = "$BASE/find/$stremioId?api_key=$apiKey&external_source=imdb_id"
-            val findResponse = BoundedHttp.get(findUrl, headers = mapOf("Accept" to "application/json"))
-            val findJson = json.parseToJsonElement(findResponse).jsonObject
-            val results = findJson["${tmdbType}_results"]?.jsonArray
-            val tmdbId = results?.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content?.toIntOrNull()
-                ?: return@withContext cast
+            // TMDB-native ids ("tmdb:693134", "tmdb:movie:693134") carry the
+            // TMDB id directly; the /find lookup only resolves IMDb ids and
+            // returns nothing for them, which silently skipped enrichment.
+            val tmdbId: Int? = if (stremioId.startsWith("tmdb:")) {
+                stremioId.removePrefix("tmdb:").substringAfterLast(":").toIntOrNull()
+            } else {
+                // Resolve Stremio/IMDb ID to TMDB ID via find API
+                val findUrl = "$BASE/find/$stremioId?api_key=$apiKey&external_source=imdb_id"
+                val findResponse = BoundedHttp.get(findUrl, headers = mapOf("Accept" to "application/json"))
+                val findJson = json.parseToJsonElement(findResponse).jsonObject
+                val results = findJson["${tmdbType}_results"]?.jsonArray
+                results?.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content?.toIntOrNull()
+            }
+            val resolvedTmdbId = tmdbId ?: return@withContext cast
             
-            val url = "$BASE/$tmdbType/$tmdbId/credits?api_key=$apiKey"
+            val url = "$BASE/$tmdbType/$resolvedTmdbId/credits?api_key=$apiKey"
             val response = BoundedHttp.get(url, headers = mapOf("Accept" to "application/json"))
             val root = json.parseToJsonElement(response).jsonObject
             val tmdbCast = root["cast"]?.jsonArray ?: return@withContext cast

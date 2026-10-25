@@ -2,8 +2,14 @@ package com.pulsestream.app.ui.screens
 
 import android.accounts.AccountManager
 import android.app.Activity
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,10 +17,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -23,6 +34,7 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
 import com.pulsestream.app.ui.components.OrbitDots
 import androidx.compose.material3.CircularProgressIndicator
@@ -46,15 +58,25 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.pulsestream.app.data.SettingsStore
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.data.cloud.GoogleDriveSyncManager
+import com.pulsestream.app.data.cloud.PlavioAccountManager
 import com.pulsestream.app.ui.components.GlassCard
+import com.pulsestream.app.ui.components.PRESET_AVATARS
+import com.pulsestream.app.ui.components.ProfileAvatarImage
 import com.pulsestream.app.ui.components.GlowBackground
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Account screen (v0.11.9+): Google account + Drive sync.
@@ -88,6 +110,17 @@ fun AccountScreen(
     val accountEmail = remember(refreshTick) { sync.getAccountEmail() }
     val lastBackup = remember(refreshTick) { sync.getLastBackupTime() }
     val lastRestore = remember(refreshTick) { sync.getLastRestoreTime() }
+
+    // Plavio account state (Sample C layout): while signed in there, the
+    // section renders the identity + groups and the Google door folds
+    // away behind its "Sync with Google" row; otherwise Google is the
+    // only door and stays fully visible.
+    val plavioSignedIn = remember(refreshTick) {
+        PlavioAccountManager.isConfigured() &&
+            PlavioAccountManager(context, repository).isSignedIn()
+    }
+    var googleExpanded by remember { mutableStateOf(false) }
+    val showGoogle = googleExpanded || !plavioSignedIn
 
     // Auth activity launcher (for when user needs to grant Drive access)
     // Defined first because accountPickerLauncher uses it
@@ -130,6 +163,33 @@ fun AccountScreen(
                     busy = false
                     refreshTick++
                 }
+            }
+        }
+    }
+
+    val avatarSetting = remember(refreshTick) { repository.settings.profileAvatar }
+    var showPicker by remember { mutableStateOf(false) }
+
+    // System photo picker for the profile picture (no permission needed):
+    // the chosen photo is cropped square and stored on the device.
+    val photoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                busy = true
+                error = null
+                val saved = withContext(Dispatchers.IO) {
+                    saveProfilePhoto(context, uri, repository.settings)
+                }
+                if (saved) {
+                    repository.settings.profileAvatar = "photo"
+                    message = "Profile picture updated."
+                } else {
+                    error = "Couldn't use that photo."
+                }
+                busy = false
+                refreshTick++
             }
         }
     }
@@ -238,6 +298,63 @@ fun AccountScreen(
                     )
                 }
 
+                // Plavio account (2026-10-25): email + password account
+                // with full sync; Google Drive below stays as door two.
+                // Renders nothing until the backend is configured.
+                PlavioAccountSection(
+                    repository = repository,
+                    onChangePicture = { showPicker = true },
+                    googleExpanded = googleExpanded,
+                    onToggleGoogle = { googleExpanded = !googleExpanded },
+                    onAccountChanged = { refreshTick++ }
+                )
+
+                // Profile header (owner's pick 2026-10-24): picture,
+                // name, email and Change picture. The picture is
+                // device-local (photo file or preset) and rides the
+                // Google Drive backup like the other app data.
+                if (!plavioSignedIn) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                    ProfileAvatarImage(
+                        avatarSetting = avatarSetting,
+                        photoFile = repository.settings.profilePhotoFile(),
+                        modifier = Modifier
+                            .size(88.dp)
+                            .clickable { showPicker = true },
+                        placeholderLetter = (profileName.ifBlank { accountEmail ?: "" })
+                            .firstOrNull()?.uppercase()
+                    )
+                    Text(
+                        profileName.ifBlank { accountEmail ?: "Your account" },
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                    if (accountEmail != null && profileName.isNotBlank()) {
+                        Text(
+                            accountEmail,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    OutlinedButton(onClick = { showPicker = true }) {
+                        Icon(
+                            Icons.Filled.Edit,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Change picture")
+                        }
+                    }
+                }
+
+                if (showGoogle) {
                 if (!isSignedIn) {
                     GlassCard(modifier = Modifier.fillMaxWidth()) {
                         Column(
@@ -288,11 +405,11 @@ fun AccountScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                Icon(
-                                    Icons.Filled.CloudDone,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(32.dp)
+                                ProfileAvatarImage(
+                                    avatarSetting = avatarSetting,
+                                    photoFile = repository.settings.profilePhotoFile(),
+                                    modifier = Modifier.size(40.dp),
+                                    placeholderLetter = profileName.firstOrNull()?.uppercase()
                                 )
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
@@ -392,6 +509,78 @@ fun AccountScreen(
                         }
                     }
                 }
+                }
+
+                if (showPicker) {
+                    AlertDialog(
+                        onDismissRequest = { showPicker = false },
+                        title = { Text("Choose picture") },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                OutlinedButton(
+                                    onClick = {
+                                        showPicker = false
+                                        photoPicker.launch(
+                                            PickVisualMediaRequest(
+                                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                                            )
+                                        )
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(
+                                        Icons.Filled.PhotoLibrary,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Use my photo")
+                                }
+                                Text(
+                                    "OR PICK AN AVATAR",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(4),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier.heightIn(max = 290.dp)
+                                ) {
+                                    items(PRESET_AVATARS) { preset ->
+                                        Image(
+                                            painter = painterResource(preset.resId),
+                                            contentDescription = preset.label,
+                                            modifier = Modifier
+                                                .size(56.dp)
+                                                .clip(CircleShape)
+                                                .clickable {
+                                                    repository.settings.profileAvatar = "preset:${preset.id}"
+                                                    showPicker = false
+                                                    refreshTick++
+                                                },
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    }
+                                }
+                                if (avatarSetting.isNotBlank()) {
+                                    TextButton(
+                                        onClick = {
+                                            repository.settings.profileAvatar = ""
+                                            repository.settings.deleteProfilePhoto()
+                                            showPicker = false
+                                            refreshTick++
+                                        }
+                                    ) { Text("Remove picture") }
+                                }
+                            }
+                        },
+                        confirmButton = {},
+                        dismissButton = {
+                            TextButton(onClick = { showPicker = false }) { Text("Cancel") }
+                        }
+                    )
+                }
 
                 if (editingName) {
                     AlertDialog(
@@ -430,3 +619,24 @@ fun AccountScreen(
         }
     }
 }
+
+/**
+ * Stores a picked gallery photo as the profile picture: center-cropped
+ * to a square, scaled to at most 512px, saved as JPEG in app-private
+ * storage (SettingsStore.profilePhotoFile). Returns false on any failure.
+ */
+private fun saveProfilePhoto(context: android.content.Context, uri: Uri, settings: SettingsStore): Boolean =
+    runCatching {
+        val source = context.contentResolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input)
+        } ?: return false
+        val side = minOf(source.width, source.height)
+        val cropped = Bitmap.createBitmap(
+            source, (source.width - side) / 2, (source.height - side) / 2, side, side
+        )
+        val scaled = if (side > 512) Bitmap.createScaledBitmap(cropped, 512, 512, true) else cropped
+        val out = java.io.ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 88, out)
+        settings.writeProfilePhoto(out.toByteArray())
+        true
+    }.getOrDefault(false)

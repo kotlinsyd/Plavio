@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.Card
 import com.pulsestream.app.ui.components.OrbitDots
-import com.pulsestream.app.ui.components.ShimmerPoster
 import androidx.compose.material3.CardDefaults
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,12 +20,16 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -75,6 +78,8 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Shadow
@@ -84,6 +89,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -549,7 +556,7 @@ private fun BackBar(onBack: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun DetailContent(
     vm: DetailViewModel,
@@ -565,6 +572,12 @@ private fun DetailContent(
 ) {
     val isSeries = meta.type == "series" && meta.videos.isNotEmpty()
     val seasons = rememberSeasonList(meta)
+    // Hoisted out of the LazyColumn DSL: the filter+sort used to re-run
+    // on every recomposition of the (stream-driven) content lambda.
+    val episodes = remember(meta.videos, vm.selectedSeason) {
+        meta.videos.filter { it.season == vm.selectedSeason }
+            .sortedWith(compareBy({ it.episode }, { it.title }))
+    }
     // Shared scope and watchlist state for hero buttons and play section
     val scope = rememberCoroutineScope()
     val watchKey = "$addonId|${meta.type}|${meta.id}"
@@ -574,15 +587,14 @@ private fun DetailContent(
     // Shared stream-browser state: addon tabs + filtered list stay in sync as
     // sources stream in progressively.
     val allStreams = (vm.streamsState as? StreamsUiState.Content)?.streams ?: emptyList()
-    // Hero fact stack (v0.12.5, owner's Sample E "Right-Side Stack" —
-    // replaces the v0.12.4 stat-tile grid): best quality, top audio,
-    // languages, subtitles and stream/addon counts computed across the
-    // loaded streams (see heroFactRows), drawn INSIDE the hero at its
-    // lower-right. Recomputed as streams stream in; any row whose data
-    // is absent is simply not shown.
     val allSubtitles = (vm.streamsState as? StreamsUiState.Content)?.subtitles ?: emptyList()
-    val heroFacts = remember(allStreams, allSubtitles) {
-        heroFactRows(allStreams, allSubtitles)
+    // D-A pills (owner's pick 2026-10-24): the stream-data strip sits
+    // directly below the hero in a fixed-height slot, computed across
+    // the loaded streams (see heroPills). Recomputed as streams stream
+    // in; the slot is fixed-height, so late pills never shift the
+    // Watch Now button.
+    val heroPills = remember(allStreams, allSubtitles) {
+        heroPills(allStreams, allSubtitles)
     }
     val browserState = rememberStreamBrowserState(allStreams, repository.settings)
     // Mini floating source-picker card (the button next to Play opens this
@@ -591,6 +603,16 @@ private fun DetailContent(
     // Full-page sources (long-press Play): title header + addon tabs + stream list.
     var fullPageSourceOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    // Zero-edge top (owner's order 2026-10-25): the detail poster runs
+    // to the physical top of the display, under the status bar - the
+    // time/battery icons sit ON the poster. Same trick Home uses: the
+    // column is measured one status-bar taller and placed shifted up
+    // by the same amount. The D-A layout itself is unchanged; the
+    // hero's top action row gets the inset back as padding so the
+    // buttons stay exactly where they were, below the status icons.
+    val detailDensity = LocalDensity.current
+    val detailStatusDp = with(detailDensity) { WindowInsets.statusBars.getTop(detailDensity).toDp() }
+    val detailStatusPx = with(detailDensity) { detailStatusDp.roundToPx() }
     // On TV, land D-pad focus on the Play button when the detail screen opens.
     val isTvDetail = rememberIsTv()
     val playButtonFocus = remember { FocusRequester() }
@@ -612,24 +634,66 @@ private fun DetailContent(
 
     LazyColumn(
         state = listState,
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .layout { measurable, constraints ->
+                val placeable = measurable.measure(
+                    constraints.copy(
+                        minHeight = constraints.maxHeight + detailStatusPx,
+                        maxHeight = constraints.maxHeight + detailStatusPx
+                    )
+                )
+                layout(placeable.width, placeable.height) {
+                    placeable.place(0, -detailStatusPx)
+                }
+            },
         contentPadding = PaddingValues(bottom = 24.dp)
     ) {
         item {
-            // Poster Duo (Sample G; owner's pick v0.12.14): no
-            // backdrop hero — actions on a plain top row, poster
-            // card on the left, title + stacked facts on the right.
-            // Replaces Sample D's Poster Credits hero.
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            // D-A hero (owner's pick 2026-10-24, replacing Sample A):
+            // the BACKDROP leads, edge-to-edge at 51% of the screen;
+            // the poster rests as a small card on the fade at the
+            // bottom-left, with title, facts line and genres beside it.
+            // The stream-data pills live below the hero now, in a
+            // fixed-height slot, so Watch Now never shifts. The action
+            // row (back / watchlist / add-to-list) floats over the top,
+            // unchanged. The fade keeps the cinematic navy of the
+            // shipped heroes — it is what makes the white overlay text
+            // read in both theme modes. No backdrop -> the poster itself
+            // is the hero art and no small card is drawn.
+            val heroHeight = (LocalConfiguration.current.screenHeightDp * 0.51f).dp
+            val heroArt = meta.background?.takeIf { it.isNotBlank() } ?: meta.poster
+            val hasBackdrop = !meta.background.isNullOrBlank()
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(heroHeight)
+            ) {
+                SafePosterImage(
+                    model = heroArt,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+                // The fade: clear until ~40%, then cinematic navy, so
+                // the overlaid text reads in both theme modes.
+                Box(
+                    Modifier.fillMaxSize().background(
+                        Brush.verticalGradient(
+                            0.40f to Color.Transparent,
+                            1.0f to Color(0xFF060B16).copy(alpha = 0.95f)
+                        )
+                    )
+                )
                 Row(
-                    Modifier.fillMaxWidth(),
+                    Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp + detailStatusDp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(
                         onClick = onBack,
                         modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
                     ) {
-                        Icon(Icons.Filled.ArrowBack, "Back", tint = TextPrimary)
+                        Icon(Icons.Filled.ArrowBack, "Back", tint = Color.White)
                     }
                     Spacer(Modifier.weight(1f))
                     IconButton(
@@ -643,7 +707,7 @@ private fun DetailContent(
                         Icon(
                             if (watchItem != null) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
                             contentDescription = if (watchItem != null) "Remove from watchlist" else "Add to watchlist",
-                            tint = TextPrimary
+                            tint = Color.White
                         )
                     }
                     Spacer(Modifier.width(8.dp))
@@ -654,72 +718,67 @@ private fun DetailContent(
                         Icon(
                             Icons.Filled.PlaylistAdd,
                             contentDescription = "Add to list",
-                            tint = TextPrimary
+                            tint = Color.White
                         )
                     }
                 }
-                Spacer(Modifier.height(14.dp))
-                Row(Modifier.fillMaxWidth()) {
-                    SafePosterImage(
-                        model = meta.poster ?: meta.background,
-                        contentDescription = null,
-                        modifier = Modifier
-                            .width(132.dp)
-                            .height(198.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                    )
-                    Spacer(Modifier.width(16.dp))
+                Row(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    // The poster rests as a small card on the fade's
+                    // bottom-left — only when the hero art is the
+                    // backdrop; in the poster fallback the hero IS the
+                    // poster, so no card is drawn.
+                    if (hasBackdrop && !meta.poster.isNullOrBlank()) {
+                        SafePosterImage(
+                            model = meta.poster,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .width(74.dp)
+                                .aspectRatio(2f / 3f)
+                                .shadow(12.dp, RoundedCornerShape(10.dp))
+                                .clip(RoundedCornerShape(10.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                        Spacer(Modifier.width(12.dp))
+                    }
                     Column(Modifier.weight(1f)) {
                         Text(
                             meta.name,
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            maxLines = 3,
+                            color = Color.White,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
-                        val duoMetaLine = buildList {
-                            meta.imdbRating?.takeIf { it.isNotBlank() }?.let { add("\u2605 $it IMDb") }
+                        val factsLine = buildList {
                             meta.releaseInfo?.takeIf { it.isNotBlank() }?.let { add(it) }
-                            if (meta.genres.isNotEmpty()) add(meta.genres.take(2).joinToString(" / "))
-                        }.joinToString("  \u00b7  ")
-                        if (duoMetaLine.isNotBlank()) {
-                            Spacer(Modifier.height(6.dp))
+                            meta.runtime?.takeIf { it.isNotBlank() }?.let { add(it) }
+                            meta.imdbRating?.takeIf { it.isNotBlank() }?.let { add("★ $it") }
+                        }.joinToString("  •  ")
+                        if (factsLine.isNotBlank()) {
+                            Spacer(Modifier.height(3.dp))
                             Text(
-                                duoMetaLine,
+                                com.pulsestream.app.ui.components.accentStarText(factsLine, LocalPalette.current.accent),
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary,
-                                maxLines = 2,
+                                color = Color(0xFFC7D2DE),
+                                maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        Spacer(Modifier.height(10.dp))
-                        heroFacts.forEach { fact ->
-                            val duoLabel = when {
-                                fact.label == "Best quality" -> "Quality"
-                                fact.label.startsWith("Streams") -> "Streams"
-                                else -> fact.label
-                            }
-                            val duoValue = if (fact.label.startsWith("Streams")) {
-                                val addons = fact.label.substringAfter("\u00b7 ", "").trim()
-                                if (addons.isNotBlank()) "${fact.value} \u00b7 $addons" else fact.value
-                            } else fact.value
-                            Row(Modifier.padding(vertical = 3.dp)) {
-                                Text(
-                                    duoLabel,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = TextSecondary,
-                                    modifier = Modifier.width(84.dp)
-                                )
-                                Text(
-                                    duoValue,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
+                        if (meta.genres.isNotEmpty()) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                meta.genres.take(3).joinToString(", "),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color(0xFF8FA2B5),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }
@@ -727,6 +786,27 @@ private fun DetailContent(
         }
         item {
           Column {
+            // D-A: the stream-data pills sit directly below the hero in
+            // a FIXED-height slot (room for two pill lines) — when
+            // streams land and pills appear, Watch Now below never
+            // shifts (the same discipline the shipped build kept by
+            // putting the pills inside the fixed hero box).
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(66.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(top = 12.dp)
+            ) {
+                if (heroPills.isNotEmpty()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        heroPills.forEach { pill -> HeroPillView(pill) }
+                    }
+                }
+            }
             val canPlay = vm.streamsState !is StreamsUiState.Error
             // Resume: check if there's playback progress for this title
             val continueWatching by repository.continueWatching.collectAsState(initial = emptyList())
@@ -894,15 +974,6 @@ private fun DetailContent(
         // Only actors with a TMDB person id navigate (keyless mode has names only).
         if (meta.cast.isNotEmpty()) {
             item(key = "cast") {
-                val tmdbKey = remember { repository.settings.tmdbApiKey.takeIf { it.isNotBlank() } }
-                // Enrich cast with TMDB photos/IDs when key is available
-                var enrichedCast by remember { mutableStateOf(meta.cast) }
-                LaunchedEffect(meta.id, tmdbKey) {
-                    if (!tmdbKey.isNullOrBlank() && meta.cast.any { it.id == 0 || it.photo == null }) {
-                        val enriched = TmdbClient.enrichCast(tmdbKey, meta.id, meta.type, meta.cast)
-                        if (enriched.isNotEmpty()) enrichedCast = enriched
-                    }
-                }
                 Text(
                     "Cast",
                     style = MaterialTheme.typography.titleMedium,
@@ -914,7 +985,7 @@ private fun DetailContent(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(enrichedCast, key = { it.id.toString() + "_" + it.name }) { actor ->
+                    items(meta.cast, key = { it.id.toString() + "_" + it.name }) { actor ->
                         val clickable = actor.id > 0
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -948,99 +1019,9 @@ private fun DetailContent(
                 Spacer(Modifier.height(8.dp))
             }
         }
-        // "You May Like" — TMDB recommendations (requires TMDB API key in Settings).
-        item(key = "you_may_like") {
-            val tmdbKey = remember { repository.settings.tmdbApiKey.takeIf { it.isNotBlank() } }
-            if (!tmdbKey.isNullOrBlank()) {
-                var recommendations by remember { mutableStateOf<List<TmdbRecommendation>>(emptyList()) }
-                var loadingRecs by remember { mutableStateOf(false) }
-                LaunchedEffect(meta.id, tmdbKey) {
-                    loadingRecs = true
-                    try {
-                        recommendations = fetchTmdbRecommendations(meta.id, meta.type, tmdbKey)
-                    } catch (e: Exception) {
-                        // Silent fail — section just won't show
-                    } finally {
-                        loadingRecs = false
-                    }
-                }
-                if (loadingRecs || recommendations.isNotEmpty()) {
-                    Text(
-                        "You May Like",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                    )
-                    if (loadingRecs) {
-                        // Sample C (owner's pick 2026-10-24): shimmer
-                        // tiles while recommendations load — no spinner.
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            items(4) {
-                                ShimmerPoster(modifier = Modifier.size(94.dp, 140.dp))
-                            }
-                        }
-                    } else {
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            items(recommendations, key = { it.id }) { rec ->
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier
-                                        .width(110.dp)
-                                        .liquidGlass(RoundedCornerShape(16.dp))
-                                        .clickable {
-                                            val key = tmdbKey ?: return@clickable
-                                            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                                                try {
-                                                    val client = okhttp3.OkHttpClient()
-                                                    val url = "https://api.themoviedb.org/3/${rec.mediaType}/${rec.id}/external_ids?api_key=$key"
-                                                    val req = okhttp3.Request.Builder().url(url).get().build()
-                                                    val resp = client.newCall(req).execute()
-                                                    if (resp.isSuccessful) {
-                                                        val json = org.json.JSONObject(resp.body?.string() ?: "")
-                                                        val imdbId = json.optString("imdb_id", "")
-                                                        if (imdbId.isNotBlank()) {
-                                                            val detailType = if (rec.mediaType == "movie") "movie" else "series"
-                                                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                                                onOpenDetail(addonId, detailType, imdbId)
-                                                            }
-                                                        }
-                                                    }
-                                                } catch (e: Exception) { }
-                                            }
-                                        }
-                                        .padding(8.dp)
-                                ) {
-                                    SafePosterImage(
-                                        model = rec.posterPath?.let { "https://image.tmdb.org/t/p/w342$it" },
-                                        contentDescription = rec.title,
-                                        modifier = Modifier
-                                            .size(94.dp, 140.dp)
-                                            .clip(RoundedCornerShape(12.dp))
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        text = rec.title,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = TextPrimary,
-                                        maxLines = 2,
-                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
-            }
-        }
+        // ("You May Like" rail removed, owner's pick 2026-10-24:
+        // PlavioMeta's "More like this" rows below replace it —
+        // they work for every user, not only TMDB-key holders.)
         // (Available Streams button removed — long-press Play opens the source picker.)
         item {
             if (vm.streamsState is StreamsUiState.Error) {
@@ -1132,8 +1113,6 @@ private fun DetailContent(
                     }
                 }
             }
-            val episodes = meta.videos.filter { it.season == vm.selectedSeason }
-                .sortedWith(compareBy({ it.episode }, { it.title }))
             item(key = "episodes_header") {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -1260,7 +1239,7 @@ private fun DetailContent(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(section.metas, key = { it.id }) { related ->
+                    items(section.metas.distinctBy { it.id }, key = { it.id }) { related ->
                         com.pulsestream.app.ui.components.PosterCard(
                             meta = related,
                             // launchSingleTop-style: tapping the title that's already
@@ -1427,6 +1406,63 @@ private fun subtitleDisplayCode(raw: String): String {
         ?.let { return it.first.uppercase() }
     return code.take(3).uppercase()
 }
+
+/** One Sample A hero pill: [hot] is the mint-highlighted quality pill. */
+private data class HeroPill(val text: String, val hot: Boolean = false)
+
+/**
+ * D-A pills (owner's pick 2026-10-24): the stream-data strip directly
+ * below the detail hero — best quality first (mint), Dolby Vision /
+ * HDR when any stream carries it, top audio, audio languages,
+ * subtitle count. Derived from the same loaded streams as
+ * [heroFactRows]; the strip's slot is fixed-height, so pills appearing
+ * as streams land never move the Watch Now button. Absent data = no
+ * pill.
+ */
+private fun heroPills(streams: List<StreamItem>, subtitles: List<Subtitle>): List<HeroPill> {
+    if (streams.isEmpty()) return emptyList()
+    val facts = heroFactRows(streams, subtitles).associateBy { it.label }
+    val pills = mutableListOf<HeroPill>()
+    facts["Best quality"]?.let { pills += HeroPill(it.value, hot = true) }
+    // DV / HDR live only in stream text — same haystack the facts use.
+    val haystack = streams.joinToString("\n") { stream ->
+        listOfNotNull(stream.title, stream.name, stream.filename).joinToString(" ")
+    }
+    when {
+        Regex("""dolby\s*vision|\bdv\b""", RegexOption.IGNORE_CASE).containsMatchIn(haystack) ->
+            pills += HeroPill("Dolby Vision")
+        Regex("""\bhdr10\+?\b""", RegexOption.IGNORE_CASE).containsMatchIn(haystack) ->
+            pills += HeroPill("HDR")
+    }
+    facts["Top audio"]?.let { pills += HeroPill(it.value) }
+    facts["Languages"]?.let { pills += HeroPill(it.value) }
+    facts["Subtitles"]?.let { pills += HeroPill("+${it.value} subs") }
+    return pills
+}
+
+@Composable
+private fun HeroPillView(pill: HeroPill) {
+    val palette = LocalPalette.current
+    Text(
+        pill.text,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = if (pill.hot) palette.accent else Color.White,
+        maxLines = 1,
+        modifier = Modifier
+            .background(
+                if (pill.hot) palette.accent.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.10f),
+                RoundedCornerShape(50)
+            )
+            .border(
+                1.dp,
+                if (pill.hot) palette.accent.copy(alpha = 0.45f) else Color.White.copy(alpha = 0.16f),
+                RoundedCornerShape(50)
+            )
+            .padding(horizontal = 9.dp, vertical = 3.dp)
+    )
+}
+
 
 /**
  * Fact rows for the detail hero's right-side stack (v0.12.5, Sample E —
@@ -1831,16 +1867,12 @@ internal fun FullPageSourcePicker(
              else Modifier.fillMaxSize()).tvSheetFocus()
         ) {
             if (inSheet) {
-                // Sheet header (Sample M): "<Title> · choose a source".
+                // Sheet header: the title alone (owner's order
+                // 2026-10-25: the "choose a source" suffix removed).
                 // The sheet's drag handle sits above this; no back /
                 // close row and no banner inside the sheet.
                 Text(
-                    buildAnnotatedString {
-                        append(meta.name)
-                        withStyle(SpanStyle(color = TextSecondary, fontWeight = FontWeight.Normal)) {
-                            append("  \u00b7  choose a source")
-                        }
-                    },
+                    meta.name,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary,
@@ -1913,11 +1945,14 @@ internal fun FullPageSourcePicker(
                             )
                             Spacer(Modifier.height(2.dp))
                             Text(
-                                text = listOfNotNull(
-                                    "${streams.size} sources available",
-                                    meta.releaseInfo?.takeIf { it.isNotBlank() },
-                                    meta.imdbRating?.takeIf { it.isNotBlank() }?.let { "★ $it" }
+                                text = com.pulsestream.app.ui.components.accentStarText(
+                                    listOfNotNull(
+                                        "${streams.size} sources available",
+                                        meta.releaseInfo?.takeIf { it.isNotBlank() },
+                                        meta.imdbRating?.takeIf { it.isNotBlank() }?.let { "★ $it" }
                                 ).joinToString(" · "),
+                                LocalPalette.current.accent
+                            ),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary
                             )
@@ -2013,79 +2048,6 @@ internal fun FullPageSourcePicker(
 }
 
 /** TMDB recommendation item. */
-private data class TmdbRecommendation(
-    val id: Int,
-    val title: String,
-    val posterPath: String?,
-    val mediaType: String
-)
-
-/**
- * Fetch TMDB recommendations. Uses the find API to resolve IMDb ID to TMDB ID first,
- * then fetches recommendations. Returns empty list on any failure.
- */
-private suspend fun fetchTmdbRecommendations(
-    imdbId: String,
-    type: String,
-    apiKey: String
-): List<TmdbRecommendation> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-    try {
-        val client = okhttp3.OkHttpClient.Builder()
-            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-            .build()
-
-        // Step 1: Resolve IMDb ID to TMDB ID via find API
-        val findUrl = "https://api.themoviedb.org/3/find/$imdbId?api_key=$apiKey&external_source=imdb_id"
-        val findRequest = okhttp3.Request.Builder().url(findUrl).get().build()
-        val findResponse = client.newCall(findRequest).execute()
-        if (!findResponse.isSuccessful) return@withContext emptyList()
-        val findJson = org.json.JSONObject(findResponse.body?.string() ?: return@withContext emptyList())
-
-        // Get TMDB ID from movie_results or tv_results
-        val tmdbId: Int
-        val tmdbType: String
-        val movieResults = findJson.optJSONArray("movie_results")
-        val tvResults = findJson.optJSONArray("tv_results")
-        if (movieResults != null && movieResults.length() > 0) {
-            tmdbId = movieResults.getJSONObject(0).getInt("id")
-            tmdbType = "movie"
-        } else if (tvResults != null && tvResults.length() > 0) {
-            tmdbId = tvResults.getJSONObject(0).getInt("id")
-            tmdbType = "tv"
-        } else {
-            return@withContext emptyList()
-        }
-
-        // Step 2: Fetch recommendations
-        val recUrl = "https://api.themoviedb.org/3/$tmdbType/$tmdbId/recommendations?api_key=$apiKey&page=1"
-        val recRequest = okhttp3.Request.Builder().url(recUrl).get().build()
-        val recResponse = client.newCall(recRequest).execute()
-        if (!recResponse.isSuccessful) return@withContext emptyList()
-        val recJson = org.json.JSONObject(recResponse.body?.string() ?: return@withContext emptyList())
-        val results = recJson.optJSONArray("results") ?: return@withContext emptyList()
-
-        val recommendations = mutableListOf<TmdbRecommendation>()
-        for (i in 0 until minOf(results.length(), 20)) {
-            val obj = results.getJSONObject(i)
-            val title = obj.optString("title").ifBlank { obj.optString("name") }
-            if (title.isNotBlank()) {
-                recommendations.add(
-                    TmdbRecommendation(
-                        id = obj.getInt("id"),
-                        title = title,
-                        posterPath = obj.optString("poster_path").takeIf { it.isNotBlank() },
-                        mediaType = obj.optString("media_type").ifBlank { tmdbType }
-                    )
-                )
-            }
-        }
-        recommendations
-    } catch (e: Exception) {
-        emptyList()
-    }
-}
-
 /** Facts for the Show Details tiles — only what the meta actually carries. */
 private fun buildDetailTiles(meta: MetaDetail): List<Pair<String, String>> {
     val tiles = mutableListOf<Pair<String, String>>()

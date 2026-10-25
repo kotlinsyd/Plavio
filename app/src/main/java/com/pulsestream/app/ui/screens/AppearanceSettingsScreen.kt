@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pulsestream.app.data.StreamRepository
+import com.pulsestream.app.ui.components.GlassCard
 import com.pulsestream.app.ui.components.GlowBackground
 import com.pulsestream.app.ui.theme.AccentTheme
 import com.pulsestream.app.ui.theme.GlassBorder
@@ -57,8 +58,6 @@ fun AppearanceSettingsScreen(
 ) {
     val settings = repository.settings
     var accentName by remember { mutableStateOf(settings.accentName) }
-    var amoled by remember { mutableStateOf(settings.amoledBlack) }
-    var themeMode by remember { mutableStateOf(settings.themeMode) }
 
     GlowBackground {
         LazyColumn(
@@ -85,7 +84,7 @@ fun AppearanceSettingsScreen(
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Make Plavio glow your way.",
+                        "Pick your accent colour.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
                         modifier = Modifier.padding(start = 56.dp, end = 8.dp)
@@ -93,101 +92,79 @@ fun AppearanceSettingsScreen(
                 }
             }
             item(key = "accent") {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    Text(
-                        "Accent color",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = TextPrimary
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                // Accent circles (owner's order 2026-10-25, from his
+                // reference): one card, solid colour circles in rows of
+                // three, the selected one ringed with a check — the ONLY
+                // appearance choice now that Onyx is permanent.
+                GlassCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 18.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp)
                     ) {
-                        AccentTheme.values().forEach { theme ->
-                            val selected = theme.name == accentName
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(44.dp)
-                                        .clip(RoundedCornerShape(50))
-                                        .background(
-                                            Brush.horizontalGradient(
-                                                listOf(theme.primary, theme.secondary)
-                                            )
+                        AccentTheme.values().toList().chunked(3).forEach { rowThemes ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                rowThemes.forEach { theme ->
+                                    val selected = theme.name == accentName
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(58.dp)
+                                                .clip(RoundedCornerShape(50))
+                                                .background(theme.primary)
+                                                .border(
+                                                    if (selected) 2.5.dp else 1.dp,
+                                                    if (selected) theme.primary else GlassBorder,
+                                                    RoundedCornerShape(50)
+                                                )
+                                                .clickable {
+                                                    accentName = theme.name
+                                                    settings.accentName = theme.name
+                                                    onThemeChanged()
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (selected) {
+                                                Icon(
+                                                    Icons.Filled.Check,
+                                                    contentDescription = "${theme.label} selected",
+                                                    tint = if (theme == AccentTheme.WHITE ||
+                                                        theme == AccentTheme.AMBER ||
+                                                        theme == AccentTheme.EMERALD
+                                                    ) Color.Black else Color.White,
+                                                    modifier = Modifier.size(24.dp)
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.height(6.dp))
+                                        Text(
+                                            text = theme.label,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (selected) TextPrimary else TextSecondary
                                         )
-                                        .border(
-                                            if (selected) 2.dp else 1.dp,
-                                            if (selected) Color.White else GlassBorder,
-                                            RoundedCornerShape(50)
-                                        )
-                                        .clickable {
-                                            accentName = theme.name
-                                            settings.accentName = theme.name
-                                            onThemeChanged()
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    if (selected) {
-                                        Icon(
-                                            Icons.Filled.Check,
-                                            contentDescription = "${theme.label} selected",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(20.dp)
+                                        Spacer(Modifier.height(3.dp))
+                                        Box(
+                                            Modifier
+                                                .width(26.dp)
+                                                .height(3.dp)
+                                                .clip(RoundedCornerShape(50))
+                                                .background(theme.primary)
                                         )
                                     }
                                 }
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = theme.label,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (selected) TextPrimary else TextSecondary
-                                )
                             }
                         }
                     }
                 }
-            }
-            item(key = "theme_mode") {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    Text(
-                        "Theme",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = TextPrimary,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf("dark" to "Dark", "light" to "Light").forEach { (mode, label) ->
-                            FilterChip(
-                                selected = themeMode == mode,
-                                onClick = {
-                                    themeMode = mode
-                                    settings.themeMode = mode
-                                    onThemeChanged()
-                                },
-                                label = { Text(label) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                }
-            }
-            item(key = "amoled") {
-                SettingsToggleRow(
-                    icon = Icons.Filled.Contrast,
-                    title = "AMOLED black",
-                    subtitle = "Pure-black backgrounds to save battery",
-                    checked = amoled,
-                    onCheckedChange = {
-                        amoled = it
-                        settings.amoledBlack = it
-                        onThemeChanged()
-                    }
-                )
             }
         }
     }
