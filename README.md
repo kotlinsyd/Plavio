@@ -4,7 +4,7 @@
 
 A beautiful open-source streaming app for Android with a built-in player. Install addons to browse movies, series, and live TV. An account is optional; the app also offers optional cloud sync and opt-in telemetry.
 
-> This source package targets Android mobile only; Android TV flavor builds are excluded.
+> This source package is the phone app. Plavio TV is a separate app — out now for Android TV and Fire TV; its source ships with the TV releases.
 
 ## Preview
 
@@ -34,6 +34,8 @@ A beautiful open-source streaming app for Android with a built-in player. Instal
 ## Get the app
 
 Download the latest APK from the [Releases](../../releases) page and install it on your Android phone (Android 8.0+).
+
+**Plavio TV** is out too — for Android TV and Fire TV, with the same addons on the big screen. Get it from [plavio.site](https://plavio.site) or the TV releases here.
 
 ## Add an addon
 
