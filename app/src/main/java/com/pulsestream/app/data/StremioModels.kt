@@ -63,7 +63,10 @@ data class Video(
 data class CastMember(
     val id: Int = 0,
     val name: String,
-    val photo: String? = null
+    val photo: String? = null,
+    /** Best-known titles from the addon's /person-search (search rows
+     * only; cast lists leave it null). */
+    val knownFor: String? = null
 )
 
 /** Actor filmography from PlavioMeta /person. */

@@ -119,7 +119,7 @@ fun AppearanceSettingsScreen(
                                             modifier = Modifier
                                                 .size(58.dp)
                                                 .clip(RoundedCornerShape(50))
-                                                .background(theme.primary)
+                                                .background(theme.swatchBrush)
                                                 .border(
                                                     if (selected) 2.5.dp else 1.dp,
                                                     if (selected) theme.primary else GlassBorder,

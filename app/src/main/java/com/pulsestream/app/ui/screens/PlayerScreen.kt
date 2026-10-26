@@ -2206,12 +2206,8 @@ fun PlayerScreen(
             showControls = false
         }
     }
-    LaunchedEffect(indicatorTick) {
-        if (indicator != null) {
-            delay(1000)
-            indicator = null
-        }
-    }
+    // (The indicator's hide lives with its show animation below —
+    // one unified effect, see "One show / one hide".)
 
     // One-time init: begin buffering immediately, then apply saved-position / autoplay policy.
     LaunchedEffect(Unit) {
@@ -2683,19 +2679,34 @@ fun PlayerScreen(
         }
 
         // Transient gesture feedback (never consumes touches).
-        // v0.14.3 (owner's order): pop-in spring + fade on every
-        // indicator; volume/brightness get an animated level bar; the
-        // volume indicator changes colour at the extremes — soft red
-        // at mute (0), amber in the boost zone (past 100).
+        // v0.14.3 (owner's order): pop-in spring + fade; volume/
+        // brightness get an animated level bar; the volume indicator
+        // changes colour at the extremes — soft red at mute (0),
+        // amber in the boost zone (past 100).
+        // One show / one hide (owner's flicker report 2026-10-26):
+        // the entrance used to restart on EVERY new indicator value,
+        // so a volume/brightness swipe — a fresh value per move
+        // event — snapped the pill back to 82% / 0 alpha dozens of
+        // times a second. Now the pop-in runs only when the pill
+        // appears (alpha at rest); value changes update the content
+        // in place; the hide is a single debounced fade that starts
+        // 1s after the LAST poke, and a poke that lands mid-fade
+        // brings the pill straight back with no pop.
         val indScale = remember { Animatable(1f) }
-        val indAlpha = remember { Animatable(1f) }
-        LaunchedEffect(indicator) {
-            if (indicator != null) {
+        val indAlpha = remember { Animatable(0f) }
+        LaunchedEffect(indicatorTick) {
+            if (indicator == null) return@LaunchedEffect
+            if (indAlpha.value <= 0f) {
                 indScale.snapTo(0.82f)
-                indAlpha.snapTo(0f)
                 launch { indScale.animateTo(1f, spring(dampingRatio = 0.55f, stiffness = 420f)) }
                 indAlpha.animateTo(1f, tween(120))
+            } else if (indAlpha.value < 1f) {
+                launch { indScale.animateTo(1f, spring(dampingRatio = 0.55f, stiffness = 420f)) }
+                indAlpha.animateTo(1f, tween(80))
             }
+            delay(1000)
+            indAlpha.animateTo(0f, tween(200))
+            indicator = null
         }
         indicator?.let { ind ->
             val accentNow = LocalPalette.current.accent
@@ -2710,9 +2721,12 @@ fun PlayerScreen(
                 is PlayerIndicator.Brightness -> ind.percent.coerceIn(0, 100) / 100f
                 else -> null
             }
+            // The level bar tracks the finger: a short tween, not a
+            // spring — during a swipe the value changes continuously
+            // and a spring lags and wobbles behind it (flicker fix).
             val levelAnim by animateFloatAsState(
                 targetValue = levelFraction ?: 0f,
-                animationSpec = spring(dampingRatio = 0.8f, stiffness = 300f),
+                animationSpec = tween(70),
                 label = "indicatorLevel"
             )
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

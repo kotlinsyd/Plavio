@@ -23,7 +23,7 @@ class TraktApi {
 
     companion object {
         const val CLIENT_ID = "2j7KBLNBFVZG5qs6afdPGxbWyb23_93tX0aopgiDGSY"
-        const val REDIRECT_URI = "https://plaviomedia.vercel.app/trakt-callback.html"
+        const val REDIRECT_URI = "https://www.plavio.site/trakt-callback.html"
         private const val AUTHORIZE_URL = "https://trakt.tv/oauth/authorize"
         private const val TOKEN_URL = "https://api.trakt.tv/oauth/token"
         private const val API_BASE = "https://api.trakt.tv"

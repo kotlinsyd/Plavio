@@ -332,7 +332,8 @@ object StremioParser {
             CastMember(
                 id = (p["id"] as? JsonPrimitive)?.intOrNull ?: 0,
                 name = name,
-                photo = p.str("photo")
+                photo = p.str("photo"),
+                knownFor = p.str("knownFor")
             )
         }
     }

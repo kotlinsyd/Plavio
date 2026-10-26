@@ -104,6 +104,7 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -606,11 +607,24 @@ private fun DockItem(
             .clip(RoundedCornerShape(50))
             .then(
                 if (selected) {
+                    // Sample C (owner's pick 2026-10-26): the settled
+                    // pill, steady from the first touch. The accent
+                    // tint is PRE-BLENDED over the capsule's own
+                    // backing into opaque stops — the old translucent
+                    // gradient picked up whatever (blurred) content
+                    // sat behind the glass, so the pill flashed
+                    // whitish over bright screens at tap time, then
+                    // settled black-grey on dark ones. Same tones as
+                    // today on a dark page (measured from his
+                    // screenshot: capsule #181818, pill mid #393939),
+                    // now one colour from the first frame.
+                    val pillBase =
+                        if (palette.light) Color(0xFFF7F3EC) else Color(0xFF181818)
                     Modifier.background(
                         Brush.verticalGradient(
                             listOf(
-                                palette.accent.copy(alpha = 0.32f),
-                                palette.accent.copy(alpha = 0.12f)
+                                lerp(pillBase, palette.accent, 0.32f),
+                                lerp(pillBase, palette.accent, 0.12f)
                             )
                         ),
                         RoundedCornerShape(50)

@@ -16,8 +16,8 @@ android {
         applicationId = "com.pulsestream.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 151
-        versionName = "0.14.4"
+        versionCode = 153
+        versionName = "0.14.5"
         // Sentry DSN — a client ingest key (public by design, send-only).
         // Passed at build time via -PSENTRY_DSN=... like the gate key.
         buildConfigField(

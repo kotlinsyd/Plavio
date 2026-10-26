@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 
@@ -34,23 +35,33 @@ fun liquidGlassTopSurface(background: Color): Color = lerp(background, Color.Whi
 fun liquidGlassBottomSurface(background: Color): Color = lerp(background, Color.White, 0.06f)
 
 /**
- * Accent color themes. PULSE is the default identity — since v0.12.7 it
- * carries the startup logo's own colors (owner's order: the green from
- * the startup animation, used in the app wherever possible): mint
- * #3DDC97 primary, cyan #38BDF8 secondary, the pair the splash wordmark
- * and its sweep line are drawn in. The others re-skin every accent in
- * the app (buttons, toggles, progress, glows, selected states) through
- * [LocalPalette].
+ * Accent color themes. WHITE is the default (the Onyx monochrome
+ * look). WEAVE (owner's order 2026-10-26) carries the logo's own
+ * gradient — violet #7C3AED → magenta #DB2777 → pink #F9738C — and
+ * replaced PULSE in the picker; an install that still has "PULSE"
+ * stored lands on WHITE through [byName]'s fallback. The others
+ * re-skin every accent in the app (buttons, toggles, progress,
+ * glows, selected states) through [LocalPalette].
  */
 enum class AccentTheme(val label: String, val primary: Color, val secondary: Color) {
     WHITE("White", Color.White, Color(0xFFD9D9DE)),
-    PULSE("Pulse", Color(0xFF3DDC97), Color(0xFF38BDF8)),
+    WEAVE("Weave", Color(0xFF7C3AED), Color(0xFFDB2777)),
     CRIMSON("Crimson", Color(0xFFF43F5E), Color(0xFFFB923C)),
     OCEAN("Ocean", Color(0xFF38BDF8), Color(0xFF6366F1)),
     VIOLET("Violet", Color(0xFFA78BFA), Color(0xFFF0ABFC)),
     EMERALD("Emerald", Color(0xFF34D399), Color(0xFF22D3EE)),
     AMBER("Amber", Color(0xFFFBBF24), Color(0xFFF97316)),
     ROSE("Rose", Color(0xFFEC407A), Color(0xFFF48FB1));
+
+    /** Picker swatch: the Weave wears the logo gradient; every other
+     * accent is a solid disc (the picker's approved look). */
+    val swatchBrush: Brush
+        get() = when (this) {
+            WEAVE -> Brush.linearGradient(
+                listOf(primary, secondary, Color(0xFFF9738C))
+            )
+            else -> SolidColor(primary)
+        }
 
     companion object {
         fun byName(name: String?): AccentTheme =
@@ -79,7 +90,7 @@ data class AppPalette(
     val accentText: Color = accent,
     /** The six-theme identity this palette was built from. */
     val appTheme: AppTheme = AppTheme.ONYX,
-    val accentTheme: AccentTheme = AccentTheme.PULSE,
+    val accentTheme: AccentTheme = AccentTheme.WHITE,
     /**
      * Frosted glass on/off. Weak devices get the solid version of the
      * chosen theme instead (same colours, flat surfaces, no glows).
@@ -94,8 +105,8 @@ data class AppPalette(
 
 val LocalPalette = compositionLocalOf {
     AppPalette(
-        accent = AccentTheme.PULSE.primary,
-        accent2 = AccentTheme.PULSE.secondary,
+        accent = AccentTheme.WHITE.primary,
+        accent2 = AccentTheme.WHITE.secondary,
         background = BgDeep,
         panel = BgPanel,
         amoled = false
