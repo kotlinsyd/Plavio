@@ -100,6 +100,22 @@ class StremioApi {
         StremioParser.parseCatalog(get(endpoint(baseUrl, "catalog", type, catalogId)), type)
 
     /**
+     * Genre-filtered catalog, e.g. {base}/catalog/movie/top/genre=Action.json.
+     * Only fired at catalogs that declare the "genre" extra — others 404
+     * and the caller swallows it.
+     */
+    suspend fun fetchCatalogGenre(
+        baseUrl: String,
+        type: String,
+        catalogId: String,
+        genre: String
+    ): List<MetaPreview> =
+        StremioParser.parseCatalog(
+            get(endpoint(baseUrl, "catalog", type, catalogId, "genre=$genre")),
+            type
+        )
+
+    /**
      * Live catalog search, e.g. {base}/catalog/movie/top/search=avengers.json.
      * Addons that don't support the search extra answer 404 — the caller swallows that.
      */
@@ -127,13 +143,27 @@ class StremioApi {
         StremioParser.parseSubtitles(get(endpoint(baseUrl, "subtitles", type, imdbId)))
 
     /**
-     * PlavioMeta related sections, e.g. {base}/related/movie/tt1234567.json.
-     * Keyless mode returns no sections — the caller shows nothing then.
+     * Related sections, e.g. {base}/related/movie/tt1234567.json — a
+     * PlavioMeta extension other metadata addons may also serve. The
+     * repository tries every meta addon in preference order, so the
+     * rows follow whichever addon serves them (metadata flexibility,
+     * owner's order 2026-10-26). Keyless mode returns no sections.
      */
     suspend fun fetchRelated(baseUrl: String, type: String, id: String): List<RelatedSection> =
         StremioParser.parseRelated(get(endpoint(baseUrl, "related", type, id)), type)
 
-    /** PlavioMeta person filmography, e.g. {base}/person/123.json. */
+    /** Person filmography, e.g. {base}/person/123.json (same extension as [fetchRelated]). */
     suspend fun fetchPerson(baseUrl: String, personId: Int): PersonDetail? =
         StremioParser.parsePerson(get(endpoint(baseUrl, "person", personId.toString())))
+
+    /**
+     * Person search by name, e.g. {base}/person-search/salman%20khan.json
+     * (same extension family as [fetchPerson]; PlavioMeta serves it since
+     * v2.5.7). Returns null when the addon doesn't serve the route —
+     * the request failed or the payload has no people array — so the
+     * repository can try the next addon. An empty list is a real answer:
+     * the addon searched and found nobody.
+     */
+    suspend fun fetchPersonSearch(baseUrl: String, query: String): List<CastMember>? =
+        StremioParser.parsePersonSearch(get(endpoint(baseUrl, "person-search", query)))
 }

@@ -3,6 +3,7 @@
 package com.pulsestream.app.data
 
 import android.content.Context
+import kotlin.math.roundToInt
 import java.io.File
 import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
@@ -640,10 +641,38 @@ class SettingsStore(context: Context) {
         get() = prefInt(KEY_SUB_COLOR, 0xFFFFFFFF.toInt())
         set(value) = prefs.edit().putInt(KEY_SUB_COLOR, value).apply()
 
-    /** Subtitle text size scale (1.0 = default). Range 0.6 – 2.0. */
+    /** Subtitle text size scale (1.0 = default). Range 0.6 – 2.0.
+     *  Mirrored with [subtitleFontSizeSp] (18sp == 1.0) so the Settings
+     *  dialog (scale-based) and the player Style rail (sp-based) always
+     *  agree on one persisted size. */
     var subtitleTextSizeScale: Float
         get() = prefFloat(KEY_SUB_SIZE, 1.0f)
-        set(value) = prefs.edit().putFloat(KEY_SUB_SIZE, value.coerceIn(0.6f, 2.0f)).apply()
+        set(value) {
+            val scale = value.coerceIn(0.6f, 2.0f)
+            prefs.edit()
+                .putFloat(KEY_SUB_SIZE, scale)
+                .putInt(KEY_SUB_FONT_SP, (scale * 18f).roundToInt().coerceIn(12, 40))
+                .apply()
+        }
+
+    /**
+     * Subtitle font size in sp (player Style rail, v0.14.5): 12–40,
+     * default 18. Kept in sync with [subtitleTextSizeScale] — writing
+     * either one updates the other (18sp == scale 1.0).
+     */
+    var subtitleFontSizeSp: Int
+        get() = if (prefs.contains(KEY_SUB_FONT_SP)) {
+            prefInt(KEY_SUB_FONT_SP, 18).coerceIn(12, 40)
+        } else {
+            (prefFloat(KEY_SUB_SIZE, 1.0f) * 18f).roundToInt().coerceIn(12, 40)
+        }
+        set(value) {
+            val sp = value.coerceIn(12, 40)
+            prefs.edit()
+                .putInt(KEY_SUB_FONT_SP, sp)
+                .putFloat(KEY_SUB_SIZE, sp / 18f)
+                .apply()
+        }
 
     /** Subtitle background color (ARGB int). Default: semi-transparent black. */
     var subtitleBackgroundColor: Int
@@ -669,13 +698,43 @@ class SettingsStore(context: Context) {
         set(value) = prefs.edit().putInt(KEY_SUB_EDGE_COLOR, value).apply()
 
     /**
-     * Subtitle bottom offset, 0-100 in player Style-panel steps; the
-     * player maps it to a SubtitleView bottom-padding fraction so
-     * captions can be lifted off the bottom edge. Default: 0.
+     * Subtitle bottom offset, 0–200 in player Style-rail steps of 5;
+     * the player maps it to a SubtitleView bottom-padding fraction so
+     * captions can be lifted off the bottom edge. Default: 20.
      */
     var subtitleBottomOffset: Int
-        get() = prefInt(KEY_SUB_BOTTOM, 0)
-        set(value) = prefs.edit().putInt(KEY_SUB_BOTTOM, value.coerceIn(0, 100)).apply()
+        get() = prefInt(KEY_SUB_BOTTOM, 20)
+        set(value) = prefs.edit().putInt(KEY_SUB_BOTTOM, value.coerceIn(0, 200)).apply()
+
+    /**
+     * Per-video subtitle delay (ms, ±60s) set from the player's Style
+     * rail — persisted per video id so a title remembers its sync.
+     * Stored as newline-joined "urlEncoded(videoId)=ms" entries,
+     * most recent last, capped at 100 titles.
+     */
+    fun subtitleDelayMsFor(videoId: String): Long {
+        val raw = prefs.getString(KEY_SUB_DELAY_MAP, null) ?: return 0L
+        val key = java.net.URLEncoder.encode(videoId, "UTF-8")
+        for (entry in raw.split("\n")) {
+            val eq = entry.lastIndexOf('=')
+            if (eq > 0 && entry.substring(0, eq) == key) {
+                return entry.substring(eq + 1).toLongOrNull()?.coerceIn(-60_000L, 60_000L) ?: 0L
+            }
+        }
+        return 0L
+    }
+
+    fun setSubtitleDelayMsFor(videoId: String, delayMs: Long) {
+        val key = java.net.URLEncoder.encode(videoId, "UTF-8")
+        val raw = prefs.getString(KEY_SUB_DELAY_MAP, null).orEmpty()
+        val entries = raw.split("\n")
+            .filter { it.isNotBlank() && !it.startsWith("$key=") }
+            .toMutableList()
+        entries.add("$key=${delayMs.coerceIn(-60_000L, 60_000L)}")
+        prefs.edit()
+            .putString(KEY_SUB_DELAY_MAP, entries.takeLast(100).joinToString("\n"))
+            .apply()
+    }
 
     /**
      * Global subtitle timing offset in milliseconds (v0.9.0+). Positive =
@@ -917,6 +976,8 @@ class SettingsStore(context: Context) {
         private const val KEY_SUB_BOLD = "subtitle_bold"
         private const val KEY_SUB_EDGE_COLOR = "subtitle_edge_color"
         private const val KEY_SUB_BOTTOM = "subtitle_bottom_offset"
+        private const val KEY_SUB_FONT_SP = "subtitle_font_size_sp"
+        private const val KEY_SUB_DELAY_MAP = "subtitle_delay_by_video"
         private const val KEY_SUBTITLE_OFFSET_MS = "subtitle_offset_ms"
         private const val KEY_SYSTEM_CAPTIONS = "use_system_captions"
         private const val KEY_LIVE_FAVS = "live_favorites"

@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.last
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -77,7 +78,8 @@ class StreamRepository(
             }
         }
     }
-    val continueWatching: Flow<List<PlaybackState>> = db.playbackDao().observeRecent()
+    val continueWatching: Flow<List<PlaybackState>> =
+        db.playbackDao().observeRecent().map { dedupePlaybackRows(it) }
     val watchlist: Flow<List<WatchlistItem>> = db.watchlistDao().observeAll()
 
     /** In-memory cache of every catalog item loaded on Home — used for search. */
@@ -717,7 +719,7 @@ class StreamRepository(
     /** [type] filters by content type ("movie", "series", "tv"); null searches everything. */
     fun search(query: String, type: String? = null): List<CachedMeta> {
         val q = query.trim().lowercase()
-        if (q.length < 2) return emptyList()
+        if (q.isEmpty()) return emptyList()
         return catalogCache
             .filter { (type == null || it.meta.type == type) && it.meta.name.lowercase().contains(q) }
             .distinctBy { it.meta.id + it.addonId }
@@ -736,7 +738,7 @@ class StreamRepository(
      * addon is bounded independently and cannot erase faster providers' results. */
     fun searchRemoteProgressive(query: String, type: String? = null) = channelFlow {
         val q = query.trim()
-        if (q.length < 2) { send(emptyList()); return@channelFlow }
+        if (q.isEmpty()) { send(emptyList()); return@channelFlow }
         val types = if (type != null) listOf(type) else listOf("movie", "series")
         val resultMap = java.util.concurrent.ConcurrentHashMap<String, CachedMeta>()
         val providers = enabledAddons().filter { it.hasCatalog }
@@ -1055,22 +1057,215 @@ class StreamRepository(
         enabledAddons().firstOrNull { isPlavioMeta(it) }?.baseUrl
     }
 
-    /** "More like this" sections for a title; empty when unavailable/keyless. */
-    suspend fun getRelated(type: String, id: String): List<RelatedSection> =
-        withContext(Dispatchers.IO) {
-            val base = plavioMetaBaseUrl() ?: return@withContext emptyList()
-            withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
-                runCatching { api.fetchRelated(base, type, id) }.getOrNull()
-            } ?: emptyList()
+    /**
+     * Every meta-capable addon in preference order (PlavioMeta first —
+     * it stays the default and the richest path, never the only one).
+     * Metadata flexibility (owner's standing order 2026-10-26): the
+     * related rows and actor pages follow whichever installed metadata
+     * addon can serve them, so AIOMetadata / Cinemeta / TMDB-addon
+     * users get the full experience too.
+     */
+    private suspend fun metaAddonsByRank(): List<InstalledAddon> =
+        enabledAddons()
+            .filter { it.hasMeta }
+            .sortedWith(compareBy<InstalledAddon> { metaRank(it) }.thenBy { it.sortOrder })
+
+    /**
+     * "More like this" + "More from <actor>" sections for a title.
+     * First, /related is tried on every meta addon in preference order
+     * (the serving addon's data wins — PlavioMeta's endpoint is simply
+     * the richest). When no addon serves /related, the rows are built
+     * app-side from STANDARD protocol data only: the title's own full
+     * meta (genres, cast) plus the meta addons' genre catalogs and
+     * search endpoints. A row appears only when real data backs it.
+     * No TMDB key is involved anywhere — everything flows through the
+     * installed addons themselves.
+     */
+    suspend fun getRelated(
+        type: String,
+        id: String,
+        hintBaseUrl: String? = null
+    ): List<RelatedSection> = withContext(Dispatchers.IO) {
+        val addons = metaAddonsFor(type, hintBaseUrl)
+        for (addon in addons) {
+            val sections = withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
+                runCatching { api.fetchRelated(addon.baseUrl, type, id) }.getOrNull()
+            }
+            if (!sections.isNullOrEmpty()) return@withContext sections
+        }
+        buildRelatedFallback(type, id, hintBaseUrl, addons)
+    }
+
+    /**
+     * Generic related rows from standard addon data (see [getRelated]):
+     * "More like this" = same-genre titles from the meta addons' genre
+     * catalogs, widened by a genre search; "More from <actor>" = the
+     * first-billed cast member's name run through the addons' search.
+     */
+    private suspend fun buildRelatedFallback(
+        type: String,
+        id: String,
+        hintBaseUrl: String?,
+        metaAddons: List<InstalledAddon>
+    ): List<RelatedSection> {
+        val meta = getMetaFromAny(hintBaseUrl, type, id) ?: return emptyList()
+        val sections = mutableListOf<RelatedSection>()
+        val seen = mutableSetOf(id)
+
+        if (meta.genres.isNotEmpty() && metaAddons.isNotEmpty()) {
+            val genre = meta.genres.first()
+            val similar = LinkedHashMap<String, MetaPreview>()
+            // Genre catalogs of the preferred meta addons first.
+            for (addon in metaAddons.take(2)) {
+                val manifest = runCatching { cachedManifest(addon.baseUrl) }.getOrNull()
+                    ?: continue
+                val genreCatalogs = manifest.catalogs.filter {
+                    it.type == type && it.extra.any { e -> e.equals("genre", true) }
+                }.take(2)
+                for (catalog in genreCatalogs) {
+                    val metas = withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
+                        runCatching {
+                            api.fetchCatalogGenre(addon.baseUrl, type, catalog.id, genre)
+                        }.getOrNull()
+                    } ?: continue
+                    metas.forEach { m -> if (m.id != id) similar.putIfAbsent(m.id, m) }
+                }
+            }
+            // Widen with a genre search across the standard search path.
+            runCatching { searchRemote(genre, type) }.getOrDefault(emptyList())
+                .forEach { cm -> if (cm.meta.id != id) similar.putIfAbsent(cm.meta.id, cm.meta) }
+            val genreSet = meta.genres.map { it.lowercase() }.toSet()
+            val picks = similar.values
+                .filter { m ->
+                    m.genres.isEmpty() ||
+                        m.genres.any { it.lowercase() in genreSet }
+                }
+                .take(20)
+            if (picks.isNotEmpty()) {
+                sections += RelatedSection(
+                    id = "fallback_similar",
+                    title = "More like this",
+                    metas = picks
+                )
+                picks.forEach { seen += it.id }
+            }
         }
 
-    /** Actor filmography; null when unavailable/keyless. */
-    suspend fun getPerson(personId: Int): PersonDetail? = withContext(Dispatchers.IO) {
-        val base = plavioMetaBaseUrl() ?: return@withContext null
-        withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
-            runCatching { api.fetchPerson(base, personId) }.getOrNull()
+        val leadActor = meta.cast.firstOrNull { it.name.isNotBlank() }
+        if (leadActor != null) {
+            val fromActor = runCatching { searchAll(leadActor.name, type) }
+                .getOrDefault(emptyList())
+                .map { it.meta }
+                .filter { it.id != id && it.id !in seen }
+                .distinctBy { it.id }
+                .take(20)
+            if (fromActor.isNotEmpty()) {
+                sections += RelatedSection(
+                    id = "fallback_actor",
+                    title = "More from ${leadActor.name}",
+                    metas = fromActor
+                )
+            }
         }
+        return sections
     }
+
+    /**
+     * Actor filmography. /person is tried on every meta addon in
+     * preference order (PlavioMeta first — richest). When no addon
+     * serves /person for this id, [name] unlocks the generic fallback:
+     * the addons' own search by actor name, split into movies/series —
+     * the same standard-protocol trick as the related rows.
+     */
+    suspend fun getPerson(personId: Int, name: String? = null): PersonDetail? =
+        withContext(Dispatchers.IO) {
+            if (personId > 0) {
+                for (addon in metaAddonsByRank()) {
+                    val person = withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
+                        runCatching { api.fetchPerson(addon.baseUrl, personId) }.getOrNull()
+                    }
+                    if (person != null &&
+                        (person.movies.isNotEmpty() || person.series.isNotEmpty())
+                    ) {
+                        return@withContext person
+                    }
+                }
+            }
+            val personName = name?.takeIf { it.isNotBlank() } ?: return@withContext null
+            val found = runCatching { searchAll(personName) }.getOrDefault(emptyList())
+            if (found.isEmpty()) return@withContext null
+            val movies = found.filter { it.meta.type == "movie" }
+                .map { it.meta }.distinctBy { it.id }.take(40)
+            val series = found.filter { it.meta.type == "series" }
+                .map { it.meta }.distinctBy { it.id }.take(40)
+            if (movies.isEmpty() && series.isEmpty()) return@withContext null
+            PersonDetail(
+                id = personId,
+                name = personName,
+                photo = null,
+                movies = movies,
+                series = series
+            )
+        }
+
+    /**
+     * People matching a search query (owner's order 2026-10-26 — search
+     * by actor). First, the /person-search route is asked on every meta
+     * addon in preference order (PlavioMeta serves it since v2.5.7): a
+     * real person index beats guessing from cast lists, and an answer
+     * from a supporting addon — even an empty one — is final. Only when
+     * NO installed meta addon serves the route does the cast-scan
+     * fallback below run. Either way the result is plain [CastMember]s
+     * with TMDB person ids, and tapping one opens the actor page.
+     */
+    suspend fun searchPeople(query: String): List<CastMember> =
+        withContext(Dispatchers.IO) {
+            val q = query.trim()
+            if (q.length < 2) return@withContext emptyList()
+            for (addon in metaAddonsByRank()) {
+                val found = withTimeoutOrNull(META_FETCH_TIMEOUT_MS) {
+                    runCatching { api.fetchPersonSearch(addon.baseUrl, q) }.getOrNull()
+                }
+                if (found != null) return@withContext found.take(10)
+            }
+            searchPeopleFromCast(q)
+        }
+
+    /**
+     * Fallback people search for installs whose meta addons don't serve
+     * /person-search: the top title results' full metas are read from
+     * whichever addons served them, and cast members whose name matches
+     * the query surface as people (name + photo when the addon
+     * provides them).
+     */
+    private suspend fun searchPeopleFromCast(q: String): List<CastMember> =
+        withContext(Dispatchers.IO) {
+            val results = runCatching { searchAll(q) }.getOrDefault(emptyList()).take(6)
+            if (results.isEmpty()) return@withContext emptyList()
+            val people = LinkedHashMap<String, CastMember>()
+            for (cm in results) {
+                val meta = runCatching {
+                    getMetaFromAny(cm.baseUrl, cm.meta.type, cm.meta.id)
+                }.getOrNull() ?: continue
+                for (member in meta.cast) {
+                    if (member.name.isBlank()) continue
+                    if (!member.name.contains(q, ignoreCase = true)) continue
+                    val key = if (member.id > 0) {
+                        "id:${member.id}"
+                    } else {
+                        "name:${member.name.lowercase()}"
+                    }
+                    val existing = people[key]
+                    if (existing == null) {
+                        people[key] = member
+                    } else if (existing.photo.isNullOrBlank() && !member.photo.isNullOrBlank()) {
+                        people[key] = member
+                    }
+                }
+                if (people.size >= 10) break
+            }
+            people.values.take(10)
+        }
 
     /**
      * Real Stremio behavior: metadata may live in a different addon than the
@@ -1305,6 +1500,36 @@ class StreamRepository(
     suspend fun deleteSavedPosition(key: String) =
         withContext(Dispatchers.IO) { db.playbackDao().deleteByKey(key) }
 
+    /**
+     * Continue Watching identity: rows are keyed by stream URL, so the
+     * same episode reached through two addons/sources becomes two rows
+     * (owner's bug report 2026-10-26 — the same episode showed twice).
+     * Identity is the resolved series+season+episode when known, else
+     * the video id (movies).
+     */
+    private fun playbackIdentity(state: PlaybackState): String =
+        if ((state.season > 0 || state.episode > 0) && !state.imdbId.isNullOrBlank()) {
+            "ep|${state.imdbId}|${state.season}|${state.episode}"
+        } else {
+            "id|${state.videoId}"
+        }
+
+    /** Collapses duplicate rows to the newest (then furthest) per identity. */
+    private fun dedupePlaybackRows(rows: List<PlaybackState>): List<PlaybackState> {
+        if (rows.size < 2) return rows
+        val best = LinkedHashMap<String, PlaybackState>()
+        for (row in rows) {
+            val key = playbackIdentity(row)
+            val cur = best[key]
+            if (cur == null || row.updatedAt > cur.updatedAt ||
+                (row.updatedAt == cur.updatedAt && row.positionMs > cur.positionMs)
+            ) {
+                best[key] = row
+            }
+        }
+        return best.values.sortedByDescending { it.updatedAt }
+    }
+
     suspend fun savePlayback(
         title: String,
         poster: String?,
@@ -1328,6 +1553,19 @@ class StreamRepository(
             runCatching {
                 db.watchedDao().upsert(WatchedRecord(watchedKey, System.currentTimeMillis()))
             }
+        }
+        // Drop sibling rows for this same episode/movie stored under
+        // other stream URLs, so Continue Watching never shows a title
+        // twice (see playbackIdentity). Runs before the early returns
+        // below so finishing a title clears its duplicates too.
+        val identity = playbackIdentity(
+            PlaybackState(streamUrl, title, poster, videoId, streamUrl,
+                positionMs, durationMs, imdbId, season, episode, 0L)
+        )
+        runCatching {
+            db.playbackDao().getAll()
+                .filter { it.key != streamUrl && playbackIdentity(it) == identity }
+                .forEach { db.playbackDao().deleteByKey(it.key) }
         }
         // Don't clutter Continue Watching with barely-started items, and drop
         // entries the user effectively finished (less than 30s left).

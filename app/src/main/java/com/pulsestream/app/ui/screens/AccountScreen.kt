@@ -298,21 +298,14 @@ fun AccountScreen(
                     )
                 }
 
-                // Plavio account (2026-10-25): email + password account
-                // with full sync; Google Drive below stays as door two.
-                // Renders nothing until the backend is configured.
-                PlavioAccountSection(
-                    repository = repository,
-                    onChangePicture = { showPicker = true },
-                    googleExpanded = googleExpanded,
-                    onToggleGoogle = { googleExpanded = !googleExpanded },
-                    onAccountChanged = { refreshTick++ }
-                )
 
                 // Profile header (owner's pick 2026-10-24): picture,
                 // name, email and Change picture. The picture is
                 // device-local (photo file or preset) and rides the
                 // Google Drive backup like the other app data.
+                // Signed out it sits at the TOP of the screen (owner's
+                // order 2026-10-26), above the sign-in card; the
+                // signed-in layout below is unchanged.
                 if (!plavioSignedIn) {
                     Column(
                         modifier = Modifier.fillMaxWidth(),
@@ -353,6 +346,18 @@ fun AccountScreen(
                         }
                     }
                 }
+
+                // Plavio account (2026-10-25): email + password account
+                // with full sync; Google Drive below stays as door two.
+                // Renders nothing until the backend is configured.
+                PlavioAccountSection(
+                    repository = repository,
+                    onChangePicture = { showPicker = true },
+                    googleExpanded = googleExpanded,
+                    onToggleGoogle = { googleExpanded = !googleExpanded },
+                    onAccountChanged = { refreshTick++ }
+                )
+
 
                 if (showGoogle) {
                 if (!isSignedIn) {

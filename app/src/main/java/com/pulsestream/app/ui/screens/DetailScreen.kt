@@ -6,6 +6,8 @@ import androidx.compose.foundation.border
 import androidx.compose.ui.res.painterResource
 import com.pulsestream.app.R
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -429,9 +431,15 @@ class DetailViewModel(private val repo: StreamRepository) : ViewModel() {
      */
     fun loadRelated(type: String, metaId: String) {
         viewModelScope.launch {
-            // Uses the user's configured PlavioMeta (TMDB key when set);
-            // the old hardcoded keyless URL always returned empty sections.
-            relatedState = repo.getRelated(type, metaId.substringBefore(":"))
+            // Metadata flexibility (owner's order 2026-10-26): the rows
+            // follow the addon that served this title — /related is
+            // tried on every meta addon in preference order, with a
+            // generic genre/cast fallback when none serves it.
+            relatedState = repo.getRelated(
+                type,
+                metaId.substringBefore(":"),
+                hintBaseUrl
+            )
         }
     }
 }
@@ -447,7 +455,7 @@ fun DetailScreen(
     onBack: () -> Unit,
     onPlay: () -> Unit,
     onPlayTrailer: (PlaybackRequest) -> Unit = {},
-    onOpenActor: (Int) -> Unit = {},
+    onOpenActor: (Int, String) -> Unit = { _, _ -> },
     onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit = { _, _, _ -> }
 ) {
     val vm: DetailViewModel = viewModel(factory = vmFactory { DetailViewModel(repository) })
@@ -567,7 +575,7 @@ private fun DetailContent(
     onBack: () -> Unit,
     onPlay: () -> Unit,
     onPlayTrailer: (PlaybackRequest) -> Unit = {},
-    onOpenActor: (Int) -> Unit = {},
+    onOpenActor: (Int, String) -> Unit = { _, _ -> },
     onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit
 ) {
     val isSeries = meta.type == "series" && meta.videos.isNotEmpty()
@@ -588,12 +596,12 @@ private fun DetailContent(
     // sources stream in progressively.
     val allStreams = (vm.streamsState as? StreamsUiState.Content)?.streams ?: emptyList()
     val allSubtitles = (vm.streamsState as? StreamsUiState.Content)?.subtitles ?: emptyList()
-    // D-A pills (owner's pick 2026-10-24): the stream-data strip sits
-    // directly below the hero in a fixed-height slot, computed across
-    // the loaded streams (see heroPills). Recomputed as streams stream
-    // in; the slot is fixed-height, so late pills never shift the
-    // Watch Now button.
-    val heroPills = remember(allStreams, allSubtitles) {
+    // D-A pills (owner's pick 2026-10-24; two rows since 2026-10-26):
+    // the stream-data strip sits directly below the hero in a
+    // fixed-height slot, computed across the loaded streams (see
+    // heroPills). Recomputed as streams stream in; the slot is
+    // fixed-height, so late pills never shift the Watch Now button.
+    val heroPillRows = remember(allStreams, allSubtitles) {
         heroPills(allStreams, allSubtitles)
     }
     val browserState = rememberStreamBrowserState(allStreams, repository.settings)
@@ -798,12 +806,27 @@ private fun DetailContent(
                     .padding(horizontal = 16.dp)
                     .padding(top = 12.dp)
             ) {
-                if (heroPills.isNotEmpty()) {
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        heroPills.forEach { pill -> HeroPillView(pill) }
+                val (techPills, languagePills) = heroPillRows
+                if (techPills.isNotEmpty() || languagePills.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // Row 1: the tech facts.
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            techPills.forEach { pill -> HeroPillView(pill) }
+                        }
+                        // Row 2: every language — one pill each, the
+                        // row scrolls sideways instead of hiding any
+                        // behind a "+N" (owner's order 2026-10-26).
+                        if (languagePills.isNotEmpty()) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.horizontalScroll(rememberScrollState())
+                            ) {
+                                languagePills.forEach { pill -> HeroPillView(pill) }
+                            }
+                        }
                     }
                 }
             }
@@ -986,14 +1009,20 @@ private fun DetailContent(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(meta.cast, key = { it.id.toString() + "_" + it.name }) { actor ->
-                        val clickable = actor.id > 0
+                        // Metadata flexibility (2026-10-26): name-only
+                        // cast (keyless addons) navigates too — the actor
+                        // page falls back to search by name when no
+                        // addon serves /person for the id.
+                        val clickable = actor.id > 0 || actor.name.isNotBlank()
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
                                 .width(72.dp)
                                 .tvFocusRing(RoundedCornerShape(12.dp))
                                 .then(
-                                    if (clickable) Modifier.clickable { onOpenActor(actor.id) }
+                                    if (clickable) Modifier.clickable {
+                                        onOpenActor(actor.id, actor.name)
+                                    }
                                     else Modifier
                                 )
                         ) {
@@ -1411,33 +1440,61 @@ private fun subtitleDisplayCode(raw: String): String {
 private data class HeroPill(val text: String, val hot: Boolean = false)
 
 /**
- * D-A pills (owner's pick 2026-10-24): the stream-data strip directly
- * below the detail hero — best quality first (mint), Dolby Vision /
- * HDR when any stream carries it, top audio, audio languages,
- * subtitle count. Derived from the same loaded streams as
- * [heroFactRows]; the strip's slot is fixed-height, so pills appearing
- * as streams land never move the Watch Now button. Absent data = no
- * pill.
+ * Every audio language the loaded streams offer, in display order
+ * (English and Hindi lead — the owner's most-wanted pair — the rest
+ * follow the canonical list order). Stream name/title/filename text
+ * is the only place addons print languages, word-matched against the
+ * canonical names. Untruncated: the pills' second row shows them all.
  */
-private fun heroPills(streams: List<StreamItem>, subtitles: List<Subtitle>): List<HeroPill> {
-    if (streams.isEmpty()) return emptyList()
+private fun heroLanguageNames(streams: List<StreamItem>): List<String> {
+    val haystack = streams.joinToString("\n") { stream ->
+        listOfNotNull(stream.title, stream.name, stream.filename).joinToString(" ")
+    }
+    if (haystack.isBlank()) return emptyList()
+    val found = HERO_LANGUAGE_NAMES.filter { name ->
+        Regex("""\b${Regex.escape(name)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(haystack)
+    }
+    val lead = listOf("English", "Hindi")
+    return lead.filter { it in found } + found.filter { it !in lead }
+}
+
+/** Display code for a language name ("English" -> "EN"). */
+private fun heroLanguageCode(name: String): String =
+    SUBTITLE_LANGUAGE_OPTIONS.firstOrNull { it.second == name }?.first?.uppercase()
+        ?: name.take(2).uppercase()
+
+/**
+ * D-A pills (owner's pick 2026-10-24; two-row split by his order
+ * 2026-10-26): the stream-data strip directly below the detail hero.
+ * Row 1 = the tech facts — best quality first (mint), Dolby Vision /
+ * HDR when any stream carries it, top audio, subtitle count. Row 2 =
+ * every audio language, one pill each, nothing hidden behind a "+N".
+ * Derived from the same loaded streams as [heroFactRows]; the strip's
+ * slot is fixed-height, so pills appearing as streams land never move
+ * the Watch Now button. Absent data = no pill.
+ */
+private fun heroPills(
+    streams: List<StreamItem>,
+    subtitles: List<Subtitle>
+): Pair<List<HeroPill>, List<HeroPill>> {
+    if (streams.isEmpty()) return emptyList<HeroPill>() to emptyList()
     val facts = heroFactRows(streams, subtitles).associateBy { it.label }
-    val pills = mutableListOf<HeroPill>()
-    facts["Best quality"]?.let { pills += HeroPill(it.value, hot = true) }
+    val row1 = mutableListOf<HeroPill>()
+    facts["Best quality"]?.let { row1 += HeroPill(it.value, hot = true) }
     // DV / HDR live only in stream text — same haystack the facts use.
     val haystack = streams.joinToString("\n") { stream ->
         listOfNotNull(stream.title, stream.name, stream.filename).joinToString(" ")
     }
     when {
         Regex("""dolby\s*vision|\bdv\b""", RegexOption.IGNORE_CASE).containsMatchIn(haystack) ->
-            pills += HeroPill("Dolby Vision")
+            row1 += HeroPill("Dolby Vision")
         Regex("""\bhdr10\+?\b""", RegexOption.IGNORE_CASE).containsMatchIn(haystack) ->
-            pills += HeroPill("HDR")
+            row1 += HeroPill("HDR")
     }
-    facts["Top audio"]?.let { pills += HeroPill(it.value) }
-    facts["Languages"]?.let { pills += HeroPill(it.value) }
-    facts["Subtitles"]?.let { pills += HeroPill("+${it.value} subs") }
-    return pills
+    facts["Top audio"]?.let { row1 += HeroPill(it.value) }
+    facts["Subtitles"]?.let { row1 += HeroPill("+${it.value} subs") }
+    val row2 = heroLanguageNames(streams).map { HeroPill(heroLanguageCode(it)) }
+    return row1 to row2
 }
 
 @Composable
@@ -1494,29 +1551,15 @@ private fun heroFactRows(
         }
     topAudio?.let { rows += HeroFactRow("Top audio", it) }
 
-    val haystack = streams.joinToString("\n") { stream ->
-        listOfNotNull(stream.title, stream.name, stream.filename).joinToString(" ")
-    }
-    if (haystack.isNotBlank()) {
-        val found = HERO_LANGUAGE_NAMES.filter { name ->
-            Regex("""\b${Regex.escape(name)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(haystack)
-        }
-        // English and Hindi lead (the owner's most-wanted pair), the
-        // rest follow the canonical list order.
-        val lead = listOf("English", "Hindi")
-        val ordered = lead.filter { it in found } + found.filter { it !in lead }
-        if (ordered.isNotEmpty()) {
-            val codes = ordered.map { name ->
-                SUBTITLE_LANGUAGE_OPTIONS.firstOrNull { it.second == name }?.first?.uppercase()
-                    ?: name.take(2).uppercase()
-            }
-            val extra = if (ordered.size > 2) " +${ordered.size - 2}" else ""
-            rows += HeroFactRow(
-                "Languages",
-                codes.take(2).joinToString(" · ") + extra,
-                HeroTileKind.MINT
-            )
-        }
+    val ordered = heroLanguageNames(streams)
+    if (ordered.isNotEmpty()) {
+        val codes = ordered.map { heroLanguageCode(it) }
+        val extra = if (ordered.size > 2) " +${ordered.size - 2}" else ""
+        rows += HeroFactRow(
+            "Languages",
+            codes.take(2).joinToString(" · ") + extra,
+            HeroTileKind.MINT
+        )
     }
 
     val subCodes = subtitles.map { subtitleDisplayCode(it.lang) }.distinct()

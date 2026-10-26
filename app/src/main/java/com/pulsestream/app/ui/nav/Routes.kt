@@ -33,7 +33,18 @@ object Routes {
     const val TV_ADDON_SETUP = "tv_addon_setup"
     const val DETAIL = "detail/{addonId}/{type}/{metaId}"
     const val CATALOG = "catalog/{addonId}/{type}/{catalogId}"
-    const val ACTOR = "actor/{personId}"
+    const val ACTOR = "actor/{personId}?name={name}"
+
+    /**
+     * Actor page route. The name rides along so the page can fall back
+     * to search-by-actor-name when no addon serves /person for the id
+     * (metadata flexibility, owner's order 2026-10-26).
+     */
+    fun actor(personId: Int, name: String?): String {
+        val base = "actor/$personId"
+        return if (name.isNullOrBlank()) base
+        else base + "?name=" + enc(name)
+    }
 
     fun detail(addonId: String, type: String, metaId: String): String =
         "detail/${enc(addonId)}/${enc(type)}/${enc(metaId)}"

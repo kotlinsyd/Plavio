@@ -313,4 +313,27 @@ object StremioParser {
             series = metas("series", "series")
         )
     }
+
+    /**
+     * Parses the /person-search/{query}.json extension:
+     * { "people": [ { "id": 42802, "name": "...", "photo": "...", "knownFor": "..." } ] }.
+     * Returns null when the payload carries no people array at all —
+     * the addon doesn't serve the route (an error page or another JSON
+     * shape), so the caller tries the next addon. A present-but-empty
+     * array is a real answer and returns an empty list.
+     */
+    fun parsePersonSearch(text: String): List<CastMember>? {
+        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
+            ?: return null
+        val arr = obj["people"] as? JsonArray ?: return null
+        return arr.mapNotNull { el ->
+            val p = el as? JsonObject ?: return@mapNotNull null
+            val name = p.str("name") ?: return@mapNotNull null
+            CastMember(
+                id = (p["id"] as? JsonPrimitive)?.intOrNull ?: 0,
+                name = name,
+                photo = p.str("photo")
+            )
+        }
+    }
 }

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -93,7 +94,6 @@ import com.pulsestream.app.data.CustomListsRepository
 import com.pulsestream.app.ui.components.AddToListSheet
 import com.pulsestream.app.ui.components.LoadingState
 import com.pulsestream.app.ui.components.PosterCard
-import com.pulsestream.app.ui.components.DotsLoader
 import com.pulsestream.app.ui.components.SafePosterImage
 import com.pulsestream.app.ui.components.SectionTitle
 import com.pulsestream.app.ui.components.liquidGlass
@@ -279,17 +279,17 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxSize(),
                         state = pullRefreshState,
                         indicator = {
-                            // Refresh indicator: the Wave dots (owner's
-                            // pick 2026-10-25, Sample B — pulse out from the
-                            // center dot, wide spacing). The orbit stays on
-                            // every other loading surface.
+                            // Refresh indicator: the signature orbit
+                            // (owner's order 2026-10-26 — supersedes the
+                            // Wave dots pick of 2026-10-25; the orbit is
+                            // the app's one loading circle everywhere).
                             if (state.refreshing || pullRefreshState.distanceFraction > 0f) {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.TopCenter)
                                         .padding(top = 18.dp)
                                 ) {
-                                    DotsLoader(modifier = Modifier.width(124.dp).height(30.dp))
+                                    OrbitDots(modifier = Modifier.size(38.dp))
                                 }
                             }
                         }
@@ -468,15 +468,36 @@ fun HomeScreen(
             ) {
                 // Live pill (owner's order 2026-10-24): Live left the
                 // dock for the Library tab — it lives here now, at
-                // Home's top-right.
-                Box(
-                    Modifier
-                        .height(42.dp)
-                        .liquidGlass(RoundedCornerShape(50))
-                        .clickable { onGoToLive() }
-                        .padding(horizontal = 14.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+                // Home's top-right. Real glass (owner's device verdict
+                // 2026-10-26: the plain liquidGlass call read as a solid
+                // pill) — the dock's exact treatment: a fitted backing
+                // pill behind glass with explicit frost/darken.
+                Box(Modifier.height(42.dp)) {
+                    Box(
+                        Modifier
+                            .matchParentSize()
+                            .clip(RoundedCornerShape(50))
+                            .background(
+                                if (LocalPalette.current.light) {
+                                    Color.White.copy(alpha = 0.82f)
+                                } else {
+                                    Color.Black.copy(alpha = 0.48f)
+                                },
+                                RoundedCornerShape(50)
+                            )
+                    )
+                    Box(
+                        Modifier
+                            .fillMaxHeight()
+                            .liquidGlass(
+                                RoundedCornerShape(50),
+                                frost = 0.12f,
+                                darken = 0.03f
+                            )
+                            .clickable { onGoToLive() }
+                            .padding(horizontal = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             Modifier
@@ -497,6 +518,7 @@ fun HomeScreen(
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold
                         )
+                    }
                     }
                 }
             }
@@ -619,7 +641,7 @@ private fun HeroCarousel(
     // version, which stood narrow with blurred side bars and was
     // rejected on sight).
     val heroHeight = if (isTv) 380.dp
-        else (LocalConfiguration.current.screenHeightDp * 0.45f).dp
+        else (LocalConfiguration.current.screenHeightDp * 0.45f).dp + 40.dp
 
     val reducedMotion = com.pulsestream.app.data.rememberReducedMotion()
     LaunchedEffect(pagerState, featured.size, reducedMotion) {

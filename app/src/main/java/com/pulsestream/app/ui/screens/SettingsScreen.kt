@@ -1135,7 +1135,7 @@ fun AboutCard() {
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = "Data: Cinemeta • OpenSubtitles • IntroDB",
+                    text = "Data: TMDB • Fanart.tv • MDBList • Cinemeta • OpenSubtitles • IntroDB",
                     style = MaterialTheme.typography.labelMedium,
                     color = TextSecondary,
                     textAlign = TextAlign.Center
@@ -1202,10 +1202,7 @@ fun AppUpdaterCard() {
                         autoCheck = it
                         UpdateChecker.setAutoCheckEnabled(appContext, it)
                     },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = LocalPalette.current.accent,
-                        checkedTrackColor = LocalPalette.current.accent.copy(alpha = 0.35f)
-                    )
+                    colors = settingsSwitchColors()
                 )
             }
             Spacer(Modifier.height(12.dp))

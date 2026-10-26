@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
@@ -55,8 +56,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pulsestream.app.ui.components.SafePosterImage
+import com.pulsestream.app.ui.components.ShimmerPoster
 import com.pulsestream.app.ui.tv.tvFocusRing
 import com.pulsestream.app.data.CachedMeta
+import com.pulsestream.app.data.CastMember
 import com.pulsestream.app.data.SearchHistory
 import com.pulsestream.app.data.StreamRepository
 import com.pulsestream.app.ui.components.GlowBackground
@@ -70,7 +73,8 @@ import com.pulsestream.app.ui.theme.TextSecondary
 @Composable
 fun SearchScreen(
     repository: StreamRepository,
-    onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit
+    onOpenDetail: (addonId: String, type: String, metaId: String) -> Unit,
+    onOpenActor: (Int, String) -> Unit = { _, _ -> }
 ) {
     // Survive rotation: query/type/genre are saveable, and the debounced
     // search effect below re-runs on restore (results aren't parcelable,
@@ -82,6 +86,9 @@ fun SearchScreen(
     // when the search moves on (replaces the old remember(query) reset).
     var genreOwner by rememberSaveable { mutableStateOf("") }
     var results by remember { mutableStateOf<List<CachedMeta>>(emptyList()) }
+    // Actors matching the query (owner's order 2026-10-26 — search by
+    // actor): name + photo, tap opens the actor page.
+    var people by remember { mutableStateOf<List<CastMember>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
     var resultOwner by remember { mutableStateOf("") }
     val queryOwner = "${query.trim()}|$selectedType"
@@ -106,11 +113,24 @@ fun SearchScreen(
     var popular by remember { mutableStateOf<List<CachedMeta>>(emptyList()) }
     LaunchedEffect(Unit) { popular = repository.loadPopularTitles(10) }
 
-    // Debounced live search: instant local-cache hits, then addon results.
+    // Opening a result (title or actor) is what earns a history entry
+    // (owner's spec 2026-10-26): with first-letter searching, recording
+    // per keystroke would fill recents with fragments ("a", "av", "ava").
+    fun recordSettledSearch() {
+        val q = query.trim()
+        if (q.isNotEmpty()) {
+            SearchHistory.add(appContext, q)
+            history = SearchHistory.get(appContext)
+        }
+    }
+
+    // Debounced live search: starts on the FIRST letter (owner's order
+    // 2026-10-26) — instant local-cache hits, then addon results.
     LaunchedEffect(query, selectedType) {
         val q = query.trim()
-        if (q.length < 2) {
+        if (q.isEmpty()) {
             results = emptyList()
+            people = emptyList()
             resultOwner = ""
             searching = false
             return@LaunchedEffect
@@ -128,8 +148,13 @@ fun SearchScreen(
         results = fetchedResults
         resultOwner = owner
         searching = false
-        SearchHistory.add(appContext, q)
-        history = SearchHistory.get(appContext)
+        // People ride the same settled query; skipped for 1-letter
+        // queries and type-filtered searches to bound the meta fetches.
+        people = if (q.length >= 2 && selectedType == null) {
+            runCatching { repository.searchPeople(q) }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
     }
 
     GlowBackground {
@@ -171,7 +196,7 @@ fun SearchScreen(
             // (v0.12.4): the LANDING state is only bar → recents →
             // popular, so the type chips live in the searching/results
             // states only.
-            if (query.trim().length >= 2) {
+            if (query.trim().length >= 1) {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -196,7 +221,7 @@ fun SearchScreen(
                 Spacer(Modifier.height(8.dp))
             }
             // Discover: genre chips derived from the results, filtering locally.
-            if (genres.isNotEmpty() && query.trim().length >= 2) {
+            if (genres.isNotEmpty() && query.trim().length >= 1) {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -234,7 +259,7 @@ fun SearchScreen(
                 Spacer(Modifier.height(8.dp))
             }
             when {
-                query.trim().length < 2 -> {
+                query.trim().isEmpty() -> {
                     // Sample B landing (v0.12.4): capsule bar (above) →
                     // recent searches as capsule chips → "Popular right
                     // now" numbered list. One scrolling column so both
@@ -319,7 +344,7 @@ fun SearchScreen(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        "Type at least 2 characters to search\nacross your installed addons.",
+                                        "Start typing to search\nacross your installed addons.",
                                         color = TextSecondary,
                                         textAlign = TextAlign.Center,
                                         style = MaterialTheme.typography.bodyMedium
@@ -329,20 +354,36 @@ fun SearchScreen(
                         }
                     }
                 }
-                searching -> Box(
-                    Modifier.fillMaxSize(), contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        OrbitDots(modifier = Modifier.size(36.dp))
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            "Searching for \"${query.trim()}\"…",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
+                searching -> {
+                    // Shimmer skeleton grid while results land (owner's
+                    // order 2026-10-26) — no orbit screen, no blank wait.
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(110.dp),
+                        contentPadding = PaddingValues(
+                            start = 16.dp, end = 16.dp, top = 16.dp, bottom = 104.dp
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        userScrollEnabled = false
+                    ) {
+                        items(12) {
+                            Column {
+                                ShimmerPoster(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(2f / 3f)
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    " ",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
                     }
                 }
-                results.isEmpty() -> Box(
+                results.isEmpty() && people.isEmpty() -> Box(
                     Modifier.fillMaxSize(), contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -351,7 +392,57 @@ fun SearchScreen(
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
-                else -> LazyVerticalGrid(
+                else -> Column(Modifier.fillMaxSize()) {
+                    // Actors matching the query (owner's order
+                    // 2026-10-26): photo + name, tap opens the actor
+                    // page — the same destination as Detail's cast rows.
+                    if (people.isNotEmpty()) {
+                        Text(
+                            "Actors",
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 8.dp)
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            items(people, key = { "person_${it.id}_${it.name}" }) { person ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .width(72.dp)
+                                        .tvFocusRing(RoundedCornerShape(12.dp))
+                                        .clickable {
+                                            recordSettledSearch()
+                                            onOpenActor(person.id, person.name)
+                                        }
+                                ) {
+                                    SafePosterImage(
+                                        model = person.photo,
+                                        contentDescription = person.name,
+                                        modifier = Modifier
+                                            .size(64.dp)
+                                            .clip(CircleShape)
+                                            .liquidGlass(CircleShape)
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        text = person.name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextPrimary,
+                                        maxLines = 2,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    if (visibleResults.isNotEmpty() || selectedGenre != null) {
+                    LazyVerticalGrid(
                     columns = GridCells.Adaptive(110.dp),
                     // Bottom 104dp: last row scrolls clear of the floating dock.
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 104.dp),
@@ -382,8 +473,11 @@ fun SearchScreen(
                         key = { index, item -> "${item.addonId}_${item.meta.id}_$index" }
                     ) { _, item ->
                         GridPoster(item) {
+                            recordSettledSearch()
                             onOpenDetail(item.addonId, item.meta.type, item.meta.id)
                         }
+                    }
+                    }
                     }
                 }
             }

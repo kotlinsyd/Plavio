@@ -19,21 +19,50 @@ import java.io.File
  */
 object ExternalPlayer {
 
+    private const val PREFS = "plavio_external_player"
+    private const val KEY_HIDE_WARNING = "hide_protected_warning"
+
     /**
-     * Tries to hand [request] to an external player.
+     * True when the stream carries headers beyond the harmless trio —
+     * the receiving app gets only the sanitized subset (credentials and
+     * cookies are never handed off, see [play]), so a protected link
+     * may simply not play outside. Until v0.14.3 such links were
+     * hard-blocked; the owner's order (2026-10-26) replaced the block
+     * with a one-time warning — see [needsWarning].
+     */
+    fun hasProtectedHeaders(request: PlaybackRequest): Boolean =
+        PlaybackHeaders.buildPlaybackHeaders(request.headers, false).keys.any {
+            it.lowercase() !in setOf("user-agent", "accept", "accept-language")
+        }
+
+    /** The warning's "Don't show again" choice, persisted per device. */
+    fun warningSuppressed(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_HIDE_WARNING, false)
+
+    fun setWarningSuppressed(context: Context, value: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_HIDE_WARNING, value).apply()
+    }
+
+    /**
+     * True when the caller should show the protected-link warning
+     * popup before handing off: the link is protected AND the user
+     * hasn't ticked "Don't show again". Normal links never warn.
+     */
+    fun needsWarning(context: Context, request: PlaybackRequest): Boolean =
+        hasProtectedHeaders(request) && !warningSuppressed(context)
+
+    /**
+     * Tries to hand [request] to an external player. Never refuses a
+     * link for its headers (owner's order 2026-10-26) — callers gate
+     * protected links behind the warning popup via [needsWarning].
      *
      * @return true if a player was launched; false when no player could
      * handle it (a toast is shown explaining why) — the caller should then
      * fall back to the built-in player.
      */
     fun play(context: Context, request: PlaybackRequest): Boolean {
-        if (PlaybackHeaders.buildPlaybackHeaders(request.headers, false).keys.any {
-                it.lowercase() !in setOf("user-agent", "accept", "accept-language") }) {
-            Toast.makeText(context,
-                "This source needs protected headers. Using the built-in player instead of sharing them with another app.",
-                Toast.LENGTH_LONG).show()
-            return false
-        }
         val (uri, mime) = resolveUri(context, request.streamUrl)
         if (uri == null) {
             Toast.makeText(

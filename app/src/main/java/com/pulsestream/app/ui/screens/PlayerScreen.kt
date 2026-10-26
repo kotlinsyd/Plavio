@@ -27,6 +27,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -38,12 +39,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FastForward
@@ -98,6 +103,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -116,6 +122,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -573,6 +580,13 @@ fun PlayerScreen(
             4 -> CaptionStyleCompat.EDGE_TYPE_DEPRESSED
             else -> CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW
         }
+        // Style rail application (v0.14.5): embedded styling/font sizes
+        // are overridden so the user's style always wins, the size is a
+        // fixed sp (fractional in PiP, where the window is small and
+        // captions must scale with it), and the bottom offset follows
+        // the rail's 0–200 range.
+        sv.setApplyEmbeddedStyles(false)
+        sv.setApplyEmbeddedFontSizes(false)
         sv.setStyle(
             CaptionStyleCompat(
                 settings.subtitleTextColor,
@@ -583,11 +597,23 @@ fun PlayerScreen(
                 if (settings.subtitleBold) android.graphics.Typeface.DEFAULT_BOLD else null
             )
         )
-        sv.setFractionalTextSize(
-            SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * settings.subtitleTextSizeScale
+        val fontSp = settings.subtitleFontSizeSp
+        if (inPip) {
+            sv.setFractionalTextSize(
+                SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * (fontSp / 18f)
+            )
+        } else {
+            sv.setFixedTextSize(
+                android.util.TypedValue.COMPLEX_UNIT_SP, fontSp.toFloat()
+            )
+        }
+        // Bottom offset: base fraction plus offset/1000 (the offset term
+        // clamped to 0..0.2), the total clamped to 0..0.4.
+        val offsetFraction = (settings.subtitleBottomOffset / 1000f).coerceIn(0f, 0.2f)
+        sv.setBottomPaddingFraction(
+            (SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION * (2f / 3f) + offsetFraction)
+                .coerceIn(0f, 0.4f)
         )
-        // Style-panel bottom offset: lift captions off the bottom edge.
-        sv.setBottomPaddingFraction(settings.subtitleBottomOffset * 0.002f)
     }
 
 
@@ -625,17 +651,19 @@ fun PlayerScreen(
      */
     var rawResolvedSubs by remember { mutableStateOf(emptyList<ResolvedSubtitle>()) }
     /**
-     * In-memory per-title subtitle timing override (ms), added to the global
-     * [SettingsStore.subtitleOffsetMs]. Resets when the title changes — only
-     * the global setting persists across titles.
+     * Per-video subtitle delay (ms), added to the global
+     * [SettingsStore.subtitleOffsetMs]. Set from the Style rail's delay
+     * stepper / Auto Sync and persisted per video id
+     * ([SettingsStore.subtitleDelayMsFor]); reloaded whenever the title
+     * changes (see the load effect below the resolver).
      */
     var subOffsetOverrideMs by remember { mutableLongStateOf(0L) }
     /**
      * Effective subtitle timing offset for the current title: global default
-     * plus the in-player per-title adjustment, clamped to ±10s.
+     * plus the per-video delay, clamped to ±60s.
      */
     fun effectiveSubOffsetMs(): Long =
-        (settings.subtitleOffsetMs + subOffsetOverrideMs).coerceIn(-10_000L, 10_000L)
+        (settings.subtitleOffsetMs + subOffsetOverrideMs).coerceIn(-60_000L, 60_000L)
     /**
      * Re-applies the effective timing offset to the raw subtitles and
      * publishes the shifted list (which re-attaches to the player via the
@@ -719,6 +747,9 @@ fun PlayerScreen(
     // draws its own PiP controls); restore the default on return.
     LaunchedEffect(inPip) {
         if (inPip) showControls = false
+        // Caption sizing switches between fixed sp and fractional in
+        // PiP — re-apply so the change lands without a player rebuild.
+        playerView?.let { applySubtitleStyle(it) }
     }
     var locked by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(true) }
@@ -783,6 +814,10 @@ fun PlayerScreen(
 
     // Track switching
     var tracksOpen by remember { mutableStateOf(false) }
+    // External-player protected-link warning (owner's order 2026-10-26):
+    // non-null while the warning popup is up for that request.
+    var externalWarningReq by remember { mutableStateOf<PlaybackRequest?>(null) }
+    var externalWarningHide by remember { mutableStateOf(false) }
     var tracksMode by remember { mutableStateOf("subs") } // "subs" or "audio"
     var trackTick by remember { mutableIntStateOf(0) }
     /** Set when the user hand-picks an audio track — the preferred-language
@@ -870,14 +905,17 @@ fun PlayerScreen(
     var subSearchResults by remember { mutableStateOf(emptyList<Subtitle>()) }
     var subSearchError by remember { mutableStateOf<String?>(null) }
     var addedSubs by remember { mutableStateOf(emptyList<Subtitle>()) }
-    // Subtitle panel (v0.14.2): chosen language + language search text +
-    // the live font-size value mirrored from settings for the stepper.
+    // Subtitle overlay (v0.14.5): chosen language rail + the URL of the
+    // subtitle the user last picked in the panel (drives the Style
+    // rail's appearance before the player finishes attaching it).
     var panelLang by remember { mutableStateOf<String?>(null) }
-    var panelLangQuery by remember { mutableStateOf("") }
-    var subScaleUi by remember { mutableStateOf(settings.subtitleTextSizeScale) }
-    // Style-panel mirrors (v0.14.3): bold / outline / outline colour /
-    // bottom offset, plus auto-sync capture state and the reload tick
-    // that re-runs the subtitle resolver effect.
+    var panelPickedUrl by remember { mutableStateOf<String?>(null) }
+    // Style-rail mirrors of the persisted style: font size (sp), text
+    // colour (ARGB — its alpha is the opacity control), bold / outline /
+    // outline colour / bottom offset, plus auto-sync capture state and
+    // the reload tick that re-runs the subtitle resolver effect.
+    var subFontSpUi by remember { mutableIntStateOf(settings.subtitleFontSizeSp) }
+    var subColorUi by remember { mutableIntStateOf(settings.subtitleTextColor) }
     var subBoldUi by remember { mutableStateOf(settings.subtitleBold) }
     var subEdgeUi by remember { mutableIntStateOf(settings.subtitleEdgeType) }
     var subEdgeColorUi by remember { mutableIntStateOf(settings.subtitleEdgeColor) }
@@ -885,6 +923,8 @@ fun PlayerScreen(
     var subReloadTick by remember { mutableIntStateOf(0) }
     var captureCues by remember { mutableStateOf<List<Pair<Long, String>>?>(null) }
     var captureLoading by remember { mutableStateOf(false) }
+    /** Playback position stored when Auto Sync > Capture is pressed. */
+    var capturePositionMs by remember { mutableLongStateOf(0L) }
 
     // Back hierarchy, in one handler so the order is explicit: sheets first,
     // then hide visible controls, and only then leave the player (#27).
@@ -1203,6 +1243,20 @@ fun PlayerScreen(
         return out
     }
 
+    /**
+     * Style rail delay control: set the per-video delay (the stepper's
+     * ±100ms, Reset's 0, or an Auto Sync cue tap), persist it for this
+     * video, cancel any in-progress auto-sync cue pick (a manual change
+     * always wins), and re-shift the downloaded subtitles.
+     */
+    fun setSubtitleDelay(delayMs: Long) {
+        val clamped = delayMs.coerceIn(-60_000L, 60_000L)
+        subOffsetOverrideMs = clamped
+        settings.setSubtitleDelayMsFor(currentRequest.videoId, clamped)
+        captureCues = null
+        applySubtitleTiming()
+    }
+
     /** Auto Sync > Reload: drop the cached downloads + shifted copies
      *  and re-resolve every subtitle fresh from its source. */
     fun reloadPanelSubtitles() {
@@ -1230,15 +1284,16 @@ fun PlayerScreen(
             pokeIndicator(PlayerIndicator.Message("Auto sync needs a downloaded subtitle track"))
             return
         }
+        // The position is captured NOW (when the line is heard); a cue
+        // tap later computes the delay from this stored position.
+        capturePositionMs = player.currentPosition
         captureLoading = true
         ioScope.launch {
             val cues = parseSubtitleCues(raw.file)
-            val center = (player.currentPosition - effectiveSubOffsetMs()).coerceAtLeast(0L)
-            val near = cues.filter { kotlin.math.abs(it.first - center) <= 30_000L }
-                .ifEmpty {
-                    cues.sortedBy { kotlin.math.abs(it.first - center) }
-                        .take(14).sortedBy { it.first }
-                }
+            val center = (capturePositionMs - effectiveSubOffsetMs()).coerceAtLeast(0L)
+            // The five cues nearest the captured position, in time order.
+            val near = cues.sortedBy { kotlin.math.abs(it.first - center) }
+                .take(5).sortedBy { it.first }
             withContext(Dispatchers.Main) {
                 captureLoading = false
                 captureCues = near
@@ -1286,10 +1341,12 @@ fun PlayerScreen(
         }
     }
 
-    // Reset per-title adjustment only when the actual title/episode changes;
-    // adding a subtitle or switching source does not discard the user's offset.
+    // Load the persisted per-video delay only when the actual
+    // title/episode changes; adding a subtitle or switching source does
+    // not discard the user's delay.
     LaunchedEffect(currentRequest.metaId, currentRequest.videoId, currentRequest.season, currentRequest.episode) {
-        subOffsetOverrideMs = 0L
+        subOffsetOverrideMs = settings.subtitleDelayMsFor(currentRequest.videoId)
+        if (rawResolvedSubs.isNotEmpty()) applySubtitleTiming()
     }
 
     // Attach resolved subtitles to the player. Skips silently when the fresh
@@ -2289,6 +2346,17 @@ fun PlayerScreen(
     // Landscape + immersive; restore on exit; save + release on dispose.
     // YouTube opens portrait-first (Rotate pill switches to landscape).
     DisposableEffect(Unit) {
+        // PiP dismissal rework (v0.14.4): MainActivity stops playback
+        // through this hook when a PiP window is X-closed — on the
+        // owner's Samsung the stopped activity never recomposes, so
+        // the old counter-only path left audio playing until the app
+        // was killed from recents. stop()+release() here kills the
+        // audio at the source; the dispose path below stays as-is.
+        MainActivity.pipEmergencyStop = {
+            runCatching { savePosition() }
+            runCatching { latestPlayer.value.stop() }
+            runCatching { latestPlayer.value.release() }
+        }
         activity?.requestedOrientation = if (initialRequest.sourceName == "YouTube")
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         else
@@ -2303,6 +2371,7 @@ fun PlayerScreen(
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
         onDispose {
+            MainActivity.pipEmergencyStop = null
             // #9: from here on, no late work may build a player (ghost audio).
             disposed.set(true)
             preemptPendingLiveFallback()
@@ -2898,7 +2967,15 @@ fun PlayerScreen(
                         IconButton(
                             onClick = {
                                 val ctx = activity ?: return@IconButton
-                                ExternalPlayer.play(ctx, req)
+                                // Protected links warn once (owner's
+                                // order 2026-10-26) instead of the old
+                                // hard block; normal links open at once.
+                                if (ExternalPlayer.needsWarning(ctx, req)) {
+                                    externalWarningHide = false
+                                    externalWarningReq = req
+                                } else {
+                                    ExternalPlayer.play(ctx, req)
+                                }
                             },
                             modifier = Modifier.tvFocusRing(RoundedCornerShape(50))
                         ) {
@@ -3096,7 +3173,11 @@ fun PlayerScreen(
                                 PillBarButton(
                                     icon = Icons.Filled.ClosedCaption,
                                     label = "Subs",
-                                    onClick = { trackTick++; tracksMode = "subs"; tracksOpen = true }
+                                    onClick = {
+                                        trackTick++
+                                        tracksMode = "subs"
+                                        tracksOpen = true
+                                    }
                                 )
                                 PillBarButton(
                                     icon = Icons.Filled.Audiotrack,
@@ -3127,6 +3208,59 @@ fun PlayerScreen(
             }
         }
 
+        // External-player warning for protected links (owner's order
+        // 2026-10-26 — replaces the old hard block): the link leaves
+        // the app without its protected headers, so the outside player
+        // may not be able to play it. "Don't show again" persists.
+        externalWarningReq?.let { warnReq ->
+            val warnCtx = activity
+            AlertDialog(
+                onDismissRequest = { externalWarningReq = null },
+                title = { Text("Protected link") },
+                text = {
+                    Column {
+                        Text(
+                            "This source uses protected headers, which stay in Plavio — " +
+                                "the other app may not be able to play this link.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clickable { externalWarningHide = !externalWarningHide }
+                        ) {
+                            Checkbox(
+                                checked = externalWarningHide,
+                                onCheckedChange = { externalWarningHide = it }
+                            )
+                            Text(
+                                "Don't show again",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextPrimary
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (externalWarningHide && warnCtx != null) {
+                            ExternalPlayer.setWarningSuppressed(warnCtx, true)
+                        }
+                        externalWarningReq = null
+                        if (warnCtx != null) ExternalPlayer.play(warnCtx, warnReq)
+                    }) {
+                        Text("Open anyway", color = LocalPalette.current.accent)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { externalWarningReq = null }) {
+                        Text("Cancel", color = TextSecondary)
+                    }
+                }
+            )
+        }
+
         // Resume prompt.
         resumeOfferMs?.let { saved ->
             ResumePromptDialog(
@@ -3146,38 +3280,46 @@ fun PlayerScreen(
             )
         }
 
-        // Track switching: Subs button opens subtitles only, Audio button opens audio only.
-        // Bottom sheet (not AlertDialog) so the root media/channel-key handler
-        // keeps working while it's open (#28).
+        // Track switching: the Subs button opens the subtitle overlay
+        // (v0.14.5, Nuvio-style three rails over the playing video); the
+        // Audio button keeps its bottom sheet. Neither is an
+        // AlertDialog, so the root media/channel-key handler keeps
+        // working while they're open (#28).
         if (tracksOpen) {
             val isAudio = tracksMode == "audio"
             // TV: land D-pad focus on the first row when the picker opens.
             val firstRowFocus = remember { FocusRequester() }
             LaunchedEffect(isTv, tracksMode) {
+                if (tracksMode == "subs") {
+                    // Seed the Style rail's visibility from the track
+                    // that is already playing when the overlay opens.
+                    panelPickedUrl = textOpts.firstOrNull { it.selected }
+                        ?.let { panelTrackId(it) }
+                }
                 if (isTv) {
                     delay(300)
                     runCatching { firstRowFocus.requestFocus() }
                 }
             }
-            ModalBottomSheet(
-                onDismissRequest = { tracksOpen = false },
-                sheetState = rememberModalBottomSheetState(),
-                containerColor = Color(0xFF14141F)
-            ) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp)
+            if (isAudio) {
+                ModalBottomSheet(
+                    onDismissRequest = { tracksOpen = false },
+                    sheetState = rememberModalBottomSheetState(),
+                    containerColor = Color(0xFF14141F)
                 ) {
-                    item {
-                        Text(
-                            if (isAudio) "Audio" else "Subtitles",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
-                        )
-                    }
-                    if (isAudio) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp)
+                    ) {
+                        item {
+                            Text(
+                                "Audio",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+                            )
+                        }
                         item {
                             TrackRow(
                                 label = "Auto",
@@ -3193,175 +3335,176 @@ fun PlayerScreen(
                                 onClick = { applyAudioSelection(opt) }
                             )
                         }
-                    } else {
-                        // ===== Subtitle panel (v0.14.2, owner's reference) =====
-                        // Three columns: Languages | Subtitles | Style. The
-                        // list comes straight from the addon response, so it
-                        // shows instantly; tapping a track selects it if it
-                        // is already in the player, or downloads + applies
-                        // it in the background if not.
-                        val langs = panelLanguages()
-                        val activeLang = panelLang?.takeIf { ln -> langs.any { it.first == ln } }
-                            ?: textOpts.firstOrNull { it.selected }?.let {
-                                panelLangName(
-                                    runCatching { it.group.getFormat(it.trackIndex).language }
-                                        .getOrNull()
-                                )
-                            }
-                            ?: langs.firstOrNull()?.first
-                        val visibleLangs = if (panelLangQuery.isBlank()) langs
-                            else langs.filter { it.first.contains(panelLangQuery, ignoreCase = true) }
-                        val langSubs = panelSubs().filter { panelLangName(it.lang) == activeLang }
-                        val langEmbedded = panelEmbeddedOpts().filter {
-                            panelLangName(
-                                runCatching { it.group.getFormat(it.trackIndex).language }
-                                    .getOrNull()
-                            ) == activeLang
-                        }
-                        item {
-                            TrackRow(
-                                label = "Off",
-                                selected = subtitlesOff,
-                                onClick = { applySubtitleSelection(null) },
-                                modifier = Modifier.focusRequester(firstRowFocus)
-                            )
-                        }
-                        item {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().height(330.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                // --- Languages (with search) ---
-                                Column(Modifier.weight(1f).fillMaxHeight()) {
-                                    OutlinedTextField(
-                                        value = panelLangQuery,
-                                        onValueChange = { panelLangQuery = it },
-                                        singleLine = true,
-                                        placeholder = {
-                                            Text(
-                                                "Search language",
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
-                                        },
-                                        leadingIcon = {
-                                            Icon(
-                                                Icons.Filled.Search,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        },
-                                        textStyle = MaterialTheme.typography.bodySmall,
-                                        colors = OutlinedTextFieldDefaults.colors(
-                                            focusedBorderColor = LocalPalette.current.accent,
-                                            unfocusedBorderColor = Color.White.copy(alpha = 0.15f),
-                                            focusedContainerColor = Color.White.copy(alpha = 0.05f),
-                                            unfocusedContainerColor = Color.White.copy(alpha = 0.05f)
-                                        ),
-                                        modifier = Modifier.fillMaxWidth().height(52.dp)
+                    }
+                }
+            } else {
+                // ===== Subtitle overlay (v0.14.5, owner's approved
+                // design): a translucent full-player overlay — the video
+                // keeps playing behind it and every style change lands
+                // on the real captions live. Three side-by-side rails in
+                // a horizontally scrollable row: Languages | Subtitles |
+                // Style (the Style rail fades in only once a subtitle
+                // is selected). =====
+                val langs = panelLanguages()
+                // Preferred languages first (Settings > Subtitles),
+                // stable for the rest.
+                val prefLangNames = settings.subtitleLanguages.map { panelLangName(it) }
+                val sortedLangs = langs.sortedBy { (name, _) ->
+                    prefLangNames.indexOf(name).let { if (it < 0) Int.MAX_VALUE else it }
+                }
+                val activeLang = panelLang?.takeIf { ln -> sortedLangs.any { it.first == ln } }
+                    ?: textOpts.firstOrNull { it.selected }?.let {
+                        panelLangName(
+                            runCatching { it.group.getFormat(it.trackIndex).language }
+                                .getOrNull()
+                        )
+                    }
+                    ?: sortedLangs.firstOrNull()?.first
+                val langSubs = panelSubs().filter { panelLangName(it.lang) == activeLang }
+                val langEmbedded = panelEmbeddedOpts().filter {
+                    panelLangName(
+                        runCatching { it.group.getFormat(it.trackIndex).language }
+                            .getOrNull()
+                    ) == activeLang
+                }
+                val selectedSubUrl = textOpts.firstOrNull { it.selected }
+                    ?.let { panelTrackId(it) }
+                val selectedIsAddon = selectedSubUrl != null &&
+                    panelSubs().any { it.url == selectedSubUrl }
+                val styleVisible = !subtitlesOff || panelPickedUrl != null
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    val railHeight = if (maxHeight < 400.dp) 236.dp else 300.dp
+                    // Scrim: dims the video; a tap outside the rails
+                    // dismisses the overlay.
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { tracksOpen = false }
+                    )
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .padding(start = 24.dp, end = 24.dp, bottom = 20.dp)
+                    ) {
+                        Text(
+                            "Subtitles",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            modifier = Modifier.padding(bottom = 10.dp)
+                        )
+                        Row(
+                            Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            // ---- Languages rail (200dp) ----
+                            Column(
+                                Modifier
+                                    .width(200.dp)
+                                    .height(railHeight)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color(0xFF14141F).copy(alpha = 0.94f))
+                                    .border(
+                                        1.dp, Color.White.copy(alpha = 0.08f),
+                                        RoundedCornerShape(14.dp)
                                     )
-                                    Spacer(Modifier.height(8.dp))
-                                    LazyColumn(
-                                        Modifier.fillMaxSize(),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        items(visibleLangs) { (name, count) ->
-                                            val selectedLang = name == activeLang
-                                            // Reference look (v0.14.3): the
-                                            // selected language is a full
-                                            // WHITE pill with dark text; the
-                                            // track count sits in a circle.
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clip(RoundedCornerShape(10.dp))
-                                                    .background(
-                                                        if (selectedLang) Color.White
-                                                        else Color.Transparent
-                                                    )
-                                                    .clickable { panelLang = name }
-                                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(
-                                                    name,
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    fontWeight = if (selectedLang) {
-                                                        FontWeight.Bold
-                                                    } else {
-                                                        FontWeight.Medium
-                                                    },
-                                                    color = if (selectedLang) {
-                                                        Color.Black
-                                                    } else {
-                                                        TextPrimary
-                                                    },
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    modifier = Modifier.weight(1f)
-                                                )
-                                                Box(
-                                                    Modifier
-                                                        .size(20.dp)
-                                                        .clip(RoundedCornerShape(50))
-                                                        .background(
-                                                            if (selectedLang) Color.Black
-                                                            else Color.White
-                                                        ),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Text(
-                                                        "$count",
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = if (selectedLang) {
-                                                            Color.White
-                                                        } else {
-                                                            Color.Black
-                                                        }
-                                                    )
-                                                }
+                                    .padding(10.dp)
+                            ) {
+                                LazyColumn(
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    item {
+                                        RailLanguageRow(
+                                            name = "None",
+                                            count = null,
+                                            selected = subtitlesOff && panelPickedUrl == null,
+                                            modifier = Modifier.focusRequester(firstRowFocus),
+                                            onClick = {
+                                                panelPickedUrl = null
+                                                applySubtitleSelection(null)
                                             }
-                                        }
+                                        )
+                                    }
+                                    items(sortedLangs) { (name, count) ->
+                                        RailLanguageRow(
+                                            name = name,
+                                            count = count,
+                                            selected = name == activeLang,
+                                            onClick = { panelLang = name }
+                                        )
                                     }
                                 }
-                                // --- Subtitles for the chosen language ---
+                            }
+                            // ---- Subtitles rail (300dp) ----
+                            Column(
+                                Modifier
+                                    .width(300.dp)
+                                    .height(railHeight)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color(0xFF14141F).copy(alpha = 0.94f))
+                                    .border(
+                                        1.dp, Color.White.copy(alpha = 0.08f),
+                                        RoundedCornerShape(14.dp)
+                                    )
+                                    .padding(10.dp)
+                            ) {
                                 LazyColumn(
-                                    Modifier.weight(1.3f).fillMaxHeight(),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    if (activeLang == null) {
+                                    if (activeLang == null && !subSearchLoading) {
                                         item {
                                             Text(
                                                 "No subtitles for this title.",
                                                 color = TextSecondary,
-                                                style = MaterialTheme.typography.bodySmall
+                                                style = MaterialTheme.typography.bodySmall,
+                                                modifier = Modifier.padding(vertical = 6.dp)
                                             )
                                         }
                                     }
                                     items(langSubs) { sub ->
                                         val resolvedSub =
                                             rawResolvedSubs.firstOrNull { it.sub.url == sub.url }
-                                        val selectedTrack =
-                                            textOpts.firstOrNull { it.selected }
-                                                ?.let { panelTrackId(it) } == sub.url
                                         PanelSubCard(
                                             chip = panelHostLabel(sub.url),
                                             title = panelFileLabel(sub),
                                             detail = listOfNotNull(
                                                 panelLangName(sub.lang),
-                                                resolvedSub?.let { panelFormatLabel(it.mimeType) }
+                                                resolvedSub?.let { panelFormatLabel(it.mimeType) },
+                                                if (sub.url.contains("forced", ignoreCase = true)) {
+                                                    "Forced"
+                                                } else {
+                                                    null
+                                                }
                                             ).joinToString(" \u00b7 "),
-                                            selected = selectedTrack,
-                                            onClick = { activatePanelSubtitle(sub) }
+                                            selected = selectedSubUrl == sub.url,
+                                            onClick = {
+                                                panelPickedUrl = sub.url
+                                                activatePanelSubtitle(sub)
+                                            }
                                         )
                                     }
                                     items(langEmbedded) { opt ->
                                         PanelSubCard(
-                                            chip = "Embedded",
+                                            chip = "Built-in",
                                             title = opt.label,
-                                            detail = activeLang ?: "",
+                                            detail = listOfNotNull(
+                                                activeLang,
+                                                if (opt.label.contains("forced", ignoreCase = true)) {
+                                                    "Forced"
+                                                } else {
+                                                    null
+                                                }
+                                            ).joinToString(" \u00b7 "),
                                             selected = opt.selected,
-                                            onClick = { applySubtitleSelection(opt) }
+                                            onClick = {
+                                                panelPickedUrl = "built-in"
+                                                applySubtitleSelection(opt)
+                                            }
                                         )
                                     }
                                     if (subSearchLoading) {
@@ -3374,75 +3517,98 @@ fun PlayerScreen(
                                             )
                                         }
                                     }
-                                }
-                                // --- Style: delay + font size ---
-                                Column(
-                                    Modifier
-                                        .weight(1f)
-                                        .fillMaxHeight()
-                                        .verticalScroll(rememberScrollState())
-                                ) {
-                                    Text(
-                                        "Style",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = TextPrimary
-                                    )
-                                    Spacer(Modifier.height(10.dp))
-                                    Text(
-                                        "Subtitle delay",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = TextSecondary
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    if (langSubs.isEmpty() && langEmbedded.isEmpty() &&
+                                        !subSearchLoading
                                     ) {
-                                        OutlinedButton(
-                                            onClick = {
-                                                subOffsetOverrideMs =
-                                                    (subOffsetOverrideMs - 500L)
-                                                        .coerceIn(-10_000L, 10_000L)
-                                                applySubtitleTiming()
-                                            },
-                                            modifier = Modifier.size(40.dp),
-                                            contentPadding = PaddingValues(0.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Filled.Remove,
-                                                contentDescription = "Delay less"
-                                            )
+                                        item {
+                                            Row(
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .background(Color.White.copy(alpha = 0.06f))
+                                                    .clickable { openSubtitleSearch() }
+                                                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    Icons.Filled.CloudDownload,
+                                                    contentDescription = null,
+                                                    tint = LocalPalette.current.accent,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(
+                                                    "Tap to fetch subtitles",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = TextPrimary
+                                                )
+                                            }
                                         }
-                                        Text(
-                                            panelDelayLabel(effectiveSubOffsetMs()),
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = LocalPalette.current.accent,
-                                            modifier = Modifier.weight(1f),
-                                            textAlign = TextAlign.Center
-                                        )
-                                        OutlinedButton(
-                                            onClick = {
-                                                subOffsetOverrideMs =
-                                                    (subOffsetOverrideMs + 500L)
-                                                        .coerceIn(-10_000L, 10_000L)
-                                                applySubtitleTiming()
-                                            },
-                                            modifier = Modifier.size(40.dp),
-                                            contentPadding = PaddingValues(0.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Filled.Add,
-                                                contentDescription = "Delay more"
+                                    }
+                                    if (subLoadError && panelSubs().isEmpty()) {
+                                        item {
+                                            Text(
+                                                "Couldn't load subtitles \u2014 check your connection and try again.",
+                                                color = Color(0xFFEF4444),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                modifier = Modifier.padding(vertical = 8.dp)
                                             )
                                         }
                                     }
-                                    TextButton(
-                                        onClick = {
-                                            subOffsetOverrideMs = 0L
-                                            applySubtitleTiming()
+                                    subSearchError?.let { err ->
+                                        item {
+                                            Text(
+                                                err,
+                                                color = TextSecondary,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                modifier = Modifier.padding(start = 4.dp)
+                                            )
                                         }
+                                    }
+                                    if (langSubs.isNotEmpty() || langEmbedded.isNotEmpty()) {
+                                        item {
+                                            TextButton(onClick = { openSubtitleSearch() }) {
+                                                Text(
+                                                    "Fetch subtitles online",
+                                                    color = LocalPalette.current.accent,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // ---- Style rail (280dp) ----
+                            AnimatedVisibility(
+                                visible = styleVisible,
+                                enter = fadeIn(),
+                                exit = fadeOut()
+                            ) {
+                                Column(
+                                    Modifier
+                                        .width(280.dp)
+                                        .height(railHeight)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(Color(0xFF14141F).copy(alpha = 0.94f))
+                                        .border(
+                                            1.dp, Color.White.copy(alpha = 0.08f),
+                                            RoundedCornerShape(14.dp)
+                                        )
+                                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                                        .verticalScroll(rememberScrollState())
+                                ) {
+                                    // 1. Subtitle Delay
+                                    StyleSectionLabel("Subtitle Delay")
+                                    Spacer(Modifier.height(6.dp))
+                                    StyleStepper(
+                                        value = panelDelayLabel(effectiveSubOffsetMs()),
+                                        onMinus = { setSubtitleDelay(subOffsetOverrideMs - 100L) },
+                                        onPlus = { setSubtitleDelay(subOffsetOverrideMs + 100L) }
+                                    )
+                                    TextButton(
+                                        onClick = { setSubtitleDelay(0L) },
+                                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                                     ) {
                                         Text(
                                             "Reset",
@@ -3451,251 +3617,270 @@ fun PlayerScreen(
                                         )
                                     }
                                     Spacer(Modifier.height(10.dp))
-                                    Text(
-                                        "Font size",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = TextSecondary
-                                    )
+                                    // 2. Font Size
+                                    StyleSectionLabel("Font Size")
                                     Spacer(Modifier.height(6.dp))
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        OutlinedButton(
-                                            onClick = {
-                                                subScaleUi =
-                                                    (subScaleUi - 0.1f).coerceIn(0.5f, 2f)
-                                                settings.subtitleTextSizeScale = subScaleUi
-                                                playerView?.let { applySubtitleStyle(it) }
-                                            },
-                                            modifier = Modifier.size(40.dp),
-                                            contentPadding = PaddingValues(0.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Filled.Remove,
-                                                contentDescription = "Smaller subtitles"
-                                            )
+                                    StyleStepper(
+                                        value = "${subFontSpUi}sp",
+                                        onMinus = {
+                                            val v = (subFontSpUi - 2).coerceIn(12, 40)
+                                            subFontSpUi = v
+                                            settings.subtitleFontSizeSp = v
+                                            playerView?.let { applySubtitleStyle(it) }
+                                        },
+                                        onPlus = {
+                                            val v = (subFontSpUi + 2).coerceIn(12, 40)
+                                            subFontSpUi = v
+                                            settings.subtitleFontSizeSp = v
+                                            playerView?.let { applySubtitleStyle(it) }
                                         }
-                                        Text(
-                                            "${(subScaleUi * 100).roundToInt()}%",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = LocalPalette.current.accent,
-                                            modifier = Modifier.weight(1f),
-                                            textAlign = TextAlign.Center
-                                        )
-                                        OutlinedButton(
-                                            onClick = {
-                                                subScaleUi =
-                                                    (subScaleUi + 0.1f).coerceIn(0.5f, 2f)
-                                                settings.subtitleTextSizeScale = subScaleUi
-                                                playerView?.let { applySubtitleStyle(it) }
-                                            },
-                                            modifier = Modifier.size(40.dp),
-                                            contentPadding = PaddingValues(0.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Filled.Add,
-                                                contentDescription = "Bigger subtitles"
-                                            )
-                                        }
-                                    }
-                                    Spacer(Modifier.height(14.dp))
-                                    // Bold
-                                    Row(
-                                        Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            "Bold",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = TextSecondary,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        Switch(
-                                            checked = subBoldUi,
-                                            onCheckedChange = { on ->
-                                                subBoldUi = on
-                                                settings.subtitleBold = on
-                                                playerView?.let { applySubtitleStyle(it) }
-                                            },
-                                            colors = SwitchDefaults.colors(
-                                                checkedTrackColor = LocalPalette.current.accent,
-                                                checkedThumbColor = LocalPalette.current.accentText,
-                                                uncheckedTrackColor = Color.White.copy(alpha = 0.18f),
-                                                uncheckedThumbColor = Color.White
-                                            )
-                                        )
-                                    }
-                                    // Outline
-                                    Row(
-                                        Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            "Outline",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = TextSecondary,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        Switch(
-                                            checked = subEdgeUi != 0,
-                                            onCheckedChange = { on ->
-                                                val t = if (on) 1 else 0
-                                                subEdgeUi = t
-                                                settings.subtitleEdgeType = t
-                                                playerView?.let { applySubtitleStyle(it) }
-                                            },
-                                            colors = SwitchDefaults.colors(
-                                                checkedTrackColor = LocalPalette.current.accent,
-                                                checkedThumbColor = LocalPalette.current.accentText,
-                                                uncheckedTrackColor = Color.White.copy(alpha = 0.18f),
-                                                uncheckedThumbColor = Color.White
-                                            )
-                                        )
-                                    }
-                                    Spacer(Modifier.height(6.dp))
-                                    // Outline colour
-                                    Text(
-                                        "Outline colour",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = TextSecondary
                                     )
+                                    Spacer(Modifier.height(16.dp))
+                                    // 3. Bold
+                                    StyleSectionLabel("Bold")
                                     Spacer(Modifier.height(6.dp))
-                                    Row(
+                                    StyleChip(
+                                        label = if (subBoldUi) "On" else "Off",
+                                        on = subBoldUi,
+                                        onClick = {
+                                            val on = !subBoldUi
+                                            subBoldUi = on
+                                            settings.subtitleBold = on
+                                            playerView?.let { applySubtitleStyle(it) }
+                                        }
+                                    )
+                                    Spacer(Modifier.height(16.dp))
+                                    // 4. Color (keeps the current opacity)
+                                    StyleSectionLabel("Color")
+                                    Spacer(Modifier.height(6.dp))
+                                    LazyRow(
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        listOf(
-                                            0xFFFFFFFFL, 0xFF000000L, 0xFFFACC15L,
-                                            0xFFEF4444L, 0xFF22C55EL, 0xFF38BDF8L
-                                        ).forEach { c ->
-                                            val chosen = subEdgeColorUi == c.toInt()
-                                            Box(
-                                                Modifier
-                                                    .size(26.dp)
-                                                    .clip(RoundedCornerShape(50))
-                                                    .background(Color(c))
-                                                    .border(
-                                                        if (chosen) 2.5.dp else 1.dp,
-                                                        if (chosen) {
-                                                            LocalPalette.current.accent
-                                                        } else {
-                                                            Color.White.copy(alpha = 0.25f)
-                                                        },
-                                                        RoundedCornerShape(50)
-                                                    )
-                                                    .clickable {
-                                                        subEdgeColorUi = c.toInt()
-                                                        settings.subtitleEdgeColor = c.toInt()
+                                        items(
+                                            listOf(
+                                                0xFFFFFFFF, 0xFFFFD700, 0xFF00E5FF, 0xFFFF5C5C,
+                                                0xFF00FF88, 0xFF9B59B6, 0xFFF97316, 0xFF22C55E,
+                                                0xFF3B82F6, 0xFF000000
+                                            )
+                                        ) { c ->
+                                            val rgb = c.toInt()
+                                            StyleSwatch(
+                                                color = Color(rgb),
+                                                selected = (subColorUi and 0x00FFFFFF) ==
+                                                    (rgb and 0x00FFFFFF),
+                                                onClick = {
+                                                    val merged =
+                                                        (subColorUi and 0xFF000000.toInt()) or
+                                                            (rgb and 0x00FFFFFF)
+                                                    subColorUi = merged
+                                                    settings.subtitleTextColor = merged
+                                                    playerView?.let { applySubtitleStyle(it) }
+                                                }
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.height(16.dp))
+                                    // 5. Text Opacity
+                                    StyleSectionLabel("Text Opacity")
+                                    Spacer(Modifier.height(6.dp))
+                                    val opacityPct =
+                                        (android.graphics.Color.alpha(subColorUi) * 100 + 127) / 255
+                                    StyleStepper(
+                                        value = "$opacityPct%",
+                                        onMinus = {
+                                            val p = (opacityPct - 10).coerceIn(0, 100)
+                                            val a = (p * 255 + 50) / 100
+                                            val merged = (a shl 24) or (subColorUi and 0x00FFFFFF)
+                                            subColorUi = merged
+                                            settings.subtitleTextColor = merged
+                                            playerView?.let { applySubtitleStyle(it) }
+                                        },
+                                        onPlus = {
+                                            val p = (opacityPct + 10).coerceIn(0, 100)
+                                            val a = (p * 255 + 50) / 100
+                                            val merged = (a shl 24) or (subColorUi and 0x00FFFFFF)
+                                            subColorUi = merged
+                                            settings.subtitleTextColor = merged
+                                            playerView?.let { applySubtitleStyle(it) }
+                                        }
+                                    )
+                                    Spacer(Modifier.height(16.dp))
+                                    // 6. Outline + Outline Color
+                                    StyleSectionLabel("Outline")
+                                    Spacer(Modifier.height(6.dp))
+                                    StyleChip(
+                                        label = if (subEdgeUi != 0) "On" else "Off",
+                                        on = subEdgeUi != 0,
+                                        onClick = {
+                                            val t = if (subEdgeUi == 0) 1 else 0
+                                            subEdgeUi = t
+                                            settings.subtitleEdgeType = t
+                                            playerView?.let { applySubtitleStyle(it) }
+                                        }
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    StyleSectionLabel("Outline Color")
+                                    Spacer(Modifier.height(6.dp))
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.alpha(if (subEdgeUi == 0) 0.42f else 1f)
+                                    ) {
+                                        listOf(0xFF000000, 0xFFFFFFFF, 0xFF00E5FF, 0xFFFF5C5C)
+                                            .forEach { c ->
+                                                val rgb = c.toInt()
+                                                StyleSwatch(
+                                                    color = Color(rgb),
+                                                    selected = (subEdgeColorUi and 0x00FFFFFF) ==
+                                                        (rgb and 0x00FFFFFF),
+                                                    onClick = {
+                                                        subEdgeColorUi = rgb
+                                                        settings.subtitleEdgeColor = rgb
                                                         if (subEdgeUi == 0) {
                                                             subEdgeUi = 1
                                                             settings.subtitleEdgeType = 1
                                                         }
-                                                        playerView?.let {
-                                                            applySubtitleStyle(it)
-                                                        }
+                                                        playerView?.let { applySubtitleStyle(it) }
                                                     }
-                                            )
-                                        }
+                                                )
+                                            }
                                     }
-                                    Spacer(Modifier.height(14.dp))
-                                    // Bottom offset
-                                    Text(
-                                        "Bottom offset",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = TextSecondary
-                                    )
+                                    Spacer(Modifier.height(16.dp))
+                                    // 7. Bottom Offset
+                                    StyleSectionLabel("Bottom Offset")
                                     Spacer(Modifier.height(6.dp))
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        OutlinedButton(
-                                            onClick = {
-                                                subBottomUi =
-                                                    (subBottomUi - 5).coerceIn(0, 100)
-                                                settings.subtitleBottomOffset = subBottomUi
-                                                playerView?.let { applySubtitleStyle(it) }
-                                            },
-                                            modifier = Modifier.size(40.dp),
-                                            contentPadding = PaddingValues(0.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Filled.Remove,
-                                                contentDescription = "Lower subtitles"
-                                            )
+                                    StyleStepper(
+                                        value = "$subBottomUi",
+                                        onMinus = {
+                                            val v = (subBottomUi - 5).coerceIn(0, 200)
+                                            subBottomUi = v
+                                            settings.subtitleBottomOffset = v
+                                            playerView?.let { applySubtitleStyle(it) }
+                                        },
+                                        onPlus = {
+                                            val v = (subBottomUi + 5).coerceIn(0, 200)
+                                            subBottomUi = v
+                                            settings.subtitleBottomOffset = v
+                                            playerView?.let { applySubtitleStyle(it) }
                                         }
+                                    )
+                                    Spacer(Modifier.height(16.dp))
+                                    // 8. Auto Sync (addon subtitles only)
+                                    StyleSectionLabel("Auto Sync")
+                                    Spacer(Modifier.height(6.dp))
+                                    if (!selectedIsAddon) {
                                         Text(
-                                            "$subBottomUi",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = LocalPalette.current.accent,
-                                            modifier = Modifier.weight(1f),
-                                            textAlign = TextAlign.Center
+                                            "Select an addon subtitle first",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = TextSecondary
                                         )
-                                        OutlinedButton(
-                                            onClick = {
-                                                subBottomUi =
-                                                    (subBottomUi + 5).coerceIn(0, 100)
-                                                settings.subtitleBottomOffset = subBottomUi
-                                                playerView?.let { applySubtitleStyle(it) }
-                                            },
-                                            modifier = Modifier.size(40.dp),
-                                            contentPadding = PaddingValues(0.dp)
+                                    } else {
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
-                                            Icon(
-                                                Icons.Filled.Add,
-                                                contentDescription = "Raise subtitles"
-                                            )
+                                            OutlinedButton(
+                                                onClick = { reloadPanelSubtitles() },
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text(
+                                                    "Reload",
+                                                    style = MaterialTheme.typography.bodySmall
+                                                )
+                                            }
+                                            OutlinedButton(
+                                                onClick = { startCaptureSync() },
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text(
+                                                    if (captureLoading) "Loading\u2026" else "Capture",
+                                                    style = MaterialTheme.typography.bodySmall
+                                                )
+                                            }
+                                        }
+                                        captureCues?.let { cues ->
+                                            Spacer(Modifier.height(10.dp))
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    "Tap the line you hear now",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = TextPrimary,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                TextButton(onClick = { captureCues = null }) {
+                                                    Text(
+                                                        "Cancel",
+                                                        color = TextSecondary,
+                                                        style = MaterialTheme.typography.bodySmall
+                                                    )
+                                                }
+                                            }
+                                            cues.forEach { (startMs, cueText) ->
+                                                Row(
+                                                    Modifier
+                                                        .fillMaxWidth()
+                                                        .clip(RoundedCornerShape(10.dp))
+                                                        .background(Color.White.copy(alpha = 0.06f))
+                                                        .clickable {
+                                                            // Delay from the CAPTURED
+                                                            // position minus the cue's
+                                                            // start, with the 300ms
+                                                            // reaction-time compensation.
+                                                            setSubtitleDelay(
+                                                                capturePositionMs - startMs - 300L -
+                                                                    settings.subtitleOffsetMs
+                                                            )
+                                                            pokeIndicator(
+                                                                PlayerIndicator.Message(
+                                                                    "Subtitles synced"
+                                                                )
+                                                            )
+                                                        }
+                                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(
+                                                        String.format(
+                                                            java.util.Locale.US,
+                                                            "%d:%02d",
+                                                            startMs / 60000,
+                                                            (startMs / 1000) % 60
+                                                        ),
+                                                        style = MaterialTheme.typography.labelMedium,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = LocalPalette.current.accent
+                                                    )
+                                                    Spacer(Modifier.width(10.dp))
+                                                    Text(
+                                                        cueText,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = TextPrimary,
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                                Spacer(Modifier.height(6.dp))
+                                            }
                                         }
                                     }
-                                    Spacer(Modifier.height(14.dp))
-                                    // Auto sync
-                                    Text(
-                                        "Auto sync",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = TextSecondary
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Row(
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        OutlinedButton(
-                                            onClick = { reloadPanelSubtitles() },
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Text(
-                                                "Reload",
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
-                                        }
-                                        OutlinedButton(
-                                            onClick = { startCaptureSync() },
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Text(
-                                                if (captureLoading) "Loading…"
-                                                else "Capture",
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
-                                        }
-                                    }
-                                    Spacer(Modifier.height(6.dp))
+                                    Spacer(Modifier.height(16.dp))
+                                    // 9. Reset Defaults
                                     TextButton(
                                         onClick = {
-                                            subOffsetOverrideMs = 0L
-                                            applySubtitleTiming()
-                                            subScaleUi = 1f
-                                            settings.subtitleTextSizeScale = 1f
+                                            setSubtitleDelay(0L)
+                                            subFontSpUi = 18
+                                            settings.subtitleFontSizeSp = 18
                                             subBoldUi = false
                                             settings.subtitleBold = false
-                                            subEdgeUi = 2
-                                            settings.subtitleEdgeType = 2
+                                            subColorUi = 0xFFFFFFFF.toInt()
+                                            settings.subtitleTextColor = 0xFFFFFFFF.toInt()
+                                            settings.subtitleBackgroundColor =
+                                                android.graphics.Color.TRANSPARENT
+                                            subEdgeUi = 1
+                                            settings.subtitleEdgeType = 1
                                             subEdgeColorUi = 0xFF000000.toInt()
-                                            settings.subtitleEdgeColor =
-                                                0xFF000000.toInt()
-                                            subBottomUi = 0
-                                            settings.subtitleBottomOffset = 0
+                                            settings.subtitleEdgeColor = 0xFF000000.toInt()
+                                            subBottomUi = 20
+                                            settings.subtitleBottomOffset = 20
                                             playerView?.let { applySubtitleStyle(it) }
                                         }
                                     ) {
@@ -3706,105 +3891,6 @@ fun PlayerScreen(
                                         )
                                     }
                                 }
-                            }
-                        }
-                        captureCues?.let { cues ->
-                            item {
-                                Column(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .padding(top = 12.dp)
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            "Tap the line you hear now",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = TextPrimary,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        TextButton(onClick = { captureCues = null }) {
-                                            Text(
-                                                "Cancel",
-                                                color = TextSecondary,
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
-                                        }
-                                    }
-                                    cues.forEach { (startMs, cueText) ->
-                                        Row(
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .background(Color.White.copy(alpha = 0.06f))
-                                                .clickable {
-                                                    subOffsetOverrideMs =
-                                                        (player.currentPosition - startMs -
-                                                            settings.subtitleOffsetMs)
-                                                            .coerceIn(-10_000L, 10_000L)
-                                                    applySubtitleTiming()
-                                                    captureCues = null
-                                                    pokeIndicator(
-                                                        PlayerIndicator.Message(
-                                                            "Subtitles synced"
-                                                        )
-                                                    )
-                                                }
-                                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                String.format(
-                                                    java.util.Locale.US,
-                                                    "%d:%02d",
-                                                    startMs / 60000,
-                                                    (startMs / 1000) % 60
-                                                ),
-                                                style = MaterialTheme.typography.labelMedium,
-                                                fontWeight = FontWeight.Bold,
-                                                color = LocalPalette.current.accent
-                                            )
-                                            Spacer(Modifier.width(10.dp))
-                                            Text(
-                                                cueText,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = TextPrimary,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                        Spacer(Modifier.height(6.dp))
-                                    }
-                                }
-                            }
-                        }
-                        if (subLoadError && panelSubs().isEmpty()) {
-                            item {
-                                Text(
-                                    "Couldn't load subtitles \u2014 check your connection and try again.",
-                                    color = Color(0xFFEF4444),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.padding(vertical = 8.dp)
-                                )
-                            }
-                        }
-                        item {
-                            TextButton(onClick = { openSubtitleSearch() }) {
-                                Text(
-                                    "Search subtitles online",
-                                    color = LocalPalette.current.accent,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                        subSearchError?.let { err ->
-                            item {
-                                Text(
-                                    err,
-                                    color = TextSecondary,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.padding(start = 4.dp)
-                                )
                             }
                         }
                     }
@@ -4039,6 +4125,178 @@ fun PlayerScreen(
     }
 }
 
+
+/**
+ * One row of the subtitle overlay's Languages rail (v0.14.5): the
+ * selected language is a full WHITE pill with dark text and the track
+ * count sits in a circle (the v0.14.3 reference look).
+ */
+@Composable
+private fun RailLanguageRow(
+    name: String,
+    count: Int?,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) Color.White else Color.Transparent)
+            .clickable { onClick() }
+            .tvFocusRing(RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            name,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = if (selected) Color.Black else TextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (count != null) {
+            Box(
+                Modifier
+                    .size(20.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(if (selected) Color.Black else Color.White),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "$count",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (selected) Color.White else Color.Black
+                )
+            }
+        }
+    }
+}
+
+/** Small white section label above a Style-rail control (v0.14.5). */
+@Composable
+private fun StyleSectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = TextPrimary
+    )
+}
+
+/** One 40dp rounded square stepper button (white 8% background). */
+@Composable
+private fun StyleStepperButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit
+) {
+    Box(
+        Modifier
+            .size(40.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.White.copy(alpha = 0.08f))
+            .clickable { onClick() }
+            .tvFocusRing(RoundedCornerShape(10.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = TextPrimary,
+            modifier = Modifier.size(18.dp)
+        )
+    }
+}
+
+/**
+ * The Style rail's only numeric control (v0.14.5): [−] value [+] —
+ * 40dp rounded buttons flanking a value box (white 6% background,
+ * min-width 84dp). No sliders anywhere in the rail.
+ */
+@Composable
+private fun StyleStepper(
+    value: String,
+    onMinus: () -> Unit,
+    onPlus: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        StyleStepperButton(Icons.Filled.Remove, "Decrease", onMinus)
+        Box(
+            Modifier
+                .widthIn(min = 84.dp)
+                .height(40.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color.White.copy(alpha = 0.06f))
+                .padding(horizontal = 10.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                value,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary,
+                textAlign = TextAlign.Center
+            )
+        }
+        StyleStepperButton(Icons.Filled.Add, "Increase", onPlus)
+    }
+}
+
+/** On/Off chip for the Style rail: accent background when On. */
+@Composable
+private fun StyleChip(
+    label: String,
+    on: Boolean,
+    onClick: () -> Unit
+) {
+    val palette = LocalPalette.current
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (on) palette.accent else Color.White.copy(alpha = 0.08f))
+            .clickable { onClick() }
+            .tvFocusRing(RoundedCornerShape(50))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = if (on) palette.accentText else TextPrimary
+        )
+    }
+}
+
+/** 32dp circular color swatch; the selected one gets a 2dp white border. */
+@Composable
+private fun StyleSwatch(
+    color: Color,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(color)
+            .border(
+                if (selected) 2.dp else 1.dp,
+                if (selected) Color.White else Color.White.copy(alpha = 0.25f),
+                CircleShape
+            )
+            .clickable { onClick() }
+            .tvFocusRing(CircleShape)
+    )
+}
 
 /**
  * One subtitle track card in the player's subtitle panel (v0.14.2):

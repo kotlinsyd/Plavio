@@ -56,15 +56,19 @@ import com.pulsestream.app.ui.theme.TextSecondary
 fun ActorScreen(
     repository: StreamRepository,
     personId: Int,
+    personName: String? = null,
     onBack: () -> Unit,
     onOpenDetail: (type: String, metaId: String) -> Unit
 ) {
-    var person by remember(personId) { mutableStateOf<PersonDetail?>(null) }
-    var loading by remember(personId) { mutableStateOf(true) }
-    LaunchedEffect(personId) {
+    var person by remember(personId, personName) { mutableStateOf<PersonDetail?>(null) }
+    var loading by remember(personId, personName) { mutableStateOf(true) }
+    LaunchedEffect(personId, personName) {
         loading = true
-        // Person data is served by PlavioMeta (server-side key) for everyone.
-        person = runCatching { repository.getPerson(personId) }.getOrNull()
+        // Person data comes from whichever installed metadata addon
+        // serves /person (PlavioMeta is the richest); when none does,
+        // the repository falls back to that addon's search by actor
+        // name (metadata flexibility, owner's order 2026-10-26).
+        person = runCatching { repository.getPerson(personId, personName) }.getOrNull()
         loading = false
     }
 

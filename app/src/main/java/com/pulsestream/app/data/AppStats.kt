@@ -2,7 +2,10 @@ package com.pulsestream.app.data
 
 import android.content.Context
 import com.pulsestream.app.BuildConfig
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
@@ -18,9 +21,15 @@ import java.util.UUID
  * What is sent: a random install UUID (generated on the device;
  * it identifies no person), the app version and the flavor —
  * nothing else. Three tiny GETs to /app-ping:
- *   kind=install   — once per install (first launch)
- *   kind=session   — every launch
- *   kind=heartbeat — every 5 minutes while the app is on screen
+ *   kind=install    — once per install (first launch)
+ *   kind=session    — every launch
+ *   kind=heartbeat  — every 5 minutes while the app is on screen
+ *   kind=session_end — when a foreground session ends, with dur=
+ *                      its real length in seconds (owner's order
+ *                      2026-10-25: precise time-in-app instead of
+ *                      estimating it from heartbeat buckets). The
+ *                      worker stores dur and Stats reports average
+ *                      session length + total time-in-app per day.
  * The server turns these into total installs, daily active users
  * and "online now" (seen within the last 15 minutes), which the
  * owner reads through his Stats view. Nothing is shown in the
@@ -58,12 +67,12 @@ object AppStats {
         }
     }
 
-    private fun ping(context: Context, kind: String): Boolean {
+    private fun ping(context: Context, kind: String, extra: String = ""): Boolean {
         return try {
             val query = "uuid=${URLEncoder.encode(uuid(context), "UTF-8")}" +
                 "&ver=${URLEncoder.encode(BuildConfig.VERSION_NAME, "UTF-8")}" +
                 "&flavor=${URLEncoder.encode(BuildConfig.FLAVOR, "UTF-8")}" +
-                "&kind=$kind"
+                "&kind=$kind" + extra
             val conn = URL("$ENDPOINT?$query").openConnection() as HttpURLConnection
             conn.connectTimeout = 8000
             conn.readTimeout = 8000
@@ -94,5 +103,35 @@ object AppStats {
         val appCtx = context.applicationContext
         if (!enabled(appCtx)) return@withContext
         ping(appCtx, "heartbeat")
+    }
+
+    private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Wall-clock start of the current foreground session (0 = none). */
+    @Volatile
+    private var sessionStartMs: Long = 0L
+
+    /** Marks a foreground session start (MainActivity.onStart). */
+    fun sessionStarted() {
+        if (sessionStartMs == 0L) {
+            sessionStartMs = System.currentTimeMillis()
+        }
+    }
+
+    /**
+     * Closes the current foreground session (MainActivity.onStop) and
+     * reports its real duration. Sub-5-second blips (rotation, picker
+     * round-trips) are dropped instead of pinged, so the server's
+     * averages aren't dragged down by noise.
+     */
+    fun sessionEnded(context: Context) {
+        val start = sessionStartMs
+        sessionStartMs = 0L
+        if (start == 0L) return
+        val seconds = (System.currentTimeMillis() - start) / 1000L
+        if (seconds < 5) return
+        val appCtx = context.applicationContext
+        if (!enabled(appCtx)) return
+        sessionScope.launch { ping(appCtx, "session_end", "&dur=$seconds") }
     }
 }

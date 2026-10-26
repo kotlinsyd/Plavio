@@ -372,12 +372,16 @@ private fun NowDownloadingHero(
     } else null
     val accent = LocalPalette.current.accent
 
+    val palette = LocalPalette.current
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
+            // Onyx neutral (owner's device note 2026-10-26): the old
+            // navy gradient read blue on device — the hero now wears
+            // the theme's own panel charcoal, accent only in details.
             .background(
-                Brush.linearGradient(listOf(Color(0xFF14324A), Color(0xFF0B1A2C)))
+                Brush.linearGradient(listOf(palette.panel, palette.panel))
             )
             .border(1.dp, GlassBorder, RoundedCornerShape(18.dp))
             .padding(16.dp)
@@ -455,7 +459,7 @@ private fun NowDownloadingHero(
                     onClick = onPause,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = accent,
-                        contentColor = Color(0xFF06231B)
+                        contentColor = LocalPalette.current.accentText
                     )
                 ) {
                     Icon(

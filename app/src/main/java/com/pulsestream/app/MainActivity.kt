@@ -12,6 +12,8 @@ import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -253,6 +255,17 @@ class MainActivity : ComponentActivity() {
         var wasInPip: Boolean = false
 
         /**
+         * Direct stop hook registered by PlayerScreen while it lives:
+         * stops + releases its ExoPlayer immediately. The PiP-dismissal
+         * rework (v0.14.4) calls this from the activity, because on the
+         * owner's Samsung an X-closed PiP stops the activity without
+         * the player screen ever collecting the dismissal counter —
+         * its audio then played on until the app was killed.
+         */
+        @Volatile
+        var pipEmergencyStop: (() -> Unit)? = null
+
+        /**
          * Fired by the PiP play/pause RemoteAction's broadcast receiver.
          * PlayerScreen collects this and toggles the ExoPlayer.
          */
@@ -441,6 +454,8 @@ class MainActivity : ComponentActivity() {
      * On entering PiP, (re)applies params so the play/pause RemoteAction
      * is present with the correct icon from the first frame.
      */
+    private val pipHandler = Handler(Looper.getMainLooper())
+
     override fun onPictureInPictureModeChanged(
         isInPictureInPictureMode: Boolean,
         newConfig: Configuration
@@ -450,7 +465,40 @@ class MainActivity : ComponentActivity() {
         if (isInPictureInPictureMode) {
             wasInPip = true
             setPictureInPictureParams(buildPipParams(this, pipIsPlaying))
+        } else if (wasInPip) {
+            // PiP exit has two shapes: expand back to fullscreen (the
+            // activity returns to RESUMED and onResume clears wasInPip)
+            // or the X close (the activity heads for stopped, and on
+            // some devices — the owner's Samsung — nothing in the
+            // player screen runs again). Re-check shortly: still not
+            // resumed means dismissed, so stop playback from here.
+            pipHandler.postDelayed({
+                if (wasInPip && !isInPictureInPictureMode &&
+                    !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+                ) {
+                    handlePipDismissal()
+                }
+            }, 600L)
         }
+    }
+
+    /**
+     * Runs once per PiP dismissal: signals the player screen (counter)
+     * AND stops playback directly through its registered hook, so the
+     * audio dies even when the stopped activity never recomposes.
+     */
+    private fun handlePipDismissal() {
+        if (!wasInPip) return
+        wasInPip = false
+        pipDismissedCount.value += 1
+        runCatching { pipEmergencyStop?.invoke() }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Time-in-app (owner's order 2026-10-25): arm the session clock;
+        // onStop reports the real foreground duration to Stats.
+        com.pulsestream.app.data.AppStats.sessionStarted()
     }
 
     override fun onResume() {
@@ -462,13 +510,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        // PiP dismissed with X: activity stops but is NOT destroyed and the
-        // player screen never leaves composition — without this signal its
-        // audio keeps playing until the app is killed from recents
-        // (owner's device report, 2026-10-25).
+        com.pulsestream.app.data.AppStats.sessionEnded(this)
+        // PiP dismissed with X: activity stops but is NOT destroyed and
+        // the player screen never leaves composition — the dismissal
+        // handler stops playback directly instead of relying on the
+        // screen hearing about it (owner's device reports 2026-10-25
+        // and 2026-10-26 — the counter-only path did not fire on his
+        // Samsung, audio played until the app was killed).
         if (wasInPip && !isInPictureInPictureMode) {
-            wasInPip = false
-            pipDismissedCount.value += 1
+            handlePipDismissal()
         }
     }
 
@@ -1085,6 +1135,27 @@ private fun PulseNavGraph(
         }
     }
 
+    // External-player protected-link warning (owner's order 2026-10-26):
+    // non-null while the warning popup is up for that request.
+    var externalWarnReq by remember { mutableStateOf<PlaybackRequest?>(null) }
+    var externalWarnHide by remember { mutableStateOf(false) }
+
+    /**
+     * External handoff with the warning gate: protected links show the
+     * one-time warning popup first (rendered below the NavHost); a
+     * failed launch falls back to the built-in player.
+     */
+    fun playExternal(req: PlaybackRequest) {
+        val ctx = activity ?: appContext
+        if (ExternalPlayer.needsWarning(ctx, req)) {
+            externalWarnHide = false
+            externalWarnReq = req
+        } else if (!ExternalPlayer.play(ctx, req)) {
+            repository.pendingPlayback = req
+            navController.navigate(Routes.PLAYER)
+        }
+    }
+
     /**
      * Single choke point for all playback. Honors Settings > Playback >
      * "Preferred player". Built-in behavior is unchanged; external/ask modes
@@ -1096,13 +1167,7 @@ private fun PulseNavGraph(
                 repository.pendingPlayback = req
                 navController.navigate(Routes.PLAYER)
             }
-            PlayerChoice.EXTERNAL -> {
-                // Toast shown inside on failure; fall back to built-in.
-                if (!ExternalPlayer.play(activity ?: appContext, req)) {
-                    repository.pendingPlayback = req
-                    navController.navigate(Routes.PLAYER)
-                }
-            }
+            PlayerChoice.EXTERNAL -> playExternal(req)
             PlayerChoice.ASK -> {
                 val act = activity
                 if (act == null || act.isFinishing) {
@@ -1112,9 +1177,12 @@ private fun PulseNavGraph(
                     android.app.AlertDialog.Builder(act)
                         .setTitle("Play with")
                         .setItems(arrayOf("Built-in player", "External player")) { _, which ->
-                            if (which == 1 && ExternalPlayer.play(act, req)) return@setItems
-                            repository.pendingPlayback = req
-                            navController.navigate(Routes.PLAYER)
+                            if (which == 1) {
+                                playExternal(req)
+                            } else {
+                                repository.pendingPlayback = req
+                                navController.navigate(Routes.PLAYER)
+                            }
                         }
                         .setNegativeButton("Cancel", null)
                         .show()
@@ -1248,6 +1316,9 @@ private fun PulseNavGraph(
             repository = repository,
             onOpenDetail = { addonId, type, metaId ->
                 openResolvedDetail(addonId, type, metaId)
+            },
+            onOpenActor = { personId, personName ->
+                navController.navigate(Routes.actor(personId, personName))
             }
         )
         }
@@ -1431,8 +1502,8 @@ private fun PulseNavGraph(
                 onOpenDetail = { relatedAddonId, relatedType, relatedMetaId ->
                     openResolvedDetail(relatedAddonId, relatedType, relatedMetaId)
                 },
-                onOpenActor = { personId ->
-                    navController.navigate("actor/$personId")
+                onOpenActor = { personId, personName ->
+                    navController.navigate(Routes.actor(personId, personName))
                 }
             )
         }
@@ -1441,12 +1512,19 @@ private fun PulseNavGraph(
             arguments = listOf(
                 androidx.navigation.navArgument("personId") {
                     type = androidx.navigation.NavType.IntType
+                },
+                androidx.navigation.navArgument("name") {
+                    type = androidx.navigation.NavType.StringType
+                    nullable = true
+                    defaultValue = null
                 }
             )
         ) { entry ->
             ActorScreen(
                 repository = repository,
                 personId = entry.arguments!!.getInt("personId"),
+                personName = entry.arguments!!.getString("name")
+                    ?.let { runCatching { Routes.dec(it) }.getOrNull() },
                 onBack = { navController.popBackStack() },
                 onOpenDetail = { type, metaId ->
                     // PlavioMeta addon id — detail resolves meta/streams from
@@ -1479,5 +1557,54 @@ private fun PulseNavGraph(
                 }
             )
         }
+    }
+
+    // Protected-link warning for the preferred-player flow (owner's
+    // order 2026-10-26 — same popup as the player's External button).
+    externalWarnReq?.let { warnReq ->
+        val warnCtx = activity ?: appContext
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { externalWarnReq = null },
+            title = { androidx.compose.material3.Text("Protected link") },
+            text = {
+                androidx.compose.foundation.layout.Column {
+                    androidx.compose.material3.Text(
+                        "This source uses protected headers, which stay in Plavio — " +
+                            "the other app may not be able to play this link."
+                    )
+                    androidx.compose.foundation.layout.Spacer(
+                        androidx.compose.ui.Modifier.height(8.dp)
+                    )
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = externalWarnHide,
+                            onCheckedChange = { externalWarnHide = it }
+                        )
+                        androidx.compose.material3.Text("Don't show again")
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    if (externalWarnHide) {
+                        ExternalPlayer.setWarningSuppressed(warnCtx, true)
+                    }
+                    externalWarnReq = null
+                    if (!ExternalPlayer.play(warnCtx, warnReq)) {
+                        repository.pendingPlayback = warnReq
+                        navController.navigate(Routes.PLAYER)
+                    }
+                }) {
+                    androidx.compose.material3.Text("Open anyway")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { externalWarnReq = null }) {
+                    androidx.compose.material3.Text("Cancel")
+                }
+            }
+        )
     }
 }

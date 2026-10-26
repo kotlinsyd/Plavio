@@ -836,12 +836,7 @@ private fun AddonCard(
                 androidx.compose.material3.Switch(
                     checked = addon.enabled,
                     onCheckedChange = onToggle,
-                    colors = androidx.compose.material3.SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = palette.accent,
-                        uncheckedThumbColor = Color.White,
-                        uncheckedTrackColor = Color(0xFF3A3A4A)
-                    )
+                    colors = settingsSwitchColors()
                 )
             }
 
