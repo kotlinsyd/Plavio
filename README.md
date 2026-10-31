@@ -78,8 +78,8 @@ Kotlin · Jetpack Compose (Material 3) · Navigation Compose · Media3 ExoPlayer
 ```
 app/src/main/java/com/pulsestream/app/
 ├── data/
-│   ├── StremioApi.kt        # addon protocol: manifest / catalog / meta / stream
-│   ├── StremioParser.kt     # resilient parsing for real-world addon data
+│   ├── Addon API client - manifest / catalog / meta / stream requests
+│   ├── Addon response parser - resilient parsing for real-world addon data
 │   ├── StreamRepository.kt  # multi-addon merging (below)
 │   └── db/                  # Room: installed addons (+capabilities), continue-watching
 ├── ui/
