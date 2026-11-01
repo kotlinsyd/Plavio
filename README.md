@@ -13,6 +13,10 @@ A beautiful open-source streaming app for Android with a built-in player. Instal
 | ![Plavio home screen](screenshots/pulse-home.png) | ![Plavio live TV](screenshots/pulse-live.png) |
 | Settings | Addons |
 | ![Plavio settings](screenshots/pulse-settings.png) | ![Plavio addon manager](screenshots/pulse-addons.png) |
+| Library | Search |
+| ![Plavio library](screenshots/pulse-library.png) | ![Plavio search](screenshots/pulse-search.png) |
+| Streams | Integrations |
+| ![Plavio streams](screenshots/pulse-streams.png) | ![Plavio integrations](screenshots/pulse-integrations.png) |
 
 ## Features
 
